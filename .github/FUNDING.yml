@@ -1,0 +1,16 @@
+# The "Sponsor" button of BananaV's repository on GitHub
+# (https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository).
+#
+# Donations through PIX (Brazil) for now; GitHub Sponsors, for other
+# countries, once it is approved (uncomment `github`). The README's and the
+# website's donate links say the same: keep them in step.
+
+# github: [TODO_GITHUB_SPONSORS_USERNAME]       # GitHub Sponsors: up to 4 usernames
+# open_collective: TODO_OPEN_COLLECTIVE_SLUG    # opencollective.com/<slug>
+# liberapay: TODO_LIBERAPAY_USERNAME            # liberapay.com/<username>
+# ko_fi: TODO_KO_FI_USERNAME                    # ko-fi.com/<username>
+# patreon: TODO_PATREON_USERNAME                # patreon.com/<username>
+# buy_me_a_coffee: TODO_BUY_ME_A_COFFEE_NAME    # buymeacoffee.com/<name>
+# polar: TODO_POLAR_ORGANIZATION                # polar.sh/<organization>
+# thanks_dev: TODO_THANKS_DEV_ID                # thanks.dev/<id>
+custom: ["https://pixgg.com/Acaso"]                # PIX, for donations from Brazil
