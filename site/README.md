@@ -14,9 +14,10 @@ last choice, then the browser's language, picks.
 
 - Preview it locally: `python -m http.server 8765 --directory site`, then open
   http://localhost:8765.
-- Screenshots (`assets/img/screen-*.png`) come from the screen tests
-  (`cargo test -p bv-ui-egui --test telas_inicio -- --ignored`, and `--test
-  telas`), cropped; each has its `.attribution` sidecar and a line in
+- Screenshots (`assets/img/screen-*.png`) come from the screen tests made for
+  the site (`cargo test -p bv-ui-egui --test telas_site -- --ignored`: the
+  whole window at 1920 × 1080, `target/telas/site_*.png`), their margin
+  trimmed; each has its `.attribution` sidecar and a line in
   ATTRIBUTION.md. They show only BananaV and media it generates.
 - Donations: the Donate links go to the donate band (`#support`), whose
   buttons are Ko-fi, for donations from any country

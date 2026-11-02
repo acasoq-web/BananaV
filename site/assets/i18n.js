@@ -5,6 +5,11 @@
 window.BANANAV_I18N = {
   "pt-BR": {
     // The redesign: what's new, the numbers, the tour, support.
+    "An event's effects window with Vignette and Swirl, the swirl's center as a handle on the Video Preview": "A janela de efeitos de um evento com Vinheta e Redemoinho, o centro do redemoinho como alça na pré-visualização",
+    "Chain effects on any event, track or the output, and drag their handles right on the preview.": "Encadeie efeitos em qualquer evento, trilha ou na saída, e arraste as alças direto na pré-visualização.",
+    "The Color Grading panel with its color wheels under the timeline and the Video Preview, beside the Video Scopes": "O painel de Matização de cores com as rodas de cor, embaixo da timeline e da pré-visualização, ao lado dos scopes de vídeo",
+    "The Mixing Console with a strip for each track and bus, and the busses' automation envelopes on the timeline": "O console de mixagem com um canal para cada trilha e barramento, e os envelopes de automação dos barramentos na timeline",
+    "A strip for every track, bus and effects chain, and automation envelopes right on the timeline.": "Um canal para cada trilha, barramento e cadeia de efeitos, e envelopes de automação direto na timeline.",
     "Tour": "Tour",
     "New": "Novo",
     "Ultra Alpha 2 is out, and the source code is public": "A Ultra Alpha 2 saiu, e o código-fonte agora é público",
