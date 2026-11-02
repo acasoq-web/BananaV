@@ -1,0 +1,18 @@
+[package]
+name = "bv-ac3"
+description = "Dolby Digital (AC-3) decoding from ATSC A/52."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+bv-bitstream.workspace = true
+
+[lints]
+workspace = true

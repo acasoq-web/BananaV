@@ -1,0 +1,22 @@
+# The names BananaV's contributors chose to be credited by.
+#
+# Everyone who contributes is credited by their GitHub username, with or
+# without an entry here. Anything more is up to you: add YOUR OWN entry
+# below, in your own pull request, committed by you (AGENTS.md, "Credits").
+#
+# - Never add, guess, edit or copy anyone else's entry or name: not from git
+#   configurations, commit authors, emails or GitHub profiles.
+# - AI agents add an entry only for the person they work for, only when that
+#   person asked, and with exactly the names they gave.
+# - To change or remove your names, edit or delete your entry in a pull
+#   request.
+#
+# Copy this block, replace your-github-username and keep only the fields you
+# want (every field is optional):
+#
+#   [people.your-github-username]
+#   real_name = "Your Name"         # your name, as you want it written
+#   display_name = "Nickname"       # a name you go by
+#   sync_github_name = true         # or: use the name on your public GitHub profile
+#
+# Keep the entries sorted by username, case-insensitively.

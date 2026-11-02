@@ -1,0 +1,11 @@
+asset:        arimo.rs (the glyph outlines in GLYPHS)
+title:        Arimo Bold's outlines of the characters the Timecode effect writes
+              (digits and separators), in the font's units
+author:       The Arimo Project Authors
+source:       https://github.com/googlefonts/arimo
+license:      OFL-1.1
+license-file: crates/effects/fonts/OFL.txt
+added:        2026-10-20 by @acasoq-web
+notes:        The quadratic contours and advances of 16 glyphs of Arimo Bold, copied
+              from the font into Rust tables and drawn by crates/effects/src/text.rs.
+              The packages ship the license as Arimo-OFL.txt.

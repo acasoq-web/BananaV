@@ -1,0 +1,11 @@
+asset:        social-preview.png
+title:        BananaV's social preview for GitHub (1280 x 640)
+author:       @acasoq-web, BananaV's owner (the logo); BananaV contributors (the layout)
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-22 by @acasoq-web
+notes:        social-preview.svg rendered by Chromium with Inter installed. The text
+              is Inter (OFL-1.1) drawn into the picture; no font file is included. Set
+              in the repository's Settings › General › Social preview. The name and
+              the logo as marks: TRADEMARKS.md (draft).

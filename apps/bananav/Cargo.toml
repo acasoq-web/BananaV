@@ -1,0 +1,17 @@
+[package]
+name = "bananav"
+description = "BananaV — video editor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 7
+
+[dependencies]
+bv-ui-egui.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+asset:        testdata/ (20 files: *.png and the *.rgba pixels they decode to)
+title:        PNG files of several color types and bit depths, for bv-png's tests
+author:       BananaV contributors
+source:       original work, generated for the tests
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-20 by @acasoq-web
+notes:        Synthetic patterns of flat colors, 61 x 37 pixels (no photographs).
+              src_*.png were written by ffmpeg, one per pixel format; the other two
+              (a 2-bit palette with transparency, and Adam7-interlaced RGBA) by
+              Pillow and by an Adam7 generator. Each .rgba holds the raw RGBA
+              pixels that the writing implementation decodes from its .png.

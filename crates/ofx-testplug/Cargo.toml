@@ -1,0 +1,21 @@
+[package]
+name = "bv-ofx-testplug"
+description = "OFX plug-ins written for the host's tests (a filter, a generator, a transition): never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bv-ofx-sys.workspace = true
+bv-cuda.workspace = true
+
+[lints]
+workspace = true

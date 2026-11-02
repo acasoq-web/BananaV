@@ -1,0 +1,6 @@
+/target
+/test-media/generated
+*.bvproj.bak
+# Reference material of other programs, kept on the computer of whoever
+# studies them, never committed (AGENTS.md, "Clean-room code").
+/local-reference/

@@ -1,0 +1,30 @@
+[package]
+name = "bv-effects"
+description = "BananaV's own video effects, written as OpenFX plug-ins: built into BananaV, and the same code as a bundle any OFX host loads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-core.workspace = true
+bv-lut.workspace = true
+bv-ofx-sys.workspace = true
+bv-track.workspace = true
+# Titles & Text: the computer's fonts' outlines and metrics (TrueType and
+# CFF), MIT or Apache-2.0; egui already brings it.
+skrifa = "0.44"
+
+[dev-dependencies]
+bv-ofx.workspace = true
+bv-png.workspace = true
+# wgpu's own shader compiler: GL Transition's code made WGSL, checked
+# without a graphics card.
+naga = { version = "30", features = ["wgsl-in"] }
+
+[lints]
+workspace = true

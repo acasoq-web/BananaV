@@ -1,0 +1,24 @@
+[package]
+name = "bv-wic"
+description = "The Windows Imaging Component: HEIF (HEIC) and JPEG XR encoders; WebP, HEIF, AVIF, JPEG XR, camera RAW and icon decoders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+[lints]
+workspace = true

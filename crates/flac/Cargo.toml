@@ -1,0 +1,18 @@
+[package]
+name = "bv-flac"
+description = "FLAC written from the format specification (RFC 9639): fixed and LPC prediction, stereo decorrelation, Rice-coded residuals, MD5 of the audio and Vorbis comments."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+bv-bitstream.workspace = true
+
+[lints]
+workspace = true

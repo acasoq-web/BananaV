@@ -1,0 +1,13 @@
+asset:        bananav.png
+title:        BananaV's application icon at 256 x 256 pixels
+author:       @acasoq-web, BananaV's owner
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-22 by @acasoq-web (copied here on 2026-10-22)
+notes:        bananav-icon.svg rendered at 256 px, corners transparent. Used by the
+              AppImage and the main window's icon (window_icon in
+              crates/ui-egui/src/lib.rs).
+              The name and the logo as marks: TRADEMARKS.md (draft).
+              A copy of packaging/icons/bananav.png, for the README and the
+              website: keep the two identical.

@@ -1,0 +1,21 @@
+[package]
+name = "bv-vst3"
+description = "The VST 3 host: loads VST 3 modules, lists their audio effects, runs them (buses, processing, parameters, states) and shows their editors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-vst3-sys.workspace = true
+libloading = "0.8"
+
+[dev-dependencies]
+bv-vst3-testplug = { path = "../vst3-testplug" }
+
+[lints]
+workspace = true

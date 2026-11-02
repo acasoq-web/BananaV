@@ -1,0 +1,51 @@
+[package]
+name = "bv-mf"
+description = "The system's codecs: Media Foundation on Windows, FFmpeg on Linux. Decoding of H.264, HEVC, AAC, MP3 and more, and the encoders of the processor and the graphics cards, hardware-accelerated when available."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-bitstream.workspace = true
+bv-core.workspace = true
+
+[dev-dependencies]
+bv-mp4.workspace = true
+bv-platform.workspace = true
+bv-png.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+# FFmpeg's libraries (libavcodec, libavformat, libswscale, libswresample)
+# on Linux. Building needs their development files, pkg-config and libclang
+# (Ubuntu: libavcodec-dev libavformat-dev libswscale-dev libswresample-dev
+# pkg-config libclang-dev). `--cfg bv_no_ffmpeg` builds without them (no
+# media on Linux): for checking the code from a computer without them.
+[target.'cfg(all(target_os = "linux", not(bv_no_ffmpeg)))'.dependencies]
+ffmpeg-sys-next = { version = "9", default-features = false, features = [
+    "avcodec",
+    "avformat",
+    "swscale",
+    "swresample",
+] }
+libc = "0.2"
+
+[lints]
+workspace = true

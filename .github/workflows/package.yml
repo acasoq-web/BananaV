@@ -1,0 +1,206 @@
+# BananaV's packages, made by hand (Actions › Packages › Run workflow, or
+# `gh workflow run package.yml --ref <branch>`), kept as the run's
+# artifacts — nothing is published:
+#
+# - Windows x64 and ARM64: BananaV.exe (the C runtime inside), a README,
+#   the license texts and the third-party notices
+#   (tools/third_party_notices.py) in a zip;
+# - Linux x64 and ARM64: an AppImage, built on Ubuntu 22.04 for every
+#   distribution since (glibc 2.35), with FFmpeg's libraries built here
+#   under the LGPL (packaging/linux/build_ffmpeg.sh), the third-party and
+#   system libraries' notices, and (from the x64 job) a tarball of the
+#   LGPL libraries' sources, FFmpeg's and LAME's.
+
+name: Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which packages
+        type: choice
+        options: [all, windows, linux]
+        default: all
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    if: inputs.platforms != 'linux'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+      - name: BananaV
+        env:
+          # No Visual C++ runtime to install.
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release -p bananav
+      - name: Zip
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="BananaV-$version-${GITHUB_SHA::7}-windows-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp target/release/bananav.exe "dist/$name/BananaV.exe"
+          cp packaging/windows/README.txt "dist/$name/"
+          cp LICENSE "dist/$name/LICENSE.txt"
+          cp crates/effects/fonts/OFL.txt "dist/$name/Arimo-OFL.txt"
+          cp crates/ocio/licenses/ACES.md "dist/$name/ACES-license.md"
+          cp crates/effects/licenses/gl-transitions.md "dist/$name/GL-Transitions-license.md"
+          cp crates/effects/licenses/lensfun.md "dist/$name/Lensfun-database-license.md"
+          cp crates/vst3-sys/licenses/vst3-pluginterfaces.txt "dist/$name/VST3-SDK-interfaces-license.txt"
+          python tools/third_party_notices.py "$(rustc -vV | sed -n 's/^host: //p')" > "dist/$name/THIRD-PARTY-NOTICES.txt"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}
+          retention-days: 30
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    if: inputs.platforms != 'windows'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+            tool: x86_64
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            tool: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm pkg-config git file libclang-dev libasound2-dev \
+            libva-dev libdrm-dev zlib1g-dev libbz2-dev liblzma-dev \
+            libdav1d-dev libvpx-dev libaom-dev libopus-dev libmp3lame-dev \
+            libxkbcommon0 libxkbcommon-x11-0
+          # Not in every release: FFmpeg goes without the missing ones.
+          for p in libsvtav1enc-dev libopenh264-dev libkvazaar-dev; do
+            sudo apt-get install -y --no-install-recommends "$p" || echo "no $p"
+          done
+      - name: FFmpeg (kept)
+        id: ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-lgpl
+          key: ffmpeg-${{ matrix.arch }}-${{ hashFiles('packaging/linux/build_ffmpeg.sh') }}
+      - name: FFmpeg (built)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh packaging/linux/build_ffmpeg.sh "$PWD/ffmpeg-lgpl"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+      - name: BananaV
+        run: |
+          export PKG_CONFIG_PATH="$PWD/ffmpeg-lgpl/lib/pkgconfig"
+          cargo build --release -p bananav
+      - name: AppImage
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="BananaV-$version-${GITHUB_SHA::7}-linux-${{ matrix.arch }}"
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.tool }}.AppImage"
+          chmod +x linuxdeploy-*.AppImage
+          export LD_LIBRARY_PATH="$PWD/ffmpeg-lgpl/lib"
+          # The window library loads xkbcommon at run time (not linked, so
+          # not found by linuxdeploy): inside, for systems without it.
+          lib="/usr/lib/$(gcc -dumpmachine)"
+          ./linuxdeploy-${{ matrix.tool }}.AppImage --appimage-extract-and-run \
+            --appdir AppDir -e target/release/bananav \
+            -l "$lib/libxkbcommon.so.0" -l "$lib/libxkbcommon-x11.so.0" \
+            -d packaging/linux/bananav.desktop -i packaging/icons/bananav.png --output appimage
+          mkdir -p "dist/$name"
+          mv BananaV*.AppImage "dist/$name/$name.AppImage"
+          cp packaging/linux/README.txt "dist/$name/"
+          cp LICENSE "dist/$name/LICENSE.txt"
+          cp ffmpeg-lgpl/share/licenses/ffmpeg/COPYING.LGPLv2.1 "dist/$name/FFmpeg-LGPL-2.1.txt"
+          cp ffmpeg-lgpl/share/licenses/ffmpeg/LICENSE.md "dist/$name/FFmpeg-license.md"
+          cp crates/effects/fonts/OFL.txt "dist/$name/Arimo-OFL.txt"
+          cp crates/ocio/licenses/ACES.md "dist/$name/ACES-license.md"
+          cp crates/effects/licenses/gl-transitions.md "dist/$name/GL-Transitions-license.md"
+          cp crates/effects/licenses/lensfun.md "dist/$name/Lensfun-database-license.md"
+          cp crates/vst3-sys/licenses/vst3-pluginterfaces.txt "dist/$name/VST3-SDK-interfaces-license.txt"
+          python3 tools/third_party_notices.py "$(rustc -vV | sed -n 's/^host: //p')" > "dist/$name/THIRD-PARTY-NOTICES.txt"
+          # The system libraries the AppImage carries: each one's Debian
+          # copyright file (their licenses and notices).
+          notices="dist/$name/SYSTEM-LIBRARIES-NOTICES.txt"
+          printf 'BananaV - the system libraries inside the AppImage\n\nEach library, the Ubuntu 22.04 package it comes from and that package'"'"'s\ncopyright file (its licenses). FFmpeg'"'"'s libraries are BananaV'"'"'s own build\n(FFmpeg-LGPL-2.1.txt, FFmpeg-license.md).\n\n' > "$notices"
+          for f in AppDir/usr/lib/*.so*; do
+            lib=$(basename "$f")
+            pkg=$(dpkg -S "$lib" 2>/dev/null | head -1 | cut -d: -f1) || true
+            if [ -z "$pkg" ]; then
+              printf -- '%s: not from an Ubuntu package (FFmpeg'"'"'s, see above)\n\n' "$lib" >> "$notices"
+              continue
+            fi
+            printf -- '------------------------------------------------------------------------------\n%s (Ubuntu package %s)\n\n' "$lib" "$pkg" >> "$notices"
+            cat "/usr/share/doc/$pkg/copyright" >> "$notices" 2>/dev/null || echo "(no copyright file)" >> "$notices"
+            printf '\n' >> "$notices"
+          done
+          ldd target/release/bananav
+          echo "NAME=$name" >> "$GITHUB_ENV"
+      - name: LGPL sources
+        # FFmpeg's and LAME's sources go with the packages (the LGPL asks
+        # for them): FFmpeg's tag build_ffmpeg.sh builds, the script, and
+        # Ubuntu's source package of the LAME the AppImage carries.
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          src="BananaV-$version-${GITHUB_SHA::7}-LGPL-sources"
+          ffmpeg=$(sed -n 's/^ffmpeg_version=${FFMPEG_VERSION:-\(.*\)}$/\1/p' packaging/linux/build_ffmpeg.sh)
+          mkdir -p "$src/lame"
+          curl -fsSL -o "$src/FFmpeg-n$ffmpeg.tar.gz" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$ffmpeg.tar.gz"
+          cp packaging/linux/build_ffmpeg.sh "$src/"
+          sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
+          sudo apt-get update -qq
+          (cd "$src/lame" && apt-get source --download-only lame)
+          printf 'The sources of the LGPL libraries in BananaV %s'"'"'s Linux packages:\n- FFmpeg n%s (FFmpeg-n%s.tar.gz), built by build_ffmpeg.sh;\n- LAME, Ubuntu 22.04'"'"'s source package (lame/).\n' "$version" "$ffmpeg" "$ffmpeg" > "$src/README.txt"
+          mkdir -p dist-src
+          tar -czf "dist-src/$src.tar.gz" "$src"
+          echo "SRC=$src" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x64'
+        with:
+          name: ${{ env.SRC }}
+          path: dist-src/${{ env.SRC }}.tar.gz
+          retention-days: 30
+      - name: A start, on a virtual screen
+        # Opens and runs for a while without a crash (it has no card: the
+        # software Vulkan).
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb xauth mesa-vulkan-drivers
+          set +e
+          timeout 20 xvfb-run -a "dist/$NAME/$NAME.AppImage" --appimage-extract-and-run
+          code=$?
+          if [ "$code" = 124 ]; then
+            echo "BananaV was still running after 20 s"
+          else
+            echo "::warning::BananaV stopped with exit code $code on the virtual screen"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}
+          retention-days: 30

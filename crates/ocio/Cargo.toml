@@ -1,0 +1,18 @@
+[package]
+name = "bv-ocio"
+description = "Color management as OpenColorIO's: its configurations (profile versions 1 and 2) read and their conversions worked out, ACES 1.3's transforms among its builtins, and BananaV's own ACES configuration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+bv-lut.workspace = true
+
+[lints]
+workspace = true

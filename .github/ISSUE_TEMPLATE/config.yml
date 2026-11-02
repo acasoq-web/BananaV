@@ -1,0 +1,11 @@
+# The issue chooser: bug reports and feature requests have forms; questions
+# go to Discord (the server's invite link; GitHub refuses a contact link
+# that is not a URL).
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and help
+    url: https://discord.gg/vtC7Yasz98
+    about: Ask questions, get help with a project and talk with other users on Discord.
+  - name: Report a security problem
+    url: https://github.com/acasoq-web/BananaV/security/advisories/new
+    about: Security problems are reported privately, never in a public issue.

@@ -1,0 +1,18 @@
+[package]
+name = "bv-mp4"
+description = "MP4, M4A and QuickTime MOV writing from the ISO/IEC 14496 specifications: H.264, HEVC, AV1 and ProRes video, AAC, ALAC and PCM audio, metadata and chapters; MPEG-2 program streams in DVD-sized packs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+bv-bitstream.workspace = true
+
+[lints]
+workspace = true

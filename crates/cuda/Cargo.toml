@@ -1,0 +1,17 @@
+[package]
+name = "bv-cuda"
+description = "NVIDIA's CUDA driver, loaded at run time where the computer has it: its devices, memory on them, copies, and memory the graphics card's other interfaces share — for plug-ins that render with CUDA."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libloading = "0.8"
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "bv-media"
+description = "BananaV media sources: opens files and generators and delivers linear frames and samples."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 3
+wasm = true
+
+[dependencies]
+bv-core.workspace = true
+bv-color.workspace = true
+bv-timeline.workspace = true
+bv-png.workspace = true
+bv-wav.workspace = true
+bv-image.workspace = true
+bv-wic.workspace = true
+bv-ac3.workspace = true
+bv-prores.workspace = true
+bv-mf.workspace = true
+bv-mp4.workspace = true
+
+# OFX generators (plug-ins do not run in the browser build).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bv-ofx.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BananaV
+Comment=Video editor
+Exec=bananav %f
+Icon=bananav
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-bvproj;

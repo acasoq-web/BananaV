@@ -1,0 +1,11 @@
+asset:        exr/ (16 OpenEXR files)
+title:        OpenEXR files of every compression, half and full floats, for
+              bv-image's tests
+author:       BananaV contributors
+source:       original work, generated for the tests
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-20 by @acasoq-web
+notes:        A synthetic test pattern with values up to 2, saved by Blender 5.0.1
+              with each of its EXR codecs (none, RLE, ZIPS, ZIP, PIZ, PXR24, DWAA,
+              DWAB) at 16 and 32 bits.

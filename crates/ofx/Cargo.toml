@@ -1,0 +1,31 @@
+[package]
+name = "bv-ofx"
+description = "The OpenFX host: finds, describes and runs OFX image effect plug-ins (filters, transitions, generators)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-core = { workspace = true, features = ["serde"] }
+bv-ofx-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bv-cuda.workspace = true
+libloading = "0.8"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+bv-ofx-testplug = { path = "../ofx-testplug" }
+bv-png.workspace = true
+
+[lints]
+workspace = true

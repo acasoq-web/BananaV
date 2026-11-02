@@ -1,0 +1,27 @@
+[package]
+name = "bv-mixer"
+description = "BananaV audio mixing: sums the audible tracks at the project rate, with envelopes and loudness metering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 4
+wasm = true
+
+[dependencies]
+bv-core.workspace = true
+bv-timeline.workspace = true
+bv-media.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bv-vst3.workspace = true
+
+[dev-dependencies]
+bv-vst3-sys.workspace = true
+bv-vst3-testplug = { path = "../vst3-testplug" }
+
+[lints]
+workspace = true

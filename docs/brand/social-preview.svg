@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+<title>BananaV social preview</title>
+<!-- The source of social-preview.png (1280 x 640, GitHub's social preview):
+     BananaV's transparent logo on a dark background, with the name and a
+     line of what it is, set in Inter (SIL Open Font License 1.1). Render it
+     with the Inter fonts installed, for example in a browser. -->
+<defs>
+  <radialGradient id="bg" cx="0.3" cy="0.5" r="0.85">
+    <stop offset="0" stop-color="#35363D"/>
+    <stop offset="0.55" stop-color="#27282D"/>
+    <stop offset="1" stop-color="#18191C"/>
+  </radialGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#FDD825" stop-opacity="0.16"/>
+    <stop offset="1" stop-color="#FDD825" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<rect width="1280" height="640" fill="url(#bg)"/>
+<circle cx="350" cy="320" r="300" fill="url(#glow)"/>
+<!-- The logo (bananav-logo-transparent.svg), its 600-unit grid at 540 px. -->
+<g transform="translate(80 50) scale(0.9)">
+  <path d="M500 100H400L293.7 356.63A285 285 0 0 0 370.08 413.66Z" fill="#FDD825"/>
+  <path d="M216.17 124.93C204 134 194 152 195 172C195.3 182 200.9 190.2 203.86 208A300 300 0 0 0 369.23 430C386 441 403 451 411 462L402 477C347 467 320.62 455.53 260 420.53A220 220 0 0 1 150 230C150 185 172 150 195 119Z" fill="#FDD825"/>
+  <path d="M195 119C172 150 155 185 155 230A215 215 0 0 0 262.5 416.2C323.12 451.2 346 463 401 473L404 491C399 494 394 497.5 388 499.4A270 270 0 0 1 100.19 240C100.19 215 108 190 130 170C150 152 168 142 176 122C178.5 114 186.83 105.07 185.83 102.07Z" fill="#DA9E08"/>
+  <path d="M411 462C417 470 416 484 404 491C395 483 395 468 411 462Z" fill="#6B3E12"/>
+  <ellipse cx="201" cy="113.5" rx="19" ry="9.5" transform="rotate(37 201 113.5)" fill="#6B3E12"/>
+</g>
+<g font-family="Inter, 'Inter Display', sans-serif">
+  <text x="610" y="318" font-size="136" font-weight="700" fill="#F4F4F6" letter-spacing="-3">Banana<tspan fill="#FDD825">V</tspan></text>
+  <rect x="616" y="352" width="96" height="6" rx="3" fill="#FDD825"/>
+  <text x="614" y="420" font-size="36" font-weight="400" fill="#C9CAD1">Free and open-source video editor</text>
+  <text x="614" y="474" font-size="28" font-weight="500" fill="#8E8F98">Windows · Linux · Written in Rust</text>
+</g>
+</svg>

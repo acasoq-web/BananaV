@@ -1,0 +1,48 @@
+[package]
+name = "bv-platform"
+description = "Small OS services the window library does not provide, on Windows and Linux: the user's folders, the mouse position while files are dragged in, key labels of the keyboard layout and dialog windows owned by the main one, the free space of a disk, the time of day, MIDI ports, and what long jobs need: processor, memory, disk and graphics card use, taskbar progress, a sound at the end and shutting down; and burning discs (disc images, audio CDs)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Imapi",
+    "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# COM objects of BananaV's own (`#[implement]`: the disc image's stream).
+windows-core = "0.62"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# libX11 and libXrandr, loaded at run time like the window library does
+# (nothing to link; nothing missing on a Wayland-only system).
+x11-dl = "2.21"
+# The same ALSA bindings the audio output uses (cpal): the MIDI ports.
+alsa = "0.11"

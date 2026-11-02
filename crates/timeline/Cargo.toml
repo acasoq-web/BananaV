@@ -1,0 +1,22 @@
+[package]
+name = "bv-timeline"
+description = "BananaV project model: media, tracks, events, editing and undo."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 2
+wasm = true
+
+[dependencies]
+bv-core = { workspace = true, features = ["serde"] }
+bv-color.workspace = true
+bv-ocio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

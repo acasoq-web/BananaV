@@ -1,0 +1,4 @@
+# Shell scripts and desktop entries keep LF on every system (Git Bash and
+# Linux read them so).
+*.sh text eol=lf
+*.desktop text eol=lf

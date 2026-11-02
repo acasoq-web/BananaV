@@ -1,0 +1,68 @@
+# cargo-deny's configuration (https://embarkstudios.github.io/cargo-deny/).
+#
+#   cargo install cargo-deny --locked
+#   cargo deny check licenses    # every dependency's license is allowed
+#   cargo deny check             # licenses, bans, sources and advisories
+#
+# The licenses are the gate. Advisories (RustSec's database) are reported as
+# they are published, with no exceptions written here: a finding is fixed
+# by an update, or an exception is added with its reason in a pull request.
+#
+# BananaV is GPL-3.0-or-later, so every crate it builds on must be under a
+# license the GPL version 3 accepts. The list below is the permissive and
+# weak-copyleft licenses the dependencies use today; add a license only after
+# checking that it is compatible with GPL-3.0 (the FSF's list:
+# https://www.gnu.org/licenses/license-list.html) and saying why in the pull
+# request. Licenses some crates are dual-licensed under (an "A OR B" where
+# one side is allowed) need no entry for the other side.
+
+[graph]
+# Every platform BananaV builds for (Windows, Linux; x64 and ARM64) and
+# every other one, so a dependency used on one system only is checked too.
+targets = []
+all-features = true
+
+[licenses]
+# BananaV's own crates (GPL-3.0-or-later) are checked like any other.
+allow = [
+    "GPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = [
+    # egui's default interface fonts (Ubuntu Light, Hack, Noto Emoji and an
+    # emoji icon font) ship inside the crate. Fonts under these licenses are
+    # separate works that may be bundled with software under any license.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # The Rust bindings to FFmpeg's libraries (Linux). The WTFPL is a
+    # permissive license the FSF lists as GPL-compatible. FFmpeg itself is
+    # linked from the system, or from the LGPL build of the Linux packages
+    # (packaging/linux/build_ffmpeg.sh).
+    { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
+]
+
+[licenses.private]
+ignore = false
+
+[bans]
+# Several versions of a crate cost build time but are not wrong: reported,
+# never refused.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+# crates.io only; the vendored crates (vendor/) are path dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

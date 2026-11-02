@@ -1,0 +1,145 @@
+# BananaV's checks on GitHub's machines.
+#
+# Every push to main: Linux x64 runs `cargo xtask ci` (rustfmt, layers,
+# clippy, tests, wasm). The full run — Linux ARM64 and Windows ARM64 too —
+# only when started by hand (Actions › CI › Run workflow), to spare the
+# account's minutes. Windows x64 is checked on the development computer.
+#
+# Started by hand with a crate's name (`gh workflow run ci.yml --ref <branch>
+# -f crate=bv-mf`), each machine checks and tests only that crate: quick
+# rounds while working on one part. `-f ignored=true` runs its ignored tests
+# too (the media oracles, which compare with the ffmpeg tool).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also check Linux ARM64 and Windows ARM64"
+        type: boolean
+        default: true
+      crate:
+        description: "Only this crate (bv-mf, bv-media…) instead of everything"
+        type: string
+        default: ""
+      ignored:
+        description: "With a crate: its ignored tests too (the media oracles; Linux x64 gets ffmpeg)"
+        type: boolean
+        default: false
+      test:
+        description: "With a crate: only this test target (importar, exportar…)"
+        type: string
+        default: ""
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug info: smaller caches, faster links.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+  # ALSA for sound and MIDI; FFmpeg's libraries (and pkg-config and libclang
+  # to bind them) for media; Mesa's software Vulkan (lavapipe) for the
+  # graphics card tests.
+  LINUX_PACKAGES: >-
+    libasound2-dev pkg-config libclang-dev
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
+    mesa-vulkan-drivers libvulkan1
+
+jobs:
+  linux-x64:
+    name: Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_PACKAGES
+      - name: The ffmpeg tool (media oracles)
+        if: inputs.ignored
+        run: sudo apt-get install -y --no-install-recommends ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Everything
+        if: inputs.crate == ''
+        run: cargo xtask ci
+      - name: One crate
+        if: inputs.crate != ''
+        env:
+          CRATE: ${{ inputs.crate }}
+          IGNORED: ${{ inputs.ignored }}
+          TEST: ${{ inputs.test }}
+        run: |
+          cargo clippy -p "$CRATE" --all-targets -- -D warnings
+          if [ -n "$TEST" ]; then set -- --test "$TEST"; else set --; fi
+          if [ "$IGNORED" = "true" ]; then
+            cargo test -p "$CRATE" "$@" --no-fail-fast -- --include-ignored --nocapture
+          else
+            cargo test -p "$CRATE" "$@" --no-fail-fast
+          fi
+      - name: X11 services, on a virtual X server
+        if: inputs.crate == '' || inputs.crate == 'bv-platform'
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+          xvfb-run -a cargo test -p bv-platform --quiet
+      - name: Keep FFmpeg's bindings
+        # The Rust declarations generated from this machine's FFmpeg headers:
+        # to check the FFmpeg code from a computer without them.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-bindings
+          path: target/debug/build/ffmpeg-sys-next-*/out/bindings.rs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-arm64:
+    name: Linux ARM64
+    if: github.event_name == 'workflow_dispatch' && inputs.full
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $LINUX_PACKAGES
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check and test
+        env:
+          CRATE: ${{ inputs.crate }}
+        run: |
+          if [ -n "$CRATE" ]; then set -- -p "$CRATE"; else set -- --workspace; fi
+          cargo clippy "$@" --all-targets -- -D warnings
+          cargo test "$@" --quiet --no-fail-fast
+
+  windows-arm64:
+    name: Windows ARM64
+    if: github.event_name == 'workflow_dispatch' && inputs.full
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check and test
+        shell: bash
+        env:
+          CRATE: ${{ inputs.crate }}
+        run: |
+          if [ -n "$CRATE" ]; then set -- -p "$CRATE"; else set -- --workspace; fi
+          cargo clippy "$@" --all-targets -- -D warnings
+          cargo test "$@" --quiet --no-fail-fast

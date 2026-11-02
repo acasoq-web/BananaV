@@ -1,0 +1,42 @@
+[package]
+name = "bv-ui-egui"
+description = "BananaV interface in egui: timeline, preview, media and shortcuts, in English and Brazilian Portuguese. Isolated from the engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 6
+
+[dependencies]
+bv-core.workspace = true
+bv-timeline.workspace = true
+bv-engine.workspace = true
+bv-ofx.workspace = true
+bv-vst3.workspace = true
+bv-platform.workspace = true
+bv-zip.workspace = true
+bv-png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# x11 and wayland: the two kinds of Linux desktop (nothing on Windows).
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }
+rfd = "0.17"
+egui_dock = { version = "0.21", features = ["serde"] }
+
+[lints]
+workspace = true
+
+# Linux: the window library eframe uses, to ask it for X11 windows (see
+# `run`).
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
+[dev-dependencies]
+bv-ofx-testplug = { path = "../ofx-testplug" }
+bv-render.workspace = true
+bv-wav.workspace = true
+egui_kittest = { version = "0.36", features = ["wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

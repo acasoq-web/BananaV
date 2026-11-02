@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+description = "BananaV CI automation: formatting, lints, tests, layer rules and the wasm build."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+# Ferramenta de desenvolvimento: fora do grafo de camadas do produto.
+layer = "tool"
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

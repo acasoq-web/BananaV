@@ -1,0 +1,63 @@
+name: Feature request
+description: Something BananaV should do, or do differently.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the idea! Please search the [existing issues](https://github.com/acasoq-web/BananaV/issues) and the [roadmap](https://github.com/acasoq-web/BananaV/blob/main/docs/ROADMAP.md) first.
+
+        Describe what you want to do in words, and link to public documentation or specifications when they help. Please don't attach screenshots, presets or other files of proprietary programs: BananaV is developed clean-room (see [AGENTS.md](https://github.com/acasoq-web/BananaV/blob/main/AGENTS.md)).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editing and the timeline
+        - Video effects, color and compositing
+        - Transitions and generated media
+        - Audio and mixing
+        - Importing and rendering media
+        - Interchange (EDL, XML, OpenTimelineIO)
+        - Plug-ins (OpenFX, VST 3)
+        - The interface, shortcuts and layouts
+        - Translations
+        - Speed
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The task or the problem, as you would explain it to another editor.
+      placeholder: When I cut an interview, I want to…
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: How should BananaV do it?
+      description: What you would click, type or see; what the result should be.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways you tried or thought of.
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Links to public documentation, specifications or open-source projects that do something similar.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues and this idea is not there yet.
+          required: true
+        - label: I follow the [Code of Conduct](https://github.com/acasoq-web/BananaV/blob/main/CODE_OF_CONDUCT.md).
+          required: true

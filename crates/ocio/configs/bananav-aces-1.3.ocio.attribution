@@ -1,0 +1,11 @@
+asset:        bananav-aces-1.3.ocio
+title:        BananaV's ACES 1.3 OpenColorIO configuration
+author:       BananaV contributors
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-20 by @acasoq-web
+notes:        Written by tools/ocio_config.py: matrices worked out from the published
+              primaries and white points; transforms are OpenColorIO's builtins. The
+              color spaces' aliases repeat the names other ACES configurations use, so
+              projects and files that name them still match.

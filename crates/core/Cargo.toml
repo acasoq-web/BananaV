@@ -1,0 +1,24 @@
+[package]
+name = "bv-core"
+description = "BananaV fundamental types: time in ticks, rates, frames and audio buffers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+wasm = true
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

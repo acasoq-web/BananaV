@@ -1,0 +1,18 @@
+[package]
+name = "bv-image"
+description = "Image files from their specifications: written (BMP, TIFF, DPX, OpenEXR, DDS, JPEG) and read (BMP, GIF, JPEG, TIFF, TGA, DPX, OpenEXR, Photoshop)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+bv-deflate.workspace = true
+
+[lints]
+workspace = true

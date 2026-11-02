@@ -1,0 +1,11 @@
+asset:        social-preview.svg
+title:        BananaV's social preview, the source of social-preview.png
+author:       @acasoq-web, BananaV's owner (the logo); BananaV contributors (the layout)
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-22 by @acasoq-web
+notes:        The transparent logo on a dark gradient, the name and two lines of text
+              set in Inter (The Inter Project Authors, OFL-1.1; the font is not
+              embedded, only named). The name and the logo as marks: TRADEMARKS.md
+              (draft).

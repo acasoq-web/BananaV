@@ -1,0 +1,42 @@
+[package]
+name = "bv-gpu"
+description = "BananaV video compositing on the graphics card (wgpu): the same frames as bv-render's, on any NVIDIA, AMD or Intel card."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 4
+
+[dependencies]
+bv-core.workspace = true
+bv-color.workspace = true
+bv-timeline.workspace = true
+bv-media.workspace = true
+bv-effects.workspace = true
+bv-lut.workspace = true
+bv-ocio.workspace = true
+bv-cuda.workspace = true
+wgpu = "30"
+pollster = "1"
+bytemuck = "1"
+# wgpu's own shader compiler: kernels made at run time (GL Transition's
+# code) checked before the card compiles them, and every kernel in tests.
+naga = { version = "30", features = ["wgsl-in"] }
+
+# Buffers shared with CUDA: Direct3D 12's side (wgpu's own `windows`).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+bv-render.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "bv-mpeg2"
+description = "MPEG-2 video (ISO/IEC 13818-2) encoding: Main profile, 4:2:0, I and P frame pictures, closed GOPs, a rate control and a motion search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+wasm = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "bv-wav"
+description = "WAV (RIFF/WAVE and RF64), Wave64 and AIFF written from scratch: random-access WAV reading and streaming writing with markers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[lints]
+workspace = true

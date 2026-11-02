@@ -1,0 +1,605 @@
+# Written by tools/ocio_config.py: change the script, not this file.
+ocio_profile_version: 2.1
+
+environment:
+  {}
+search_path: ""
+strictparsing: true
+luma: [0.2126, 0.7152, 0.0722]
+name: bananav-aces-1.3
+description: |
+  BananaV's color management: the Academy Color Encoding System 1.3.
+  ACES2065-1 is the scene reference, CIE XYZ (D65) the displays'.
+  Written for BananaV; its transforms are OpenColorIO's builtins and standard
+  transforms, so other OpenColorIO hosts read it too.
+
+roles:
+  aces_interchange: ACES2065-1
+  cie_xyz_d65_interchange: CIE-XYZ-D65
+  color_picking: sRGB - Texture
+  color_timing: ACEScct
+  compositing_log: ACEScct
+  data: Raw
+  default: ACES2065-1
+  matte_paint: sRGB - Texture
+  scene_linear: ACEScg
+  texture_paint: ACEScct
+
+file_rules:
+  - !<Rule> {name: Default, colorspace: ACES2065-1}
+
+shared_views:
+  - !<View> {name: Un-tone-mapped, view_transform: Un-tone-mapped, display_colorspace: <USE_DISPLAY_NAME>}
+
+displays:
+  sRGB:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Video, display_colorspace: sRGB}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+  Rec.709:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Video, display_colorspace: Rec.709}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+  Rec.2020:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Video, display_colorspace: Rec.2020}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+  Display P3:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Video, display_colorspace: Display P3}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+  P3-D65:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Cinema, display_colorspace: P3-D65}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+  P3-DCI:
+    - !<View> {name: ACES, view_transform: ACES 1.0 - SDR Cinema, display_colorspace: P3-DCI}
+    - !<Views> [Un-tone-mapped]
+    - !<View> {name: Raw, colorspace: Raw}
+
+active_displays: [sRGB, Rec.709, Rec.2020, Display P3, P3-D65, P3-DCI]
+active_views: [ACES, Un-tone-mapped, Raw]
+inactive_colorspaces: [CIE-XYZ-D65]
+
+looks:
+  - !<Look>
+    name: ACES 1.3 Reference Gamut Compression
+    process_space: ACES2065-1
+    description: "Brings the colors outside AP1, the strongest of cameras and lights, inside it."
+    transform: !<BuiltinTransform> {style: ACES-LMT - ACES 1.3 Reference Gamut Compression}
+  - !<Look>
+    name: Blue Light Artifact Fix
+    process_space: ACES2065-1
+    description: "Desaturates the bright blues of sirens and LEDs, which would clip or shift hue."
+    transform: !<BuiltinTransform> {style: ACES-LMT - BLUE_LIGHT_ARTIFACT_FIX}
+
+default_view_transform: Un-tone-mapped
+
+view_transforms:
+  - !<ViewTransform>
+    name: ACES 1.0 - SDR Video
+    description: "The ACES reference rendering and output for video monitors in a dim surround."
+    from_scene_reference: !<BuiltinTransform> {style: ACES-OUTPUT - ACES2065-1_to_CIE-XYZ-D65 - SDR-VIDEO_1.0}
+  - !<ViewTransform>
+    name: ACES 1.0 - SDR Cinema
+    description: "The ACES reference rendering and output for cinema projectors in a dark surround."
+    from_scene_reference: !<BuiltinTransform> {style: ACES-OUTPUT - ACES2065-1_to_CIE-XYZ-D65 - SDR-CINEMA_1.0}
+  - !<ViewTransform>
+    name: Un-tone-mapped
+    description: "Scene light shown as it is, without a rendering."
+    from_scene_reference: !<BuiltinTransform> {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}
+
+display_colorspaces:
+  - !<ColorSpace>
+    name: CIE-XYZ-D65
+    aliases: [cie_xyz_d65]
+    family: ""
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The displays' connection space, CIE XYZ under D65, 1 the display's white."
+    isdata: false
+    categories: [file-io]
+    encoding: display-linear
+
+  - !<ColorSpace>
+    name: sRGB
+    aliases: [sRGB - Display, srgb_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "A computer monitor, sRGB curve and Rec. 709 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_sRGB}
+
+  - !<ColorSpace>
+    name: Rec.709
+    aliases: [Rec.1886 Rec.709 - Display, rec1886_rec709_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "A video monitor, BT.1886 (gamma 2.4) and Rec. 709 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_REC.1886-REC.709}
+
+  - !<ColorSpace>
+    name: Rec.2020
+    aliases: [Rec.1886 Rec.2020 - Display, rec1886_rec2020_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "A video monitor, BT.1886 (gamma 2.4) and Rec. 2020 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_REC.1886-REC.2020}
+
+  - !<ColorSpace>
+    name: Display P3
+    aliases: [Display P3 - Display, displayp3_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Display P3, sRGB curve with P3 primaries and a D65 white."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_DisplayP3}
+
+  - !<ColorSpace>
+    name: P3-D65
+    aliases: [P3-D65 - Display, g26_p3d65_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "A cinema projector, gamma 2.6 with P3 primaries and a D65 white."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_G2.6-P3-D65}
+
+  - !<ColorSpace>
+    name: P3-DCI
+    aliases: [P3-DCI - Display, g26_p3dci_display]
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "A cinema projector, gamma 2.6 with P3 primaries and the DCI white."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_G2.6-P3-DCI-BFD}
+
+colorspaces:
+  - !<ColorSpace>
+    name: ACES2065-1
+    aliases: [aces2065_1, lin_ap0, ACES - ACES2065-1]
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The Academy Color Encoding Specification, SMPTE ST 2065-1: AP0 primaries, scene light."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+
+  - !<ColorSpace>
+    name: ACEScc
+    aliases: [acescc_ap1, ACES - ACEScc]
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The ACES log encoding for grading, AP1 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ACEScc_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: ACEScct
+    aliases: [acescct_ap1, ACES - ACEScct]
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "ACEScc with a toe, as the logs of film scans, AP1 primaries."
+    isdata: false
+    categories: [file-io, working-space]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ACEScct_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: ACEScg
+    aliases: [lin_ap1, ACES - ACEScg]
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The ACES working space for rendering and compositing: AP1 primaries, scene light."
+    isdata: false
+    categories: [file-io, working-space]
+    encoding: scene-linear
+    to_scene_reference: !<BuiltinTransform> {style: ACEScg_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: ACESproxy
+    aliases: [acesproxy10i_ap1, ACES - ACESproxy]
+    family: ACES
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The ACES integer log encoding for previews on set, 10-bit, AP1 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ACESproxy10i_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: Linear Rec.709 (sRGB)
+    aliases: [lin_rec709_srgb, lin_srgb, lin_rec709, Utility - Linear - sRGB, Utility - Linear - Rec.709]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with Rec. 709 (sRGB) primaries."
+    isdata: false
+    categories: [file-io, working-space]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.439632981919491, 0.382988698151554, 0.177378319928955, 0, 0.0897764429588423, 0.81343942874898, 0.0967841282921771, 0, 0.0175411703831727, 0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    aliases: [lin_rec2020, Utility - Linear - Rec.2020]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with Rec. 2020 primaries."
+    isdata: false
+    categories: [file-io, working-space]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.679085634706912, 0.157700914643159, 0.163213450649929, 0, 0.0460020030800595, 0.859054673002907, 0.0949433239170327, 0, -0.000573943187616184, 0.0284677684080264, 0.97210617477959, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear P3-D65
+    aliases: [lin_p3d65, Utility - Linear - P3-D65]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with P3 primaries and a D65 white."
+    isdata: false
+    categories: [file-io, working-space]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.518933487597981, 0.28625658638669, 0.194809926015329, 0, 0.0738593830470598, 0.819845163936985, 0.106295453015954, 0, -0.000307011368446638, 0.0438070502536223, 0.956499961114824, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: sRGB - Texture
+    aliases: [srgb_tx, srgb_texture, Utility - sRGB - Texture]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The sRGB curve and Rec. 709 primaries, read as scene light: pictures, graphics."
+    isdata: false
+    categories: [file-io, texture]
+    encoding: sdr-video
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055}
+        - !<MatrixTransform> {matrix: [0.439632981919491, 0.382988698151554, 0.177378319928955, 0, 0.0897764429588423, 0.81343942874898, 0.0967841282921771, 0, 0.0175411703831727, 0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Camera Rec.709
+    aliases: [rec709_camera, Utility - Rec.709 - Camera]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "The Rec. 709 camera curve (BT.709 OETF) and primaries, read as scene light."
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099}
+        - !<MatrixTransform> {matrix: [0.439632981919491, 0.382988698151554, 0.177378319928955, 0, 0.0897764429588423, 0.81343942874898, 0.0967841282921771, 0, 0.0175411703831727, 0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: ARRI LogC3 (EI800)
+    aliases: [arri_logc3_ei800, Input - ARRI - V3 LogC (EI800) - Wide Gamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "LogC3 at EI 800 with ARRI Wide Gamut 3."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ARRI_ALEXA-LOGC-EI800-AWG_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: ARRI LogC4
+    aliases: [arri_logc4]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "LogC4 with ARRI Wide Gamut 4."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ARRI_LOGC4_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: S-Log3 S-Gamut3
+    aliases: [slog3_sgamut3, Input - Sony - S-Log3 - S-Gamut3]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "S-Log3 with S-Gamut3."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: SONY_SLOG3-SGAMUT3_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: S-Log3 S-Gamut3.Cine
+    aliases: [slog3_sgamutcine, Input - Sony - S-Log3 - S-Gamut3.Cine]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "S-Log3 with S-Gamut3.Cine."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: SONY_SLOG3-SGAMUT3.CINE_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: S-Log3 Venice S-Gamut3
+    aliases: [slog3_venice_sgamut3]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "S-Log3 with the VENICE camera's S-Gamut3."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: SONY_SLOG3-SGAMUT3-VENICE_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: S-Log3 Venice S-Gamut3.Cine
+    aliases: [slog3_venice_sgamutcine]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "S-Log3 with the VENICE camera's S-Gamut3.Cine."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: SONY_SLOG3-SGAMUT3.CINE-VENICE_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: V-Log V-Gamut
+    aliases: [vlog_vgamut, Input - Panasonic - V-Log - V-Gamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "V-Log with V-Gamut."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: PANASONIC_VLOG-VGAMUT_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: Log3G10 REDWideGamutRGB
+    aliases: [log3g10_rwg, Input - RED - Log3G10 - REDWideGamutRGB]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Log3G10 with REDWideGamutRGB."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: RED_LOG3G10-RWG_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: Apple Log
+    aliases: [apple_log]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Apple Log, Rec. 2020 primaries."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: APPLE_LOG_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: BMDFilm WideGamut Gen5
+    aliases: [bmdfilm_widegamut_gen5]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Blackmagic Film Gen 5 with its Wide Gamut."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<LogCameraTransform> {base: 2.71828182845905, log_side_slope: 0.0869287606549122, log_side_offset: 0.530013339229194, lin_side_slope: 1, lin_side_offset: 0.00549407243225781, lin_side_break: 0.005, linear_slope: 8.28360593240249, direction: inverse}
+        - !<MatrixTransform> {matrix: [0.647109198301485, 0.242602495274132, 0.110288306424383, 0, 0.0651941282237326, 1.02509576795121, -0.0902898961749434, 0, -0.0275525557151543, -0.0805752076627216, 1.10812776337788, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: DaVinci Intermediate WideGamut
+    aliases: [davinci_intermediate_widegamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "DaVinci Intermediate with DaVinci Wide Gamut."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<LogCameraTransform> {base: 2, log_side_slope: 0.07329248, log_side_offset: 0.51304736, lin_side_slope: 1, lin_side_offset: 0.0075, lin_side_break: 0.00262409, linear_slope: 10.44426855, direction: inverse}
+        - !<MatrixTransform> {matrix: [0.748270290272982, 0.167694659554328, 0.0840350501726905, 0, 0.0208421234689101, 1.11190474268894, -0.132746866157851, 0, -0.0915122574225729, -0.127746712807307, 1.21925897022988, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear ARRI Wide Gamut 3
+    aliases: [lin_arri_wide_gamut_3, Input - ARRI - Linear - ALEXA Wide Gamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with ARRI Wide Gamut 3."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.680205505106279, 0.236136601606481, 0.0836578932872397, 0, 0.0854149797421403, 1.01747087860704, -0.102885858349182, 0, 0.00205652166929683, -0.0625625003847921, 1.0605059787155, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear ARRI Wide Gamut 4
+    aliases: [lin_arri_wide_gamut_4]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with ARRI Wide Gamut 4."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.750957362824734, 0.144422786709757, 0.104619850465509, 0, 0.000821837079380157, 1.007397584885, -0.00821942196438356, 0, -0.000499952143533472, -0.000854177231436971, 1.00135412937497, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear BMD WideGamut Gen5
+    aliases: [lin_bmd_widegamut_gen5]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with Blackmagic Wide Gamut Gen 5."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.647109198301485, 0.242602495274132, 0.110288306424383, 0, 0.0651941282237326, 1.02509576795121, -0.0902898961749434, 0, -0.0275525557151543, -0.0805752076627216, 1.10812776337788, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear DaVinci WideGamut
+    aliases: [lin_davinci_widegamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with DaVinci Wide Gamut."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.748270290272982, 0.167694659554328, 0.0840350501726905, 0, 0.0208421234689101, 1.11190474268894, -0.132746866157851, 0, -0.0915122574225729, -0.127746712807307, 1.21925897022988, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: CanonLog2 CinemaGamut D55
+    aliases: [canonlog2_cinemagamut_d55, Input - Canon - Canon-Log2 - Cinema Gamut Daylight]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Canon Log 2 with Cinema Gamut (daylight)."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: CANON_CLOG2-CGAMUT_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: CanonLog3 CinemaGamut D55
+    aliases: [canonlog3_cinemagamut_d55, Input - Canon - Canon-Log3 - Cinema Gamut Daylight]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Canon Log 3 with Cinema Gamut (daylight)."
+    isdata: false
+    categories: [file-io]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: CANON_CLOG3-CGAMUT_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: Linear CinemaGamut D55
+    aliases: [lin_cinemagamut_d55, Input - Canon - Linear - Canon Cinema Gamut Daylight]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with Canon Cinema Gamut (daylight)."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.763064454775734, 0.149021161137061, 0.0879143840872055, 0, 0.00365745670512385, 1.10696038037621, -0.110617837081339, 0, -0.0094077940457189, -0.218383304989987, 1.22779109903571, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear V-Gamut
+    aliases: [lin_vgamut, Input - Panasonic - Linear - V-Gamut]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with Panasonic V-Gamut."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.724377889680834, 0.168295571802143, 0.107326538517023, 0, 0.0208830538162872, 0.986865083588332, -0.00774813740461902, 0, -0.0090583506997012, -0.00509588449352879, 1.01415423519323, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear REDWideGamutRGB
+    aliases: [lin_redwidegamutrgb, Input - RED - Linear - REDWideGamutRGB]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with REDWideGamutRGB."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.785058804068093, 0.0838587565440846, 0.131082439387823, 0, 0.0231738348454754, 1.08789754919233, -0.111071384037806, 0, -0.0737604353682082, -0.314590072290208, 1.38835050765842, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear S-Gamut3
+    aliases: [lin_sgamut3, Input - Sony - Linear - S-Gamut3]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with S-Gamut3."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.75298259539984, 0.143370216235557, 0.103647188364603, 0, 0.0217076974414429, 1.01531883550528, -0.0370265329467194, 0, -0.00941605274963355, 0.00337041785882368, 1.00604563489081, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear S-Gamut3.Cine
+    aliases: [lin_sgamut3cine, Input - Sony - Linear - S-Gamut3.Cine]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with S-Gamut3.Cine."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.638788667185979, 0.272351433711262, 0.0888598991027594, 0, -0.00391590602528234, 1.0880732308974, -0.0841573248721176, 0, -0.0299072021239151, -0.0264325799101947, 1.05633978203411, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear Venice S-Gamut3
+    aliases: [lin_venice_sgamut3, Input - Sony - Linear - Venice S-Gamut3]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with the VENICE camera's S-Gamut3."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.793329741146435, 0.0890786256206773, 0.117591633232888, 0, 0.0155810585252581, 1.03271230692988, -0.0482933654551393, 0, -0.0188647477991488, 0.0127694120973433, 1.00609533570181, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Linear Venice S-Gamut3.Cine
+    aliases: [lin_venice_sgamut3cine, Input - Sony - Linear - Venice S-Gamut3.Cine]
+    family: Camera
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Scene light with the VENICE camera's S-Gamut3.Cine."
+    isdata: false
+    categories: [file-io]
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.674257092126513, 0.220571735923398, 0.10517117195009, 0, -0.00931360607857164, 1.10595886142466, -0.0966452553460854, 0, -0.0382090673002313, -0.017938376600236, 1.05614744390047, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: Raw
+    aliases: [raw, Utility - Raw]
+    family: Utility
+    equalitygroup: ""
+    bitdepth: 32f
+    description: "Values that are not colors, which nothing converts."
+    isdata: true
+    categories: [file-io]
+    encoding: data

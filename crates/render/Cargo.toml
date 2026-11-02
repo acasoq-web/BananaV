@@ -1,0 +1,23 @@
+[package]
+name = "bv-render"
+description = "BananaV CPU video compositing: linear light, 32-bit float, premultiplied alpha."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 4
+wasm = true
+
+[dependencies]
+bv-core.workspace = true
+bv-color.workspace = true
+bv-timeline.workspace = true
+bv-media.workspace = true
+bv-ocio.workspace = true
+bv-track.workspace = true
+
+[lints]
+workspace = true

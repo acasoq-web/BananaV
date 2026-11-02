@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Layers: every crate declares `[package.metadata.bananav] layer = N`.
+# `cargo xtask layers` checks that a crate only depends on lower layers.
+#   0  foundation (time, bitstream, deflate)
+#   1  formats and OS services (color, PNG, WAV, Media Foundation, platform)
+#   2  project model (timeline)
+#   3  media sources (files and generators → frames and samples)
+#   4  processing (video compositing, audio mixing)
+#   5  engine (playback, export)
+#   6  interface
+#   7  applications
+
+[workspace.dependencies]
+bv-core = { path = "crates/core" }
+bv-cuda = { path = "crates/cuda" }
+bv-bitstream = { path = "crates/bitstream" }
+bv-ac3 = { path = "crates/ac3" }
+bv-deflate = { path = "crates/deflate" }
+bv-zip = { path = "crates/zip" }
+bv-lut = { path = "crates/lut" }
+bv-track = { path = "crates/track" }
+bv-png = { path = "crates/png" }
+bv-image = { path = "crates/image" }
+bv-wav = { path = "crates/wav" }
+bv-flac = { path = "crates/flac" }
+bv-prores = { path = "crates/prores" }
+bv-mf = { path = "crates/mf" }
+bv-mp4 = { path = "crates/mp4" }
+bv-mpeg2 = { path = "crates/mpeg2" }
+bv-dvd = { path = "crates/dvd" }
+bv-platform = { path = "crates/platform" }
+bv-vst3-sys = { path = "crates/vst3-sys" }
+bv-vst3 = { path = "crates/vst3" }
+bv-wic = { path = "crates/wic" }
+bv-color = { path = "crates/color" }
+bv-ocio = { path = "crates/ocio" }
+bv-timeline = { path = "crates/timeline" }
+bv-media = { path = "crates/media" }
+bv-render = { path = "crates/render" }
+bv-gpu = { path = "crates/gpu" }
+bv-mixer = { path = "crates/mixer" }
+bv-engine = { path = "crates/engine" }
+bv-ui-egui = { path = "crates/ui-egui" }
+bv-ofx-sys = { path = "crates/ofx-sys" }
+bv-ofx = { path = "crates/ofx" }
+bv-effects = { path = "crates/effects" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# egui_dock and egui-winit with BananaV's changes (see vendor/egui_dock/BANANAV.md
+# and vendor/egui-winit/BANANAV.md).
+[patch.crates-io]
+egui_dock = { path = "vendor/egui_dock" }
+egui-winit = { path = "vendor/egui-winit" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+# `--cfg bv_no_ffmpeg`: Linux builds without FFmpeg (see crates/mf).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bv_no_ffmpeg)"] }
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+
+[profile.dev]
+# Codecs e composição ficam inutilizáveis sem otimização, mesmo em debug.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

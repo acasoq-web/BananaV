@@ -1,0 +1,11 @@
+asset:        lenses.rs (the lens table LENSES)
+title:        Lens Correction's lenses: their names and PanoTools distortion coefficients
+author:       The lensfun project and its contributors
+source:       https://github.com/lensfun/lensfun (data/db of version 0.3.95)
+license:      CC-BY-SA-4.0 (an adaptation of CC-BY-SA-3.0 data, as its section 4(b) allows)
+license-file: crates/effects/licenses/lensfun.md
+added:        2026-11-02 by @acasoq-web
+notes:        The 636 lenses Lens Correction offers, each with the a, b and c of the first
+              distortion calibration the database lists for it (poly3's k1 as b), made by a
+              script from the database's XML files; the attribution and the changes are in
+              the license file, which the packages ship as Lensfun-database-license.md.

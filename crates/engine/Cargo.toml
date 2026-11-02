@@ -1,0 +1,44 @@
+[package]
+name = "bv-engine"
+description = "BananaV engine: playback with the audio clock as master, background preview and rendering to files."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 5
+
+[dependencies]
+bv-core.workspace = true
+bv-color.workspace = true
+bv-timeline.workspace = true
+bv-media.workspace = true
+bv-png.workspace = true
+bv-image.workspace = true
+bv-wav.workspace = true
+bv-flac.workspace = true
+bv-prores.workspace = true
+bv-mf.workspace = true
+bv-mp4.workspace = true
+bv-mpeg2.workspace = true
+bv-dvd.workspace = true
+bv-wic.workspace = true
+bv-render.workspace = true
+bv-mixer.workspace = true
+bv-gpu.workspace = true
+bv-ofx.workspace = true
+bv-cuda.workspace = true
+bv-effects.workspace = true
+bv-track.workspace = true
+bv-platform.workspace = true
+cpal = "0.18"
+serde.workspace = true
+
+[dev-dependencies]
+bv-media.workspace = true
+bv-ofx-testplug = { path = "../ofx-testplug" }
+
+[lints]
+workspace = true

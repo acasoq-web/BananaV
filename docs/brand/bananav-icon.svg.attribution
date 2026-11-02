@@ -1,0 +1,12 @@
+asset:        bananav-icon.svg
+title:        BananaV's application icon: the logo (a banana and the bar of a V) on a dark rounded square
+author:       @acasoq-web, BananaV's owner
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-22 by @acasoq-web (copied here on 2026-10-22)
+notes:        Original design, written as SVG paths on a 600 x 600 grid. Colors #27282D,
+              #FDD825, #DA9E08 and #6B3E12. The source of the other versions.
+              The name and the logo as marks: TRADEMARKS.md (draft).
+              A copy of packaging/icons/bananav-icon.svg, for the README and the
+              website: keep the two identical.

@@ -1,0 +1,11 @@
+asset:        testdata/ (4 files)
+title:        Data and its zlib streams, for bv-deflate's tests
+author:       BananaV contributors
+source:       original work, generated for the tests
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-20 by @acasoq-web
+notes:        palavras.txt is a random sequence of a few words (video, render,
+              banana, clip…) and misto.bin a mix of random bytes and repeated runs;
+              palavras.zz and misto.zz are their zlib streams, written by zlib
+              itself.

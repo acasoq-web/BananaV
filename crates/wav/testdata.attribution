@@ -1,0 +1,10 @@
+asset:        testdata/ (5 WAV files)
+title:        WAV files of each sample format and a 5.1 file, for bv-wav's tests
+author:       BananaV contributors
+source:       original work, generated for the tests
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-10-20 by @acasoq-web
+notes:        A sine tone of 0.1 s at 48 kHz written by ffmpeg as 8-bit unsigned,
+              16- and 24-bit integer and 32-bit float WAV, and in six channels
+              (WAVE_FORMAT_EXTENSIBLE).

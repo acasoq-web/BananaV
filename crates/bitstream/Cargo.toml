@@ -1,0 +1,15 @@
+[package]
+name = "bv-bitstream"
+description = "Bit and byte reading and writing for BananaV's codecs and containers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+wasm = true
+
+[lints]
+workspace = true
