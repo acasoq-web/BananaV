@@ -124,8 +124,85 @@
     });
   }
 
-  // Cards, spotlights and posts fade in once.
-  var items = document.querySelectorAll(".card, .spot, .dl, .post, .section-head");
+  // The tour's tabs: one picture at a time; arrows move between the tabs.
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tour-tabs [role='tab']"));
+  function selectTab(tab, focus) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.tabIndex = on ? 0 : -1;
+      var panel = document.getElementById(t.getAttribute("aria-controls"));
+      if (panel) panel.hidden = !on;
+    });
+    if (focus) tab.focus();
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { selectTab(t, false); });
+    t.addEventListener("keydown", function (e) {
+      var step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      selectTab(tabs[(i + step + tabs.length) % tabs.length], true);
+    });
+  });
+
+  // The support button that follows the page: shown once past the top,
+  // out of the way over the support section and the footer, and gone for a
+  // week when its × is pressed.
+  var pill = document.getElementById("support-pill");
+  var hero = document.querySelector(".hero");
+  var support = document.getElementById("support");
+  var footer = document.querySelector(".footer");
+  var WEEK = 7 * 24 * 3600 * 1000;
+  function pillDismissed() {
+    try { return Date.now() - Number(localStorage.getItem("bananav-pill-hidden") || 0) < WEEK; } catch (e) { return false; }
+  }
+  if (pill && hero && !pillDismissed()) {
+    pill.hidden = false;
+    pill.classList.add("away");
+    var past = false, covered = false;
+    var update = function () { pill.classList.toggle("away", !past || covered); };
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(function (entries) {
+        past = !entries[0].isIntersecting;
+        update();
+      }, { rootMargin: "-40% 0px 0px 0px" }).observe(hero);
+      var showing = new Set();
+      var watch = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) { if (en.isIntersecting) showing.add(en.target); else showing.delete(en.target); });
+        covered = showing.size > 0;
+        update();
+      });
+      [support, footer].forEach(function (el) { if (el) watch.observe(el); });
+    }
+    pill.querySelector(".pill-close").addEventListener("click", function () {
+      pill.hidden = true;
+      try { localStorage.setItem("bananav-pill-hidden", String(Date.now())); } catch (e) {}
+    });
+  }
+
+  // A download starting: it goes on as usual; a thank-you asks for support.
+  var toast = document.getElementById("dl-toast");
+  var toastTimer = null;
+  function hideToast() {
+    if (toast) toast.hidden = true;
+    if (pill && !pill.hidden) pill.style.visibility = "";
+  }
+  if (toast) {
+    document.querySelectorAll("[data-download]").forEach(function (a) {
+      a.addEventListener("click", function () {
+        toast.hidden = false;
+        if (pill) pill.style.visibility = "hidden";
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(hideToast, 25000);
+      });
+    });
+    toast.querySelector(".toast-close").addEventListener("click", hideToast);
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") hideToast(); });
+  }
+
+  // Cards, highlights, downloads and posts fade in once.
+  var items = document.querySelectorAll(".card, .hl, .dl, .post, .section-head");
   if ("IntersectionObserver" in window) {
     var seen = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {

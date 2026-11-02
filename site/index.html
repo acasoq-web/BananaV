@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BananaV — Free and open-source video editor</title>
   <meta name="description" content="BananaV is a free and open-source video editor for Windows and Linux, written in Rust: a track-based timeline, keyframes and envelopes, effects at every level, pro audio and color.">
-  <meta name="theme-color" content="#18191c">
+  <meta name="theme-color" content="#111214">
   <link rel="icon" type="image/svg+xml" href="assets/img/bananav-icon.svg">
   <link rel="icon" type="image/png" href="assets/img/bananav.png">
   <link rel="apple-touch-icon" href="assets/img/bananav.png">
@@ -39,6 +39,7 @@
       </button>
       <nav id="nav-links" class="nav-links" aria-label="Main">
         <a href="#features">Features</a>
+        <a href="#tour">Tour</a>
         <a href="#download">Download</a>
         <a href="#involved">Get involved</a>
         <a href="#news">News</a>
@@ -58,7 +59,7 @@
           <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg>
         </button>
         <a class="btn btn-donate" href="#support">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
+          <svg class="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
           Donate
         </a>
       </nav>
@@ -66,39 +67,87 @@
   </header>
 
   <main id="main">
-    <!-- Hero: the name, what it is, the two ways in, and the editor itself. -->
+    <!-- Hero: what BananaV is, the ways in, and the editor itself. -->
     <section class="hero">
+      <div class="hero-grid" aria-hidden="true"></div>
       <div class="glow glow-a" aria-hidden="true"></div>
       <div class="glow glow-b" aria-hidden="true"></div>
       <div class="hero-text">
-        <p class="eyebrow"><span class="dot"></span> Ultra Alpha 2 · the second test build, and the source code</p>
+        <a class="eyebrow" href="https://github.com/acasoq-web/BananaV/releases/tag/v0.1.0-ultra-alpha.2" rel="noopener">
+          <span class="badge-new">New</span>
+          <span>Ultra Alpha 2 is out, and the source code is public</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </a>
         <h1>Edit freely.<br><span class="accent">Meet BananaV.</span></h1>
         <p class="lead">A free and open-source video editor for Windows and Linux, written from scratch in Rust.
           Everything you need to cut, mix, color and finish your videos, in one fast timeline.</p>
         <div class="cta">
-          <a class="btn btn-primary" href="#download">
+          <a class="btn btn-primary btn-lg" href="#download">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg>
-            Download
+            Download for free
           </a>
-          <a class="btn btn-ghost" href="https://discord.gg/vtC7Yasz98">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H10l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V7A1.5 1.5 0 0 1 5 5.5Z"/></svg>
-            Join the community
+          <a class="btn btn-heart btn-lg" href="#support">
+            <svg class="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
+            Support the project
           </a>
         </div>
+        <p class="hero-meta">Windows &amp; Linux · x64 &amp; ARM64 · GPL v3 · No account, no watermark, no subscription</p>
       </div>
       <figure class="showcase">
-        <img src="assets/img/screen-main.png" alt="BananaV's main window: the timeline with video and audio tracks, the Video Preview and the effects chooser" width="1920" height="1035">
+        <img src="assets/img/screen-main.png" alt="BananaV's main window: the effects chooser with Add Noise's presets, the Video Preview, the Master Bus and the timeline" width="1920" height="1035">
       </figure>
     </section>
 
-    <!-- The promise, in one strip. -->
-    <section class="promise" aria-label="What BananaV promises">
+    <!-- The numbers. -->
+    <section class="stats" aria-label="BananaV in numbers">
       <ul>
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Free forever</li>
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 7 3.5 12l5 5M15.5 7l5 5-5 5"/></svg>Open source, GPL v3</li>
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16.5V20"/></svg>Windows &amp; Linux</li>
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 19.5 7v5c0 4.2-3.2 7.6-7.5 8.5-4.3-.9-7.5-4.3-7.5-8.5V7Z"/></svg>No account, no watermark, no subscription</li>
+        <li><strong>120+</strong><span>built-in effects, transitions and generators</span></li>
+        <li><strong>62</strong><span>GL transitions, and your own GLSL</span></li>
+        <li><strong>OFX + VST 3</strong><span>plug-in hosts for video and audio</span></li>
+        <li><strong>ACES 1.3</strong><span>color management, 32-bit float</span></li>
       </ul>
+    </section>
+
+    <!-- What the latest build brings. -->
+    <section class="section" id="new">
+      <div class="section-head">
+        <p class="kicker">What's new in Ultra Alpha 2</p>
+        <h2>A big step forward</h2>
+        <p>More than 175 changes since the first build, and BananaV's source code is now on GitHub for everyone.</p>
+      </div>
+      <div class="highlights">
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5l1.9 4.6 4.6 1.9-4.6 1.9L12 16.5l-1.9-4.6L5.5 10l4.6-1.9z"/><path d="M18 15.5l.8 1.9 1.9.8-1.9.8L18 21l-.8-1.9-1.9-.8 1.9-.8z"/></svg></span>
+          <h3>About a hundred effects remade</h3>
+          <p>New panels, presets and math, and most of them on the graphics card.</p>
+        </article>
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5v3M12 17.5v3M3.5 12h3M17.5 12h3"/></svg></span>
+          <h3>Tracking and stabilization</h3>
+          <p>Motion tracking, video and 360° stabilization, slow motion by optical flow.</p>
+        </article>
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5Z"/><path d="M4 8.5 12 13l8-4.5M12 13v7"/></svg></span>
+          <h3>3D compositing</h3>
+          <p>Tracks as cards in space, with Track Motion in 3D, views and a trackball.</p>
+        </article>
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.5"/></svg></span>
+          <h3>DVD and CD</h3>
+          <p>DVD-Video authoring and burning, Video CDs and audio CDs, with BananaV's own encoders.</p>
+        </article>
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4v16M12 4v16M18 4v16"/><rect x="4" y="13" width="4" height="2.5" rx="1"/><rect x="10" y="7" width="4" height="2.5" rx="1"/><rect x="16" y="10.5" width="4" height="2.5" rx="1"/></svg></span>
+          <h3>Studio audio</h3>
+          <p>A redesigned Mixing Console, plug-in delay compensation and VST 3 automation.</p>
+        </article>
+        <article class="hl">
+          <span class="hl-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8.5 7 3.5 12l5 5M15.5 7l5 5-5 5M13.5 5l-3 14"/></svg></span>
+          <h3>Open source</h3>
+          <p>The whole code is on GitHub under the GPL: read it, build it, improve it.</p>
+        </article>
+      </div>
+      <p class="more"><a href="https://github.com/acasoq-web/BananaV/releases/tag/v0.1.0-ultra-alpha.2" rel="noopener">Read everything that changed</a></p>
     </section>
 
     <!-- Features: what the editor does, as cards. -->
@@ -123,7 +172,7 @@
         <article class="card">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.9 4.6 4.6 1.9-4.6 1.9L12 16.5l-1.9-4.6L5.5 10l4.6-1.9z"/><path d="M18 15.5l.8 1.9 1.9.8-1.9.8L18 21l-.8-1.9-1.9-.8 1.9-.8z"/></svg>
           <h3>Effects at every level</h3>
-          <p>Dozens of video effects and transitions on media, events, tracks and the output, with presets you can preview. Add OpenFX plug-ins too.</p>
+          <p>More than a hundred video effects, transitions and generators on media, events, tracks and the output, with presets you can preview. Add OpenFX plug-ins too.</p>
         </article>
         <article class="card">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17M12 12l6-6"/></svg>
@@ -153,39 +202,52 @@
       </div>
     </section>
 
-    <!-- Feature spotlights: the editor's windows, alternating sides. -->
-    <section class="section spotlights" aria-label="A closer look">
-      <div class="spot">
-        <div class="spot-text">
-          <p class="kicker">Color</p>
-          <h2>Grade with confidence</h2>
-          <p>Lift, gamma, gain and offset wheels, curves, HSL, white balance and LUTs in one panel, with the scopes beside your picture.
-            Pick a neutral tone right on the preview and let BananaV do the math, in full 32-bit precision.</p>
-        </div>
-        <figure class="spot-shot"><img src="assets/img/screen-color.png" alt="The Color Grading panel with its color wheels and curves, beside the Video Scopes" loading="lazy" width="1600" height="471"></figure>
+    <!-- The tour: the editor's windows, one tab each. -->
+    <section class="section" id="tour">
+      <div class="section-head center">
+        <p class="kicker">Take a tour</p>
+        <h2>See it in action</h2>
+        <p>Every picture here is BananaV as it is today, drawn by its own screen tests.</p>
       </div>
-      <div class="spot reverse">
-        <div class="spot-text">
-          <p class="kicker">Audio</p>
-          <h2>Mix like a studio</h2>
-          <p>Every track, bus and effects chain gets a strip on the Mixing Console, with sends, meters, inserts and automation.
-            Ride the faders while the project plays and BananaV writes the envelopes for you.</p>
+      <div class="tour">
+        <div class="tour-tabs" role="tablist" aria-label="BananaV's windows">
+          <button type="button" role="tab" id="tab-effects" aria-controls="shot-effects" aria-selected="true">Effects</button>
+          <button type="button" role="tab" id="tab-transitions" aria-controls="shot-transitions" aria-selected="false" tabindex="-1">Transitions</button>
+          <button type="button" role="tab" id="tab-generators" aria-controls="shot-generators" aria-selected="false" tabindex="-1">Generators</button>
+          <button type="button" role="tab" id="tab-color" aria-controls="shot-color" aria-selected="false" tabindex="-1">Color</button>
+          <button type="button" role="tab" id="tab-audio" aria-controls="shot-audio" aria-selected="false" tabindex="-1">Audio</button>
+          <button type="button" role="tab" id="tab-timeline" aria-controls="shot-timeline" aria-selected="false" tabindex="-1">Timeline</button>
         </div>
-        <figure class="spot-shot"><img src="assets/img/screen-mixer.png" alt="The Mixing Console with a strip for each track and bus" loading="lazy" width="1600" height="662"></figure>
-      </div>
-      <div class="spot">
-        <div class="spot-text">
-          <p class="kicker">Timeline</p>
-          <h2>Everything on the timeline</h2>
-          <p>Bus tracks, effect envelopes and keyframes live right where you edit, so you see how your project changes over time at a glance.</p>
-        </div>
-        <figure class="spot-shot"><img src="assets/img/screen-timeline.png" alt="The timeline with audio bus tracks and their volume and pan envelopes" loading="lazy" width="1600" height="404"></figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-effects" aria-labelledby="tab-effects">
+          <img src="assets/img/screen-effects.png" alt="The Video FX chooser with Add Noise's presets beside the Video Preview" width="1904" height="556">
+          <figcaption>Pick an effect and see its presets come alive under the pointer, then drag it onto the timeline.</figcaption>
+        </figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-transitions" aria-labelledby="tab-transitions" hidden>
+          <img src="assets/img/screen-transitions.png" alt="The Transitions chooser with GL Transition's presets beside the Video Preview" width="1904" height="556" loading="lazy">
+          <figcaption>Wipes, 3D moves, page peels and the GL Transitions collection, or write your own transition in GLSL.</figcaption>
+        </figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-generators" aria-labelledby="tab-generators" hidden>
+          <img src="assets/img/screen-generators.png" alt="The Media Generator chooser with Noise Texture's presets beside the Video Preview" width="1904" height="556" loading="lazy">
+          <figcaption>Titles, credit rolls, test patterns and textures made right on the timeline.</figcaption>
+        </figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-color" aria-labelledby="tab-color" hidden>
+          <img src="assets/img/screen-color.png" alt="The Color Grading panel with its color wheels and curves, beside the Video Scopes" width="1600" height="471" loading="lazy">
+          <figcaption>Lift, gamma, gain and offset wheels, curves, HSL and LUTs, with the scopes beside your picture.</figcaption>
+        </figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-audio" aria-labelledby="tab-audio" hidden>
+          <img src="assets/img/screen-mixer.png" alt="The Mixing Console with a strip for each track and bus" width="1600" height="662" loading="lazy">
+          <figcaption>A strip for every track, bus and effects chain, with sends, meters, inserts and automation.</figcaption>
+        </figure>
+        <figure class="tour-shot" role="tabpanel" id="shot-timeline" aria-labelledby="tab-timeline" hidden>
+          <img src="assets/img/screen-timeline.png" alt="The timeline with audio bus tracks and their volume and pan envelopes" width="1600" height="404" loading="lazy">
+          <figcaption>Bus tracks, effect envelopes and keyframes live right where you edit.</figcaption>
+        </figure>
       </div>
     </section>
 
     <!-- Download. -->
     <section class="section" id="download">
-      <div class="section-head">
+      <div class="section-head center">
         <p class="kicker">Download</p>
         <h2>Get BananaV</h2>
         <p>Ultra Alpha 2 is out for Windows and Linux, and BananaV's source code is on GitHub.</p>
@@ -203,11 +265,11 @@
           <h3>Windows</h3>
           <p>Windows 10 and 11. A zip: unpack it and run BananaV.exe. The build is not signed yet: if Windows warns you, choose More info, then Run anyway.</p>
           <div class="dl-buttons">
-            <a class="btn btn-primary" href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-windows-x64.zip">
+            <a class="btn btn-primary" data-download href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-windows-x64.zip">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg>
               x64
             </a>
-            <a class="btn btn-ghost" href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-windows-arm64.zip">ARM64</a>
+            <a class="btn btn-ghost" data-download href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-windows-arm64.zip">ARM64</a>
           </div>
           <p class="dl-note">x64 for Intel and AMD processors, ARM64 for Snapdragon and other ARM ones.</p>
         </article>
@@ -216,11 +278,11 @@
           <h3>Linux</h3>
           <p>An AppImage for any distribution since 2022: make the file executable and run it. No installation needed.</p>
           <div class="dl-buttons">
-            <a class="btn btn-primary" href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-linux-x64.AppImage">
+            <a class="btn btn-primary" data-download href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-linux-x64.AppImage">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"/></svg>
               x64
             </a>
-            <a class="btn btn-ghost" href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-linux-arm64.AppImage">ARM64</a>
+            <a class="btn btn-ghost" data-download href="https://github.com/acasoq-web/BananaV/releases/download/v0.1.0-ultra-alpha.2/BananaV-0.1.0-ultra-alpha.2-linux-arm64.AppImage">ARM64</a>
           </div>
           <p class="dl-note">x64 for Intel and AMD processors, ARM64 for ARM ones.</p>
         </article>
@@ -230,6 +292,46 @@
           <p>Build it yourself with Rust's cargo: the source code is on GitHub, under the GPL.</p>
           <a class="btn btn-ghost" href="https://github.com/acasoq-web/BananaV#building-from-source" rel="noopener">Build from source</a>
         </article>
+      </div>
+      <a class="dl-support" href="#support">
+        <svg class="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
+        <span><strong>BananaV is free and always will be.</strong> If it helps you, please consider supporting it.</span>
+        <svg class="arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </a>
+    </section>
+
+    <!-- Support: the two ways to donate, and what donations pay for. -->
+    <section class="support" id="support" aria-labelledby="support-title">
+      <div class="support-inner">
+        <div class="support-text">
+          <p class="kicker dark">Support BananaV</p>
+          <h2 id="support-title">Keep BananaV free</h2>
+          <p class="support-lead">No ads, no subscriptions, no paywalled features. BananaV is funded by people like you: if you enjoy it, please consider a donation. Every contribution, big or small, keeps the project going.</p>
+          <ul class="support-uses">
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>More time to build new features and fix bugs</li>
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16.5V20"/></svg>Computers and graphics cards to test on</li>
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .6-8A6 6 0 0 0 6 10.5 3.8 3.8 0 0 0 7 18Z"/></svg>The services that build and ship BananaV</li>
+          </ul>
+        </div>
+        <div class="give">
+          <a class="give-card kofi" href="https://ko-fi.com/bananav" rel="noopener">
+            <span class="give-icon" aria-hidden="true"><svg class="cup" viewBox="0 0 24 24"><path d="M4 8h12.5v6.5A4.5 4.5 0 0 1 12 19H8.5A4.5 4.5 0 0 1 4 14.5Z"/><path d="M16.5 9.5h1.25a2.75 2.75 0 0 1 0 5.5H16.3"/></svg></span>
+            <span class="give-text">
+              <strong>Support on Ko-fi</strong>
+              <span>From any country, in a few clicks.</span>
+            </span>
+            <span class="give-go" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+          </a>
+          <a class="give-card pix" href="https://pixgg.com/Acaso" rel="noopener">
+            <span class="give-icon" aria-hidden="true"><svg class="heart" viewBox="0 0 24 24"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg></span>
+            <span class="give-text">
+              <strong>Donate with PIX</strong>
+              <span>For donors in Brazil, in seconds.</span>
+            </span>
+            <span class="give-go" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+          </a>
+          <p class="give-alt">Can't donate? Starring the project on <a href="https://github.com/acasoq-web/BananaV" rel="noopener">GitHub</a> and telling your friends helps too.</p>
+        </div>
       </div>
     </section>
 
@@ -266,33 +368,11 @@
           <h3>Teach others</h3>
           <p>Make tutorials, share your workflow and help newcomers find their way.</p>
         </a>
-        <a class="card link" href="#support">
+        <a class="card link card-heart" href="#support">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
           <h3>Donate</h3>
           <p>Donations keep development going and BananaV free for everyone.</p>
         </a>
-      </div>
-    </section>
-
-    <!-- Donate band. -->
-    <section class="donate-band" id="support" aria-label="Support BananaV">
-      <div class="donate-inner">
-        <img src="assets/img/bananav-icon.svg" alt="" width="104" height="104">
-        <div>
-          <h2>Keep BananaV free</h2>
-          <p>No ads, no subscriptions, no paywalled features. BananaV is funded by people like you.</p>
-        </div>
-        <div class="donate-actions">
-          <a class="btn btn-dark" href="https://ko-fi.com/bananav" rel="noopener">
-            <svg class="cup" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h12.5v6.5A4.5 4.5 0 0 1 12 19H8.5A4.5 4.5 0 0 1 4 14.5Z"/><path d="M16.5 9.5h1.25a2.75 2.75 0 0 1 0 5.5H16.3"/></svg>
-            Support on Ko-fi
-          </a>
-          <a class="btn btn-outline-dark" href="https://pixgg.com/Acaso" rel="noopener">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
-            Donate with PIX
-          </a>
-          <span class="donate-note">Ko-fi from any country, PIX from Brazil.</span>
-        </div>
       </div>
     </section>
 
@@ -333,11 +413,16 @@
           <span>Banana<b>V</b></span>
         </a>
         <p>A free and open-source video editor for Windows and Linux.</p>
+        <a class="btn btn-donate footer-donate" href="#support">
+          <svg class="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
+          Support the project
+        </a>
       </div>
       <nav class="footer-links" aria-label="Footer">
         <div>
           <h4>Project</h4>
           <a href="#features">Features</a>
+          <a href="#tour">Tour</a>
           <a href="#download">Download</a>
           <a href="#news">News</a>
         </div>
@@ -345,7 +430,8 @@
           <h4>Community</h4>
           <a href="https://discord.gg/vtC7Yasz98">Discord</a>
           <a href="https://github.com/acasoq-web/BananaV" rel="noopener">GitHub</a>
-          <a href="#support">Donate</a>
+          <a href="https://ko-fi.com/bananav" rel="noopener">Ko-fi</a>
+          <a href="https://pixgg.com/Acaso" rel="noopener">PIX</a>
         </div>
         <div>
           <h4>About</h4>
@@ -359,6 +445,33 @@
     <p class="legal">BananaV is free software, released under the GNU General Public License, version 3 or later.
       The BananaV name and logo are the project's marks.</p>
   </footer>
+
+  <!-- The support button that follows the page once past the top. -->
+  <div class="support-pill" id="support-pill" hidden>
+    <a href="#support">
+      <svg class="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10Z"/></svg>
+      Enjoying BananaV? Support it
+    </a>
+    <button type="button" class="pill-close" aria-label="Hide">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+    </button>
+  </div>
+
+  <!-- Shown when a download starts: the download goes on, this only asks. -->
+  <div class="dl-toast" id="dl-toast" role="status" hidden>
+    <img src="assets/img/bananav-icon.svg" alt="" width="48" height="48">
+    <div class="toast-body">
+      <strong>Thanks for downloading BananaV!</strong>
+      <p>It's free and always will be. If it helps you, a small donation keeps it going.</p>
+      <div class="toast-actions">
+        <a class="btn btn-primary small" href="https://ko-fi.com/bananav" rel="noopener">Support on Ko-fi</a>
+        <a class="btn btn-ghost small" href="https://pixgg.com/Acaso" rel="noopener">Donate with PIX</a>
+      </div>
+    </div>
+    <button type="button" class="toast-close" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+    </button>
+  </div>
 
   <script src="assets/i18n.js"></script>
   <script src="assets/main.js"></script>
