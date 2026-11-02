@@ -15,4 +15,4 @@ The source code arrives here soon, with the first public release.
 
 - Website: https://bananav-editor.github.io/
 - Community: https://discord.gg/vtC7Yasz98
-- Support the project: donate with PIX, from Brazil, at https://pixgg.com/Acaso (more ways to give from other countries are coming soon)
+- Support the project: on Ko-fi, from any country, at https://ko-fi.com/bananav, or with PIX, from Brazil, at https://pixgg.com/Acaso
