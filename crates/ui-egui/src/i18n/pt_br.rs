@@ -4784,10 +4784,6 @@ pub(super) const ENTRIES: &[(&str, &str)] = &[
     ("Left Only", "Apenas lado esquerdo"),
     ("Left to Right", "Da esquerda para a direita"),
     (
-        "Left to Right, Soft Edge",
-        "Da esquerda para a direita, beirada suave",
-    ),
-    (
         "Left, Small Loop, Yellow Light",
         "Esquerda, laço pequeno, luz amarela",
     ),

@@ -224,5 +224,7 @@ Every text the user sees goes through the translation catalogs of
 - [TRADEMARKS.md](TRADEMARKS.md): BananaV's name and logo
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), [SECURITY.md](SECURITY.md),
   [SUPPORT.md](SUPPORT.md)
-- [CLAUDE.md](CLAUDE.md): architecture and working instructions
+- [CLAUDE.md](CLAUDE.md): working instructions;
+  [docs/architecture.md](docs/architecture.md) and
+  [docs/testing.md](docs/testing.md): how BananaV is built and checked
 - [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/STANDARDS.md](docs/STANDARDS.md)

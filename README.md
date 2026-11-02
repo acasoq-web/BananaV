@@ -131,7 +131,7 @@ the checks every change passes (`cargo xtask ci`).
 | `xtask` | The checks: formatting, layer rules, lints, tests, WebAssembly build |
 
 Each crate belongs to a layer and depends only on lower layers;
-[CLAUDE.md](CLAUDE.md) describes the architecture.
+[docs/architecture.md](docs/architecture.md) describes the architecture.
 
 ## Contributing
 

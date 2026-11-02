@@ -248,7 +248,9 @@ pub fn devices() -> &'static [Device] {
                     let mut mask = 0;
                     // SAFETY: eight bytes, as the call writes.
                     let ok = unsafe { get(luid.as_mut_ptr(), &mut mask, handle) } == SUCCESS;
-                    ok.then(|| luid.map(|b| b as u8))
+                    // `c_char` is signed on x86 and unsigned on ARM: its
+                    // byte as it is.
+                    ok.then(|| luid.map(|b| b.to_ne_bytes()[0]))
                 });
                 Some(Device {
                     ordinal,

@@ -6,8 +6,9 @@ all welcome.
 Before you start, read **[AGENTS.md](AGENTS.md)**. Its rules are absolute and
 apply to people and AI agents alike: never crash, open or original assets
 only (each with an attribution sidecar), clean-room code, contributions
-under GPL-3.0-or-later with a `Signed-off-by:` line. The architecture and
-the project's working conventions are in [CLAUDE.md](CLAUDE.md).
+under GPL-3.0-or-later with a `Signed-off-by:` line. The project's
+working conventions are in [CLAUDE.md](CLAUDE.md), its architecture in
+[docs/architecture.md](docs/architecture.md).
 
 ## Building
 
@@ -84,7 +85,7 @@ Also useful:
   checked this way, never by driving the mouse or the keyboard.
 - Tests marked `#[ignore]` compare BananaV with the `ffmpeg` and `ffprobe`
   tools (media oracles) or need hardware; run them when you change that
-  area. [CLAUDE.md](CLAUDE.md) lists them.
+  area. [docs/testing.md](docs/testing.md) lists them.
 
 ## Making a change
 
