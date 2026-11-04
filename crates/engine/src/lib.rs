@@ -43,6 +43,9 @@ pub use accel::{DecodeChoice, GpuChoice, GpuStatus, gpu_adapters};
 pub use audio_sync::{AudioSyncProgress, SyncOutcome};
 pub use beat_detection::BeatProgress;
 pub use bv_dvd::write_image as write_dvd_image;
+/// The Color Grading effect's parameters, its wheels' points and its
+/// curves' text, for the Color Grading window.
+pub use bv_effects::color_grading;
 pub use bv_effects::color_grading::{
     APPLE_LOG_TO_LINEAR, APPLE_LOG_TO_REC709, Picker as ColorGradingPicker,
 };
@@ -1108,6 +1111,7 @@ impl Engine {
                 effects,
                 path,
                 format,
+                tempo: p.settings.tempo,
             },
             self.repaint.clone(),
         ));

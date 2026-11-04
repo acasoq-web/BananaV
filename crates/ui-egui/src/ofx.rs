@@ -19,9 +19,10 @@ use bv_ofx::{
     ChangeReason, Context, Instance, Mark, ParamInfo, ParamType, PenAction, PluginInfo, Setup,
     Severity, Value, View,
 };
+use bv_timeline::pancrop::Placement;
 use bv_timeline::{
     ClipId, Effect, Generator, KeyCurve, MediaId, MediaSource, PluginFx, PluginKey, PluginParam,
-    Project, Transform,
+    Project,
 };
 
 use crate::app::BananaApp;
@@ -593,27 +594,16 @@ pub fn frame_map(w: u32, h: u32) -> Affine {
     Affine::from_fn(|[x, y]| [x / w, (h - y) / h])
 }
 
-/// An event's picture, `src` pixels (`par` times as wide as the frame's),
-/// placed in a frame of `frame` pixels by `tf` — as the compositors place
-/// it (`bv_render::layer::place_par`).
-pub fn event_map(src: (u32, u32), par: f32, tf: &Transform, frame: (u32, u32)) -> Affine {
+/// An event's picture, `src` pixels, placed by its Pan/Crop on a frame of
+/// `frame` pixels — as the compositors place it (`bv_render::place_box`).
+pub fn event_map(src: (u32, u32), place: &Placement, frame: (u32, u32)) -> Affine {
     let (sw, sh) = (src.0.max(1) as f64, src.1.max(1) as f64);
     let (w, h) = (frame.0.max(1) as f64, frame.1.max(1) as f64);
-    let fit = bv_timeline::scene::fit_rect_par(src.0.max(1), src.1.max(1), par, frame.0, frame.1);
-    let scale = tf.scale.max(1e-4) as f64;
-    let kx = fit.w as f64 * scale / sw;
-    let ky = fit.h as f64 * scale * tf.stretch.max(1e-3) as f64 / sh;
-    let fx = if tf.flip_h { -1.0 } else { 1.0 };
-    let fy = if tf.flip_v { -1.0 } else { 1.0 };
-    let (sin, cos) = (-(tf.rotation_deg as f64).to_radians()).sin_cos();
-    let (cx, cy) = (w / 2.0 + tf.x as f64 * w, h / 2.0 - tf.y as f64 * h);
+    let (mx, my) = (place.media[0] / sw, place.media[1] / sh);
     Affine::from_fn(|[x, y]| {
-        // Down from the top, from the picture's middle, framed.
-        let rx = (x - sw / 2.0) * kx * fx;
-        let ry = (sh - y - sh / 2.0) * ky * fy;
-        let dx = rx * cos + ry * sin;
-        let dy = -rx * sin + ry * cos;
-        [(dx + cx) / w, (dy + cy) / h]
+        // Down from the top, in the media's pixels.
+        let at = place.on_frame_point([x * mx, (sh - y) * my]);
+        [at[0] / w, at[1] / h]
     })
 }
 
@@ -624,9 +614,12 @@ fn clip_map(p: &Project, clip: &bv_timeline::Clip, t: Tick) -> Affine {
     let Some(v) = p.media(clip.media).and_then(|m| m.video) else {
         return frame_map(s.width, s.height);
     };
-    let par = v.pixel_aspect.ratio() / s.pixel_aspect.ratio();
     let at = t.clamp(clip.start, clip.end());
-    event_map((v.width, v.height), par, &clip.transform_at(at), frame)
+    let Some(place) = p.clip_place_in(clip.id) else {
+        return frame_map(s.width, s.height);
+    };
+    let placed = place.at(clip, at, [f64::from(s.width), f64::from(s.height)]);
+    event_map((v.width, v.height), &placed, frame)
 }
 
 /// A parameter's value now, from the effect or its plug-in's default.
@@ -3638,6 +3631,7 @@ mod tests {
 
     #[test]
     fn canonical_points_land_where_the_compositor_draws_them() {
+        use bv_timeline::pancrop::{self, PlaceIn};
         // A 1920×1080 frame shown whole: the middle is the middle, y up.
         let near =
             |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
@@ -3645,11 +3639,21 @@ mod tests {
         assert!(near(m.apply([960.0, 540.0]), [0.5, 0.5]));
         assert!(near(m.apply([0.0, 0.0]), [0.0, 1.0]));
         // A 640×480 picture in it (pillarboxed), moved right a tenth.
-        let tf = Transform {
+        let tf = bv_timeline::Transform {
             x: 0.1,
-            ..Transform::default()
+            ..bv_timeline::Transform::default()
         };
-        let m = event_map((640, 480), 1.0, &tf, (1920, 1080));
+        let in_frame = PlaceIn {
+            media: [640.0, 480.0],
+            media_aspect: 1.0,
+            frame: [1920.0, 1080.0],
+            frame_aspect: 1.0,
+            keep_aspect: true,
+            fill: true,
+            adjust: 1.0,
+        };
+        let place = pancrop::place(&pancrop::key_from_transform(&tf, &in_frame), &in_frame);
+        let m = event_map((640, 480), &place, (1920, 1080));
         let mid = m.apply([320.0, 240.0]);
         // (The transform holds f32s: 0.1 is a little more.)
         assert!(
@@ -3669,6 +3673,7 @@ mod tests {
 
     #[test]
     fn the_map_follows_the_compositor_through_pan_crop() {
+        use bv_timeline::pancrop::{self, PlaceIn};
         // A spot in a 64×36 picture, placed turned, moved, smaller and
         // mirrored: the compositor draws it where the map says.
         let (sw, sh) = (64u32, 36u32);
@@ -3678,16 +3683,26 @@ mod tests {
                 *src.pixel_mut(x, y) = [1.0; 4];
             }
         }
-        let tf = Transform {
+        let tf = bv_timeline::Transform {
             x: 0.1,
             y: -0.05,
             scale: 0.8,
             rotation_deg: 30.0,
             flip_h: true,
-            ..Transform::default()
+            ..bv_timeline::Transform::default()
         };
         let (w, h) = (192u32, 108u32);
-        let out = bv_render::place_par(&src, w, h, &tf, bv_timeline::RenderQuality::Best, 1.0);
+        let in_frame = PlaceIn {
+            media: [f64::from(sw), f64::from(sh)],
+            media_aspect: 1.0,
+            frame: [f64::from(w), f64::from(h)],
+            frame_aspect: 1.0,
+            keep_aspect: true,
+            fill: true,
+            adjust: 1.0,
+        };
+        let place = pancrop::place(&pancrop::key_from_transform(&tf, &in_frame), &in_frame);
+        let out = bv_render::place_box(&src, w, h, &place, bv_timeline::RenderQuality::Best);
         let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
         for y in 0..h {
             for x in 0..w {
@@ -3701,7 +3716,7 @@ mod tests {
         let (cx, cy) = (sx / n, sy / n);
         // The spot's middle, (40.5, 10.5) down from the top, in canonical
         // coordinates.
-        let m = event_map((sw, sh), 1.0, &tf, (w, h));
+        let m = event_map((sw, sh), &place, (w, h));
         let [nx, ny] = m.apply([40.5, sh as f64 - 10.5]);
         let (px, py) = (nx * w as f64, ny * h as f64);
         assert!(

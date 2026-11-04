@@ -71,6 +71,8 @@ pub(crate) struct NrtSource {
     pub effects: Vec<Effect>,
     pub path: PathBuf,
     pub format: NrtFormat,
+    /// The project's tempo, for effects with tempo sync.
+    pub tempo: bv_timeline::Tempo,
 }
 
 /// Media samples read at a time.
@@ -156,6 +158,7 @@ fn run(src: &NrtSource, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), String>
         effects: &src.effects,
         path: &src.path,
         format: src.format,
+        tempo: src.tempo,
     };
     render(&sound, tick)
 }
@@ -179,6 +182,7 @@ pub fn trim_sound(
         effects: &[],
         path,
         format: NrtFormat::Pcm24,
+        tempo: bv_timeline::Tempo::default(),
     };
     let result = render(&sound, tick);
     if result.is_err() {
@@ -197,6 +201,7 @@ struct Sound<'a> {
     effects: &'a [Effect],
     path: &'a Path,
     format: NrtFormat,
+    tempo: bv_timeline::Tempo,
 }
 
 fn render(src: &Sound<'_>, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), String> {
@@ -206,9 +211,6 @@ fn render(src: &Sound<'_>, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), Stri
     let channels = reader.channels().max(1);
     let at = |t: Tick| (t.as_seconds_f64() * f64::from(rate)).round() as i64;
     let (a, b) = (at(src.from), at(src.to));
-    let mut chain = Chain::default();
-    let effects: Vec<&Effect> = src.effects.iter().collect();
-    chain.sync(&effects, rate, channels, false);
     let file = std::fs::File::create(src.path).map_err(|e| e.to_string())?;
     let mut w = bv_wav::WavWriter::new(
         std::io::BufWriter::new(file),
@@ -217,19 +219,108 @@ fn render(src: &Sound<'_>, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), Stri
         src.format.sample_format(),
     )
     .map_err(|e| e.to_string())?;
-    let mut pos = a;
-    while pos < b {
-        let n = ((b - pos) as usize).min(BLOCK);
-        let buf = reader.read(pos, n).map_err(|e| e.to_string())?;
-        let mut planes: Vec<Vec<f32>> = (0..channels)
-            .map(|c| {
+    // Effects that change the sound's length work on all of it at once:
+    // then the sound is gathered first, and the chain runs a stretch at a
+    // time between them.
+    if src.effects.iter().any(|e| e.kind.works_offline()) {
+        let mut planes: Vec<Vec<f32>> = vec![Vec::new(); channels];
+        let mut pos = a;
+        while pos < b {
+            let n = ((b - pos) as usize).min(BLOCK);
+            let buf = reader.read(pos, n).map_err(|e| e.to_string())?;
+            for (c, plane) in planes.iter_mut().enumerate() {
                 let mut v = buf.channels.get(c).cloned().unwrap_or_default();
                 v.resize(n, 0.0);
-                v
-            })
-            .collect();
-        chain.process(&mut planes);
+                plane.extend_from_slice(&v);
+            }
+            pos += n as i64;
+            if !tick(n as f64 / f64::from(rate) / 2.0) {
+                return Err(CANCELED.into());
+            }
+        }
+        let mut stretch: Vec<&Effect> = Vec::new();
+        let run = |stretch: &mut Vec<&Effect>, planes: &mut Vec<Vec<f32>>| {
+            if stretch.is_empty() {
+                return;
+            }
+            let mut chain = Chain::default();
+            chain.set_tempo(src.tempo);
+            chain.sync(stretch, rate, channels, false);
+            // What the chain holds back comes out, its lateness taken back.
+            let late = chain.latency();
+            let len = planes.first().map_or(0, Vec::len);
+            for p in planes.iter_mut() {
+                p.resize(len + late, 0.0);
+            }
+            let mut at = 0;
+            while at < len + late {
+                let end = (at + BLOCK).min(len + late);
+                let mut part: Vec<Vec<f32>> = planes.iter().map(|p| p[at..end].to_vec()).collect();
+                chain.process(&mut part);
+                for (p, q) in planes.iter_mut().zip(part) {
+                    p[at..end].copy_from_slice(&q);
+                }
+                at = end;
+            }
+            for p in planes.iter_mut() {
+                p.drain(..late);
+            }
+            stretch.clear();
+        };
+        for e in src
+            .effects
+            .iter()
+            .filter(|e| e.kind.is_audio() && e.enabled)
+        {
+            if e.kind.works_offline() {
+                run(&mut stretch, &mut planes);
+                if let Some(out) = bv_mixer::render_offline(e, rate, std::mem::take(&mut planes)) {
+                    planes = out;
+                }
+            } else {
+                stretch.push(e);
+            }
+        }
+        run(&mut stretch, &mut planes);
         w.write_planar(&planes).map_err(|e| e.to_string())?;
+        if !tick((b - a) as f64 / f64::from(rate) / 2.0) {
+            return Err(CANCELED.into());
+        }
+        w.finish().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let mut chain = Chain::default();
+    let effects: Vec<&Effect> = src.effects.iter().collect();
+    chain.set_tempo(src.tempo);
+    chain.sync(&effects, rate, channels, false);
+    // Effects that answer late (FFT filters): the sound goes on through
+    // them that much past its end, and as much is dropped from the start.
+    let mut skip = chain.latency();
+    let end = b + skip as i64;
+    let mut pos = a;
+    while pos < end {
+        let n = ((end - pos) as usize).min(BLOCK);
+        let mut planes: Vec<Vec<f32>> = if pos < b {
+            let buf = reader
+                .read(pos, n.min((b - pos) as usize))
+                .map_err(|e| e.to_string())?;
+            (0..channels)
+                .map(|c| {
+                    let mut v = buf.channels.get(c).cloned().unwrap_or_default();
+                    v.resize(n, 0.0);
+                    v
+                })
+                .collect()
+        } else {
+            vec![vec![0.0; n]; channels]
+        };
+        chain.process(&mut planes);
+        let drop = skip.min(n);
+        skip -= drop;
+        if drop < n {
+            let kept: Vec<Vec<f32>> = planes.iter().map(|p| p[drop..].to_vec()).collect();
+            w.write_planar(&kept).map_err(|e| e.to_string())?;
+        }
         pos += n as i64;
         if !tick(n as f64 / f64::from(rate)) {
             return Err(CANCELED.into());
@@ -237,4 +328,73 @@ fn render(src: &Sound<'_>, tick: &mut dyn FnMut(f64) -> bool) -> Result<(), Stri
     }
     w.finish().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bv_timeline::{EffectKind, Generator, ProjectSettings};
+
+    /// Through effects that answer late (the Modern Equalizer, oversampled
+    /// with its FIR filters), the sound written stays where it was and
+    /// whole: their lateness is taken back, with and without an effect
+    /// that changes the sound's length in the chain.
+    #[test]
+    fn late_effects_leave_the_sound_in_place() {
+        let settings = ProjectSettings::default();
+        let info = MediaInfo::generated(
+            Generator::TestTone {
+                frequency_hz: 1000.0,
+                level_db: -6.0,
+            },
+            &settings,
+        );
+        let from = Tick::ZERO;
+        let to = Tick::from_seconds_f64(0.25);
+        let dir = std::env::temp_dir().join(format!("bv_nrt_late_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = |path: &Path| {
+            let mut r = bv_wav::WavReader::new(std::fs::File::open(path).unwrap()).unwrap();
+            r.read_planar(0, 12_000).unwrap()
+        };
+        let plain = dir.join("plain.wav");
+        fn sound<'a>(
+            info: &'a MediaInfo,
+            span: (Tick, Tick),
+            effects: &'a [Effect],
+            path: &'a Path,
+        ) -> Sound<'a> {
+            Sound {
+                info,
+                stream: 0,
+                from: span.0,
+                to: span.1,
+                effects,
+                path,
+                format: NrtFormat::Float32,
+                tempo: bv_timeline::Tempo::default(),
+            }
+        }
+        render(&sound(&info, (from, to), &[], &plain), &mut |_| true).unwrap();
+        let reference = read(&plain);
+        let eq = Effect::new(EffectKind::ModernEq);
+        let mut gapper = Effect::new(EffectKind::GapperSnipper);
+        // As long as it was: its gaps off (the effect's own default inserts).
+        gapper.enabled = false;
+        for (name, chain) in [("eq", vec![eq.clone()]), ("eq_gather", vec![eq, gapper])] {
+            let path = dir.join(format!("{name}.wav"));
+            render(&sound(&info, (from, to), &chain, &path), &mut |_| true).unwrap();
+            let got = read(&path);
+            assert_eq!(got[0].len(), reference[0].len(), "{name}");
+            let worst = got[0]
+                .iter()
+                .zip(&reference[0])
+                .skip(200)
+                .take(11_000)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(worst < 1e-3, "{name}: {worst}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

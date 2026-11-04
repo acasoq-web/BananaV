@@ -745,7 +745,8 @@ impl TimelineView {
         extra: &[(Tick, SnapKind)],
         to_cursor: bool,
     ) -> Tick {
-        const SNAP_PX: f64 = 8.0;
+        // How near a point draws what moves, as VEGAS's: 7 pixels.
+        const SNAP_PX: f64 = 7.0;
         self.snap_line = None;
         // Shift: off when it is on, on when it is off.
         if app.snapping != self.snap_override {

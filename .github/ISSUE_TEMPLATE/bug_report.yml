@@ -15,7 +15,7 @@ body:
     attributes:
       label: BananaV version
       description: The package's name, or the commit you built from.
-      placeholder: BananaV-0.1.0-abc1234-windows-x64
+      placeholder: BananaV-0.2.0-windows-x64
     validations:
       required: true
   - type: dropdown

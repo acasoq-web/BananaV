@@ -1221,8 +1221,8 @@ const EXPLORER: &[(&str, &[&str], Action)] = cmds! {
 const TRIMMER: &[(&str, &[&str], Action)] = cmds! {
     "CursorTo.Center" => [] Soon;
     "CursorTo.CycleTimeSelection" => [] Soon;
-    "CursorTo.End" => ["Ctrl+End"] X(Extra::Trimmer(TrimmerOp::End));
-    "CursorTo.Home" => ["Ctrl+Home"] X(Extra::Trimmer(TrimmerOp::Start));
+    "CursorTo.End" => ["E", "Ctrl+End"] X(Extra::Trimmer(TrimmerOp::End));
+    "CursorTo.Home" => ["W", "Ctrl+Home"] X(Extra::Trimmer(TrimmerOp::Start));
     "CursorTo.LeftByFrame" => ["Alt+Left"] X(Extra::Trimmer(TrimmerOp::Frame(-1)));
     "CursorTo.LeftByGrid" => [] Soon;
     "CursorTo.LeftByMarker" => ["Ctrl+Left"] X(Extra::Trimmer(TrimmerOp::MarkerStep(-1)));
@@ -1732,6 +1732,7 @@ fn global_id(cmd: Cmd) -> String {
         | Cmd::ImportProjectMedia
         | Cmd::ImportEdl
         | Cmd::ImportOtio
+        | Cmd::ImportVeg
         | Cmd::ImportXml
         | Cmd::ImportFcpxml
         | Cmd::ImportClosedCaptioning
@@ -1743,6 +1744,7 @@ fn global_id(cmd: Cmd) -> String {
         | Cmd::ExportFcpxml
         | Cmd::ExportEdl
         | Cmd::ExportOtio
+        | Cmd::ExportVeg
         | Cmd::Properties
         | Cmd::Exit => "File",
         Cmd::Toolbar

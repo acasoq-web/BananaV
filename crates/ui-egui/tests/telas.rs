@@ -3806,11 +3806,11 @@ fn pancrop_como_o_vegas() {
     // At the cursor, inside the event: a keyframe there.
     let c = h.state().clip_by_id_for_review(event).expect("the event");
     let angle = c
-        .transform_keys
+        .pan_crop
+        .keys
         .iter()
-        .map(|k| k.value.rotation_deg)
-        .chain([c.transform.rotation_deg])
-        .fold(0.0f32, |m, a| if a.abs() > m.abs() { a } else { m });
+        .map(|k| k.angle.to_degrees())
+        .fold(0.0f64, |m, a| if a.abs() > m.abs() { a } else { m });
     assert!(angle.abs() > 1.0, "turned {angle}");
     snap(&mut h, "pancrop_girado");
     h.get_by_label("Show Properties").click();
@@ -3875,7 +3875,7 @@ fn pancrop_quadros_chave_como_o_vegas() {
     };
     let curves = |h: &Harness<'_, BananaApp>| -> Vec<KeyCurve> {
         let c = h.state().clip_by_id_for_review(event).expect("the event");
-        c.transform_keys.iter().map(|k| k.curve).collect()
+        c.pan_crop.keys.iter().map(|k| k.curve).collect()
     };
     // A click picks one, Ctrl and a click another; their menu's curve is
     // both's.
@@ -3922,9 +3922,9 @@ fn pancrop_quadros_chave_como_o_vegas() {
     drag(&mut h, first, first + egui::vec2(60.0, 0.0), None);
     let c = h.state().clip_by_id_for_review(event).expect("the event");
     assert!(
-        c.transform_keys[0].at > bv_core::Tick::ZERO,
+        c.pan_crop.keys[0].at > bv_core::Tick::ZERO,
         "{:?}",
-        c.transform_keys
+        c.pan_crop.keys
     );
     snap(&mut h, "pancrop_quadros_chave_primeiro");
     // The Mask row's properties.
@@ -7282,6 +7282,121 @@ fn captura_alcas_padrao() {
                 "{c:?}"
             );
             snap(&mut h, "alca_spherize_arrastada");
+        }
+    }
+}
+
+/// The panels of the audio effects that follow VEGAS's, each on the demo's
+/// audio event at its defaults: `painel_audio_<name>.png`.
+/// `BV_AUDIO_PANELS` (names, comma-separated) draws only those.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_paineis_audio() {
+    let only = std::env::var("BV_AUDIO_PANELS").ok();
+    for k in bv_timeline::EffectKind::AUDIO {
+        if bv_timeline::audio_fx::presets(k).is_none() {
+            continue;
+        }
+        if let Some(only) = &only
+            && !only.split(',').any(|n| n.trim() == k.name())
+        {
+            continue;
+        }
+        let mut app = new_app();
+        app.load_demo();
+        assert!(app.audio_effect_for_review(k), "{k:?}");
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .with_pixels_per_point(1.0)
+            .wgpu()
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        settle(&mut h);
+        let name: String = k
+            .name()
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        snap(&mut h, &format!("painel_audio_{name}"));
+    }
+}
+
+/// Two clicks, a frame apart each press and release, as a hand makes them.
+fn double_click_slowly(h: &mut Harness<'_, BananaApp>, at: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+    }
+    settle(h);
+}
+
+/// A slider's bar double-clicked puts the parameter's default back, as
+/// VEGAS's sliders do: in the audio effects' panels, whatever the slider
+/// shows (a gain in dB, a pan, a level in dB, a time).
+#[test]
+fn double_clicking_a_sliders_bar_puts_its_default_back() {
+    for (k, count) in [
+        (bv_timeline::EffectKind::Volume, 1),
+        (bv_timeline::EffectKind::Pan, 1),
+        (bv_timeline::EffectKind::StudioGate, 3),
+    ] {
+        let mut app = new_app();
+        app.load_demo();
+        assert!(app.audio_effect_for_review(k), "{k:?}");
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .with_pixels_per_point(1.0)
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        settle(&mut h);
+        let params = |h: &Harness<'_, BananaApp>| {
+            let clip = h.state().clip_for_review().expect("the event");
+            let e = clip
+                .effects
+                .iter()
+                .find(|e| e.kind == k)
+                .expect("the effect");
+            (0..k.params().len())
+                .map(|i| e.param(i))
+                .collect::<Vec<f32>>()
+        };
+        let defaults: Vec<f32> = k.params().iter().map(|p| p.default).collect();
+        // The panel's sliders, from the top (the window's own ones below).
+        let mut bars: Vec<egui::Rect> = h
+            .query_all_by_role(egui::accesskit::Role::Slider)
+            .map(|n| n.rect())
+            .filter(|r| r.top() < 700.0)
+            .collect();
+        bars.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        assert!(bars.len() >= count, "{k:?}: {} sliders", bars.len());
+        for bar in &bars[..count] {
+            let off = egui::pos2(bar.left() + bar.width() * 0.15, bar.center().y);
+            click_at(&mut h, off);
+            settle(&mut h);
+            assert_ne!(params(&h), defaults, "{k:?}: a click moves it");
+            double_click_slowly(&mut h, off);
+            assert_eq!(params(&h), defaults, "{k:?}: a double-click puts it back");
         }
     }
 }

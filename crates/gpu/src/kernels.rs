@@ -2,7 +2,7 @@
 //! how one is run on images in buffers.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use wgpu::util::DeviceExt;
 
@@ -110,6 +110,8 @@ pub(crate) enum K {
     GlowBright,
     CopyInto,
     Place,
+    PlaceHard,
+    PlaceSoft,
     HalfSize,
     Composite,
     Rotate,
@@ -296,7 +298,7 @@ pub(crate) enum K {
 }
 
 impl K {
-    pub const ALL: [K; 196] = [
+    pub const ALL: [K; 198] = [
         K::Fill,
         K::Scale,
         K::ToVideoGamma,
@@ -313,6 +315,8 @@ impl K {
         K::GlowBright,
         K::CopyInto,
         K::Place,
+        K::PlaceHard,
+        K::PlaceSoft,
         K::HalfSize,
         K::Composite,
         K::Rotate,
@@ -507,12 +511,12 @@ impl K {
             | KitBlackRestore | KitChannelBlend | KitMaskGenerator | KitBroadcastColors
             | KitLabAdjust | KitColorMatch | KitSoftTone | KitVignette | KitCheckerboard
             | KitTestPattern | KitNoiseTexture | KitFlickerAdd => Sig::InPlace,
-            CopyInto | Place | HalfSize | Composite | Rotate | Mirror | FlickerFilter
-            | InterpolateFields | Blend | BoxH | BoxV | BlockAverage | BlockFill | Sharpen
-            | AddGlow | Curves | FieldAlpha | FieldBoxH | FieldBoxV | PixelRows | PixelCells
-            | PixelFill | LutFilter | EqualizeRows | EqualizeTotal | EqualizeApply
-            | PictureInPicture | UnsharpMask | Overlay | AcesRrt | AcesOdt | Grade
-            | BezierMasking | KitSpherize | KitOffsetWrap | KitTinyPlanet | KitDeform
+            CopyInto | Place | PlaceHard | PlaceSoft | HalfSize | Composite | Rotate | Mirror
+            | FlickerFilter | InterpolateFields | Blend | BoxH | BoxV | BlockAverage
+            | BlockFill | Sharpen | AddGlow | Curves | FieldAlpha | FieldBoxH | FieldBoxV
+            | PixelRows | PixelCells | PixelFill | LutFilter | EqualizeRows | EqualizeTotal
+            | EqualizeApply | PictureInPicture | UnsharpMask | Overlay | AcesRrt | AcesOdt
+            | Grade | BezierMasking | KitSpherize | KitOffsetWrap | KitTinyPlanet | KitDeform
             | KitConvolution | KitQuickBlur | KitBumpMap | KitLensCorrection | KitStabilize
             | KitStabilizeBlur | KitSmartEnhance | KitGuidedLow | KitGuidedOp | KitGuidedMean
             | KitDehazeDark | KitKeyMask | KitKeyApply | KitChromaUv | KitChromaApply
@@ -558,6 +562,8 @@ impl K {
             GlowBright => "glow_bright",
             CopyInto => "copy_into",
             Place => "place",
+            PlaceHard => "place_hard",
+            PlaceSoft => "place_soft",
             HalfSize => "half_size",
             Composite => "composite",
             Rotate => "rotate",
@@ -803,11 +809,14 @@ pub(crate) enum Grid {
 }
 
 /// The shaders, compiled once per device; pipelines are made the first
-/// time a kernel runs.
+/// time a kernel runs, or by `Gpu::warm_up` before that.
 pub(crate) struct Kernels {
     modules: HashMap<Sig, wgpu::ShaderModule>,
     layouts: HashMap<Sig, (wgpu::BindGroupLayout, wgpu::PipelineLayout)>,
-    pipelines: Mutex<HashMap<K, wgpu::ComputePipeline>>,
+    /// Each kernel's own cell: the compiler (a kernel may take seconds)
+    /// runs outside the map's lock, so a frame waits for the kernels it
+    /// uses and for no other.
+    pipelines: Mutex<HashMap<K, Arc<OnceLock<wgpu::ComputePipeline>>>>,
     /// Kernels made at run time, by their source (`None`: not valid WGSL),
     /// the last ones kept.
     made: Mutex<Vec<(String, Option<wgpu::ComputePipeline>)>>,
@@ -964,20 +973,31 @@ impl Kernels {
     }
 
     pub fn pipeline(&self, device: &wgpu::Device, k: K) -> wgpu::ComputePipeline {
-        let mut map = self.pipelines.lock().expect("pipelines");
-        map.entry(k)
-            .or_insert_with(|| {
-                let sig = k.sig();
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(k.entry()),
-                    layout: Some(&self.layouts[&sig].1),
-                    module: &self.modules[&sig],
-                    entry_point: Some(k.entry()),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
+        let cell = self
+            .pipelines
+            .lock()
+            .expect("pipelines")
+            .entry(k)
+            .or_default()
+            .clone();
+        cell.get_or_init(|| {
+            let sig = k.sig();
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(k.entry()),
+                layout: Some(&self.layouts[&sig].1),
+                module: &self.modules[&sig],
+                entry_point: Some(k.entry()),
+                // The kernels write their `var<workgroup>` tables before
+                // reading them; zeroing them first, an element at a time
+                // for FXC, costs tens of seconds to compile.
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: false,
+                    ..Default::default()
+                },
+                cache: None,
             })
-            .clone()
+        })
+        .clone()
     }
 
     /// Records kernel `k` on `buffers` (in binding order after the

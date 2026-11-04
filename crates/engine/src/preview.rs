@@ -948,6 +948,7 @@ impl Worker {
         self.pool.set_patience(None);
         let (frame, took, waited) = self.draw(req, t);
         self.trace_took("ahead", t, frame.exact, took, waited);
+        let late;
         {
             let mut st = lock(shared);
             let key = req.key(t);
@@ -971,6 +972,9 @@ impl Worker {
                 );
             }
             st.keep(&frame);
+            // A frame already due shows now; one drawn ahead of its time
+            // when the interface paints for it (it does as frames are due).
+            late = st.asked.as_ref().is_none_or(|a| frame.time <= a.time);
             // Still wanted: of the project and size asked for, after what
             // shows.
             let wanted = st
@@ -987,7 +991,9 @@ impl Worker {
             }
         }
         shared.1.notify_all();
-        repaint();
+        if late {
+            repaint();
+        }
         // The events coming within a few seconds get their readers now (a
         // long recording takes a while to open and to seek in), and their
         // plug-ins, the other threads' too.

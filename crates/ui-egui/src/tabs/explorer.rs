@@ -14,7 +14,8 @@
 use crate::i18n::tr;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::{BananaApp, MediaDrag};
 use crate::dock::Tab;
@@ -76,9 +77,10 @@ pub struct ExplorerState {
     all_files: bool,
     view: View,
     sort: SortBy,
-    /// The tree: its root open, the folders open in it, the folders found
-    /// in each (read when opened).
+    /// The tree: its root open, its first level, the folders open in it,
+    /// the folders found in each (read when opened).
     root_open: bool,
+    roots: TreeRoots,
     open: HashSet<PathBuf>,
     folders: HashMap<PathBuf, Vec<PathBuf>>,
     /// Views › Regions and Summary: panels about the selected file at the
@@ -116,7 +118,7 @@ fn file_glyph(p: &Path) -> Glyph {
         Some(FileKind::Image) => Glyph::Icon(Icon::FileImage),
         Some(FileKind::Video) => Glyph::Icon(Icon::FileVideo),
         Some(FileKind::Project) => Glyph::Logo,
-        Some(FileKind::Timeline) | None => Glyph::Icon(Icon::File),
+        Some(FileKind::Timeline | FileKind::VegProject) | None => Glyph::Icon(Icon::File),
     }
 }
 
@@ -140,6 +142,7 @@ fn type_text(e: &Entry) -> String {
         Some(FileKind::Audio) => tr("Audio").into(),
         Some(FileKind::Image) => tr("Image").into(),
         Some(FileKind::Project) => tr("BananaV project").into(),
+        Some(FileKind::VegProject) => tr("VEG Project").into(),
         Some(FileKind::Timeline)
             if e.path
                 .extension()
@@ -191,6 +194,91 @@ fn drives() -> Vec<PathBuf> {
     }
 }
 
+/// A line of the tree's first level: its name, folder and icon.
+type TreeRoot = (String, PathBuf, Icon);
+
+/// The tree's first level: the favorites that exist, the user's folders and
+/// the drives.
+fn read_roots(favorites: &[PathBuf]) -> Vec<TreeRoot> {
+    let mut nodes: Vec<TreeRoot> = favorites
+        .iter()
+        .filter(|p| p.is_dir())
+        .map(|p| (node_name(p), p.clone(), Icon::StarFilled))
+        .collect();
+    nodes.extend(
+        places()
+            .into_iter()
+            .map(|(n, p)| (n.to_string(), p, Icon::Folder)),
+    );
+    nodes.extend(
+        drives()
+            .into_iter()
+            .map(|d| (d.display().to_string(), d, Icon::Disc)),
+    );
+    nodes
+}
+
+/// The tree's first level, read on a thread of its own every few seconds:
+/// frames never touch the disks for it (a disk asleep or a network drive
+/// would hold them up).
+#[derive(Debug, Default)]
+struct TreeRoots {
+    nodes: Vec<TreeRoot>,
+    /// The favorites they were read for, and when.
+    favorites: Vec<PathBuf>,
+    read_at: Option<Instant>,
+    reading: Option<Receiver<Vec<TreeRoot>>>,
+}
+
+impl TreeRoots {
+    const EVERY: Duration = Duration::from_secs(5);
+
+    /// The first level as last read; a new reading starts when it is time
+    /// (the interface repaints when it brings something new).
+    fn nodes(&mut self, ctx: &egui::Context, favorites: &[PathBuf]) -> &[TreeRoot] {
+        if let Some(reading) = &self.reading {
+            match reading.try_recv() {
+                Ok(nodes) => {
+                    self.nodes = nodes;
+                    self.reading = None;
+                }
+                Err(TryRecvError::Disconnected) => self.reading = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let due =
+            self.favorites != favorites || self.read_at.is_none_or(|t| t.elapsed() >= Self::EVERY);
+        if due && self.reading.is_none() {
+            self.read_at = Some(Instant::now());
+            self.favorites = favorites.to_vec();
+            let (tx, rx) = channel();
+            let (ctx, list, known) = (ctx.clone(), favorites.to_vec(), self.nodes.clone());
+            let spawned = std::thread::Builder::new()
+                .name("bv-explorer-roots".into())
+                .spawn(move || {
+                    let nodes = read_roots(&list);
+                    let new = nodes != known;
+                    let _ = tx.send(nodes);
+                    if new {
+                        ctx.request_repaint();
+                    }
+                });
+            if spawned.is_ok() {
+                // The first time, disks that answer quickly show at once.
+                match rx.recv_timeout(Duration::from_millis(if self.nodes.is_empty() {
+                    100
+                } else {
+                    0
+                })) {
+                    Ok(nodes) => self.nodes = nodes,
+                    Err(_) => self.reading = Some(rx),
+                }
+            }
+        }
+        &self.nodes
+    }
+}
+
 /// Folders and files to leave out: hidden and the system's.
 fn hidden(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('$')
@@ -217,6 +305,7 @@ impl ExplorerState {
             view: View::Details,
             sort: SortBy::Name,
             root_open: true,
+            roots: TreeRoots::default(),
             open: HashSet::new(),
             folders: HashMap::new(),
             show_regions: false,
@@ -367,6 +456,15 @@ impl ExplorerState {
             .filter(|e| any || (!e.is_dir && crate::media_files::kind_of(&e.path).is_some()))
             .map(|e| e.path.clone())
             .collect()
+    }
+
+    /// Whether `p`, picked, is a file: as the folder's list read says, the
+    /// disk asked only for what is not in it.
+    fn is_file(&self, p: &Path) -> bool {
+        self.entries
+            .iter()
+            .find(|e| e.path == p)
+            .map_or_else(|| p.is_file(), |e| !e.is_dir)
     }
 
     /// The folders inside `dir` (read once, when its node opens).
@@ -528,7 +626,11 @@ enum Act {
 /// its places at the end; Refresh, Auto Preview and Views.
 fn toolbar(ui: &mut Ui, app: &mut BananaApp) {
     // Previews: the selected file alone through the preview bus.
-    let file = app.explorer.selected.clone().filter(|p| p.is_file());
+    let file = app
+        .explorer
+        .selected
+        .clone()
+        .filter(|p| app.explorer.is_file(p));
     let previewing = app.previewing();
     let auto = app.settings.explorer_auto_preview;
     let favorites = app.settings.explorer_favorites.clone();
@@ -634,7 +736,7 @@ fn toolbar(ui: &mut Ui, app: &mut BananaApp) {
         }
         // Add to Favorites: the folder picked, or the one open.
         let folder = picked
-            .filter(|p| p.is_dir())
+            .filter(|p| !st.is_file(p))
             .unwrap_or_else(|| st.dir.clone());
         let fav = favorites.contains(&folder);
         if crate::widgets::icon_toggle(ui, Icon::Star, fav, tr("Add to Favorites")).clicked() {
@@ -815,21 +917,7 @@ fn tree_ui(ui: &mut Ui, st: &mut ExplorerState, favorites: &[PathBuf]) {
     if !st.root_open {
         return;
     }
-    let mut nodes: Vec<(String, PathBuf, Icon)> = favorites
-        .iter()
-        .filter(|p| p.is_dir())
-        .map(|p| (node_name(p), p.clone(), Icon::StarFilled))
-        .collect();
-    nodes.extend(
-        places()
-            .into_iter()
-            .map(|(n, p)| (n.to_string(), p, Icon::Folder)),
-    );
-    nodes.extend(
-        drives()
-            .into_iter()
-            .map(|d| (d.display().to_string(), d, Icon::Disc)),
-    );
+    let nodes = st.roots.nodes(ui.ctx(), favorites).to_vec();
     for (name, path, icon) in nodes {
         folder_node(ui, st, 1, name, path, icon);
     }
@@ -1482,7 +1570,11 @@ impl BananaApp {
 
 /// The selected file's media information (read once).
 fn selected_info(app: &mut BananaApp) -> Option<(PathBuf, MediaInfo)> {
-    let path = app.explorer.selected.clone().filter(|p| p.is_file())?;
+    let path = app
+        .explorer
+        .selected
+        .clone()
+        .filter(|p| app.explorer.is_file(p))?;
     if let Some(info) = app.explorer.probes.get(&path) {
         return info.clone().map(|i| (path, i));
     }

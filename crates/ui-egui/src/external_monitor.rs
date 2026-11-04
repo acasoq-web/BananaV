@@ -11,9 +11,7 @@ use bv_core::{Tick, TimeRange};
 use bv_timeline::OutputRotation;
 
 use crate::app::BananaApp;
-use crate::egui::{
-    self, Color32, ColorImage, Key, Rect, TextureHandle, TextureOptions, pos2, vec2,
-};
+use crate::egui::{self, Color32, Key, Rect, TextureHandle, TextureOptions, pos2, vec2};
 use crate::i18n::tr;
 use crate::preferences::preview_display;
 
@@ -330,7 +328,7 @@ impl BananaApp {
                         .then(|| fit((fw, fh), room)),
                 };
                 let (rgba, w, h) = prepare(&f.rgba, f.width, f.height, how);
-                let image = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                let image = crate::tabs::preview::frame_image([w as usize, h as usize], &rgba);
                 match &mut ext.texture {
                     Some(tex) => tex.set(image, TextureOptions::LINEAR),
                     None => {

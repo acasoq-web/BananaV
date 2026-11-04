@@ -798,7 +798,14 @@ fn what_the_format_cannot_say_is_counted() {
     let a = file(&mut p, r"C:\a.mp4", 0);
     let ids = p.insert_media(a, Tick::ZERO, Some(v), None).unwrap();
     p.trim_end(ids[0], s(2)).unwrap();
-    p.clip_mut(ids[0]).unwrap().transform.scale = 1.5;
+    p.set_clip_framing(
+        ids[0],
+        &crate::fx::Transform {
+            scale: 1.5,
+            ..crate::fx::Transform::default()
+        },
+    )
+    .unwrap();
     let bars = p.add_media(MediaInfo::generated(Generator::ColorBars, &p.settings));
     let bs = p.insert_media(bars, s(3), Some(v), None).unwrap();
     p.trim_end(bs[0], s(4)).unwrap();

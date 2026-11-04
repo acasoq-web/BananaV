@@ -4,6 +4,50 @@ What changed in each public build of BananaV. The
 [Releases page](https://github.com/acasoq-web/BananaV/releases) has the
 downloads, and each release's notes say how to install it.
 
+## 0.2.0 — 2026-11-04
+
+For Windows and Linux (x64 and ARM64), and the first with an installer for
+Windows.
+
+### Highlights
+
+- **51 audio effects.** Equalizers (Modern Equalizer, Track EQ, Graphic, Parametric and Paragraphic EQ), dynamics (Compressor, Gate, Limiter, DeEsser, Multi-Band and Graphic Dynamics, Wave Hammer Surround), reverbs and delays, modulation (Chorus, Flanger, Phaser, Vibrato, Tremolo Pan, Amplitude Modulation), Distortion and Tube Stage, Vocal Strip, Pitch Shift, Time Stretch, Audio Restoration and the Express set, each with its panel and factory presets.
+- **Compatible with `.veg` projects.** File › Open, File › Import and File › Export: tracks, events and takes, fades, transitions, audio effects, volumes, Pan/Crop with its masks, keyframes, Track Motion and busses. Import stays marked Experimental while real projects test it.
+- **Color correction with LUTs.** Color Grading rebuilt: color wheels, curves, HSL curves, white balance, levels, tone and saturation, with Camera and Look LUTs from `.cube` files and Export LUT.
+- **An installer for Windows.** Open it and follow the steps: BananaV goes to the Start menu, no administrator password needed. The zip stays for those who prefer not to install.
+- **Pan/Crop rebuilt**, and compared frame by frame with reference renders.
+- **Smooth playback.** The graphics card draws from the first frame, and a 1080p60 event with two effects plays at 60 frames a second, evenly, on about one processor core.
+
+### Audio
+
+- Each effect has its own panel, with sliders that reset on a double-click, and those drawn as curves (Graphic EQ, Graphic Dynamics, Distortion, Amplitude Modulation, Vibrato) have a graph editor.
+- Pitch Shift, Time Stretch, Gapper/Snipper and Vibrato play on events, their sound made through the whole chain; in a track's or a bus's chain they let the sound through, and the FX window says so.
+- Modern Equalizer: eight bands, with minimum and linear phase, oversampling, mid/side and per-channel routing.
+
+### `.veg` projects
+
+- Transitions come in with their settings and their progress envelopes; effect keyframes of every kind (numbers, points, colors, choices, with Bézier handles); effects switched off or placed before the Pan/Crop.
+- Volume: each event's gain, Normalize, channels and phase; the tracks' volume, pan, envelopes and sends; the busses' faders, mute, solo, effects and envelopes.
+- Video: velocity, Resample mode, Reduce Interlace, Undersample rate, Track Motion with its shadow, glow and 3D box, Parent Motion and compositing children.
+- Export writes all of this except audio effect chains. Not imported yet: events of generated media, a transition at an event's end, and pan up and down.
+
+### Color
+
+- Older projects' Color Grading settings go back to their defaults.
+- Lift and Gain eyedroppers, a neutral tone picker and a color selector; curve handles with Lock axis and Lock to grid.
+
+### Pan/Crop
+
+- An event's Pan/Crop is a box in its media's pixels; older projects come in as they were.
+- Keyframes move along smooth paths with Smoothness; masks follow their keyframes, each with its own path settings.
+- The rotation center can be dragged, the presets include the 1:1, 4:3, 16:9 and 1.85:1 shapes, and the menu resizes adjustment events to the project.
+
+### Timeline and performance
+
+- The Sharp curve is now 4p³ − 6p² + 3p in fades, envelopes and keyframes; snapping reaches 7 pixels; Esc stops playback; W and E go to the Trimmer's start and end.
+- Peak files beside media (`.sfk`) give their waveforms without reading the sound.
+- Effect shaders compile in the background in 6.5 s instead of 63 s, the window paints only when a frame is due, and the Explorer's tree no longer touches the disks every frame.
+
 ## 0.1.0 Ultra Alpha 2 — 2026-11-02
 
 The second test build, for Windows and Linux (x64 and ARM64), and the first

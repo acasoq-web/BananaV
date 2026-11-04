@@ -50,7 +50,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     } else {
         clip.start
     };
-    let framing = clip.transform_at(at);
+    let place = project.clip_place_in(id);
+    let shown = place.map(|place| clip.box_at(at, place.media, place.media_aspect));
+    let framing = place
+        .zip(shown)
+        .map_or_else(Transform::default, |(place, key)| {
+            bv_timeline::pancrop::transform_from_key(&key, &place)
+        });
     let mut tf = framing;
     let mut conform = false;
 
@@ -218,7 +224,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
                     if ui.small_button(tr("Open Pan/Crop…")).clicked() {
                         app.clip_windows.pan_crop = Some(id);
                     }
-                    if !clip.transform_keys.is_empty() {
+                    if clip.pan_crop.keys.len() > 1 {
                         super::hint(ui, tr("Animated: edits the keyframe at the cursor."));
                     }
                 });
@@ -251,11 +257,20 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             apply_clip(app, key, id, c);
         }
     }
-    if tf != framing {
+    if tf != framing
+        && let (Some(place), Some(was)) = (place, shown)
+    {
+        // The box as the sliders say, what they do not show as it was: the
+        // pivot where it is from its middle.
+        let mut now = bv_timeline::pancrop::key_from_transform(&tf, &place);
+        now.pivot = [
+            now.center[0] + was.pivot[0] - was.center[0],
+            now.center[1] + was.pivot[1] - was.center[1],
+        ];
         let key = ui.id().with(("enquadramento", id.0));
         let new = app.settings.prefs.new_motion_keys();
         app.modify_merged(key, |p| {
-            let _ = p.set_clip_transform_at_as(id, at, tf, new);
+            let _ = p.set_clip_box_at(id, at, now, new);
         });
     }
 }
@@ -469,6 +484,12 @@ pub fn params(ui: &mut egui::Ui, e: &mut Effect) {
             let mut i = 0;
             while i < specs.len() {
                 let spec = specs[i];
+                group_heading(ui, &spec);
+                // Greyed out while a switch it waits on is not as it wants.
+                let live = spec.live(|k| e.param(k));
+                let label = |ui: &mut egui::Ui| {
+                    ui.add_enabled(live, egui::Label::new(tr(spec.name)));
+                };
                 match spec.kind {
                     ParamKind::Color => {
                         ui.label(tr(spec.name));
@@ -488,26 +509,320 @@ pub fn params(ui: &mut egui::Ui, e: &mut Effect) {
                         continue;
                     }
                     ParamKind::Toggle => {
-                        ui.label(tr(spec.name));
-                        let mut on = e.param(i) >= 0.5;
-                        if crate::widgets::checkbox(ui, &mut on, "").changed() {
-                            e.set_param(i, on as u8 as f32);
-                        }
+                        label(ui);
+                        ui.add_enabled_ui(live, |ui| {
+                            let mut on = e.param(i) >= 0.5;
+                            if crate::widgets::checkbox(ui, &mut on, "").changed() {
+                                e.set_param(i, on as u8 as f32);
+                            }
+                        });
                     }
                     ParamKind::Slider => {
-                        ui.label(tr(spec.name));
-                        let mut v = e.param(i);
-                        let r = ui.add(crate::fmt::slider(&mut v, spec.min..=spec.max, 2, ""));
-                        if r.double_clicked() {
-                            v = spec.default;
+                        label(ui);
+                        ui.add_enabled_ui(live, |ui| {
+                            let mut v = e.param(i);
+                            let r = param_slider(ui, &spec, &mut v);
+                            if r.double_clicked()
+                                || crate::widgets::bar_double_clicked(ui, &r, true)
+                            {
+                                v = spec.default;
+                            }
+                            if v != e.param(i) {
+                                e.set_param(i, v);
+                            }
+                        });
+                    }
+                    ParamKind::Choice => {
+                        label(ui);
+                        ui.add_enabled_ui(live, |ui| {
+                            let mut v = e.param(i);
+                            let at = (v - spec.min).round().max(0.0) as usize;
+                            let shown = spec.options.get(at).map_or("", |o| tr(o));
+                            egui::ComboBox::from_id_salt(("param-choice", e.kind, i))
+                                .selected_text(shown)
+                                .show_ui(ui, |ui| {
+                                    for (k, o) in spec.options.iter().enumerate() {
+                                        let value = spec.min + k as f32;
+                                        ui.selectable_value(&mut v, value, tr(o));
+                                    }
+                                });
+                            if v != e.param(i) {
+                                e.set_param(i, v);
+                            }
+                        });
+                    }
+                    ParamKind::Data => {
+                        i += 1;
+                        continue;
+                    }
+                    ParamKind::Graph => {
+                        let points = spec.graph.map_or(0, |g| g.params());
+                        label(ui);
+                        if let Some(g) = spec.graph {
+                            ui.vertical(|ui| graph_editor(ui, e, i, &g));
                         }
-                        if v != e.param(i) {
-                            e.set_param(i, v);
-                        }
+                        ui.end_row();
+                        i += 1 + points;
+                        continue;
                     }
                 }
                 ui.end_row();
                 i += 1;
             }
         });
+}
+
+/// A graph's points as its effect holds them: `count` at `at`, then
+/// `(x, y)` pairs.
+fn graph_points(e: &Effect, at: usize) -> Vec<(f32, f32)> {
+    let count = e.param(at).round().max(0.0) as usize;
+    (0..count)
+        .map(|k| (e.param(at + 1 + 2 * k), e.param(at + 2 + 2 * k)))
+        .collect()
+}
+
+fn set_graph_points(e: &mut Effect, at: usize, points: &[(f32, f32)]) {
+    e.set_param(at, points.len() as f32);
+    for (k, (x, y)) in points.iter().enumerate() {
+        e.set_param(at + 1 + 2 * k, *x);
+        e.set_param(at + 2 + 2 * k, *y);
+    }
+}
+
+/// A graph parameter's editor: its points joined by straight lines; drag
+/// a point to move it (the first and last stay at the ends when pinned),
+/// double-click the background to add one, right-click a point to take it
+/// away (never below two).
+fn graph_editor(ui: &mut egui::Ui, e: &mut Effect, at: usize, g: &bv_timeline::Graph) {
+    let width = ui.available_width().clamp(240.0, 520.0);
+    let (rect, background) = ui.allocate_exact_size(egui::vec2(width, 160.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
+    let stroke = egui::Stroke::new(1.0, visuals.weak_text_color().gamma_multiply(0.35));
+    for k in 1..4 {
+        let t = k as f32 / 4.0;
+        painter.hline(rect.x_range(), rect.top() + t * rect.height(), stroke);
+        painter.vline(rect.left() + t * rect.width(), rect.y_range(), stroke);
+    }
+    let (x0, x1) = g.x;
+    let (y0, y1) = g.y;
+    let to_unit_x = |x: f32| {
+        if g.log_x && x0 > 0.0 {
+            (x.max(x0) / x0).ln() / (x1 / x0).ln()
+        } else {
+            (x - x0) / (x1 - x0)
+        }
+    };
+    let from_unit_x = |u: f32| {
+        if g.log_x && x0 > 0.0 {
+            x0 * (x1 / x0).powf(u)
+        } else {
+            x0 + u * (x1 - x0)
+        }
+    };
+    // The curve drawn a little inside, so the points at its ends show whole.
+    let plot = rect.shrink(6.0);
+    let to_screen = |(x, y): (f32, f32)| {
+        egui::pos2(
+            plot.left() + to_unit_x(x).clamp(0.0, 1.0) * plot.width(),
+            plot.bottom() - ((y - y0) / (y1 - y0)).clamp(0.0, 1.0) * plot.height(),
+        )
+    };
+    let from_screen = |p: egui::Pos2| {
+        let u = ((p.x - plot.left()) / plot.width()).clamp(0.0, 1.0);
+        let v = ((plot.bottom() - p.y) / plot.height()).clamp(0.0, 1.0);
+        (from_unit_x(u), y0 + v * (y1 - y0))
+    };
+    let mut points = graph_points(e, at);
+    let mut changed = false;
+    let line: Vec<egui::Pos2> = points.iter().map(|p| to_screen(*p)).collect();
+    painter.add(egui::Shape::line(
+        line.clone(),
+        egui::Stroke::new(2.0, visuals.selection.bg_fill),
+    ));
+    let last = points.len().saturating_sub(1);
+    let mut remove = None;
+    for (k, pos) in line.iter().enumerate() {
+        let id = ui.id().with(("graph-point", at, k));
+        let r = ui.interact(
+            egui::Rect::from_center_size(*pos, egui::vec2(12.0, 12.0)),
+            id,
+            egui::Sense::click_and_drag(),
+        );
+        let hot = r.hovered() || r.dragged();
+        painter.circle_filled(
+            *pos,
+            if hot { 5.0 } else { 4.0 },
+            visuals.strong_text_color(),
+        );
+        if r.dragged()
+            && let Some(p) = r.interact_pointer_pos()
+        {
+            let (mut x, y) = from_screen(p);
+            // Between its neighbours; the ends stay put when pinned.
+            let lo = if k == 0 { x0 } else { points[k - 1].0 };
+            let hi = if k == last { x1 } else { points[k + 1].0 };
+            x = x.clamp(lo, hi);
+            if g.pinned_ends && (k == 0 || k == last) {
+                x = points[k].0;
+            }
+            points[k] = (x, y);
+            changed = true;
+        }
+        if r.secondary_clicked() && points.len() > 2 && !(g.pinned_ends && (k == 0 || k == last)) {
+            remove = Some(k);
+        }
+        let axis = |v: f32, unit: &str| {
+            let v = crate::fmt::num(v as f64, 1);
+            if unit.is_empty() {
+                v
+            } else {
+                format!("{v} {}", tr(unit))
+            }
+        };
+        r.on_hover_text(format!(
+            "{}, {}",
+            axis(points[k].0, g.x_unit),
+            axis(points[k].1, g.y_unit)
+        ));
+    }
+    if let Some(k) = remove {
+        points.remove(k);
+        changed = true;
+    }
+    if background.double_clicked()
+        && points.len() < g.points as usize
+        && let Some(p) = background.interact_pointer_pos()
+    {
+        let new = from_screen(p);
+        let k = points.partition_point(|q| q.0 <= new.0);
+        points.insert(k, new);
+        changed = true;
+    }
+    if changed {
+        set_graph_points(e, at, &points);
+    }
+}
+
+/// A heading row when `spec` begins a group of its effect's panel.
+fn group_heading(ui: &mut egui::Ui, spec: &bv_timeline::ParamSpec) {
+    if !spec.group.is_empty() && spec.shown() {
+        ui.label(egui::RichText::new(tr(spec.group)).strong());
+        ui.end_row();
+    }
+}
+
+/// The lowest gain a dB field shows before −Inf.
+const FLOOR_DB: f32 = -96.0;
+
+/// A number parameter's slider, its value shown as `spec` says: as it is
+/// with its unit, a linear gain in dB, a part as a percentage, or a pan.
+pub fn param_slider(
+    ui: &mut egui::Ui,
+    spec: &bv_timeline::ParamSpec,
+    v: &mut f32,
+) -> egui::Response {
+    use bv_timeline::Show;
+    let decimals = spec.decimals as usize;
+    match spec.show {
+        Show::Value => {
+            let unit = if spec.unit.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", tr(spec.unit))
+            };
+            let mut slider = crate::fmt::slider(v, spec.min..=spec.max, decimals, &unit)
+                .logarithmic(spec.log && spec.min > 0.0);
+            if decimals == 0 {
+                slider = slider.step_by(1.0);
+            }
+            ui.add(slider)
+        }
+        Show::Db => {
+            let floor = spec.min;
+            ui.add(
+                egui::Slider::new(v, spec.min..=spec.max)
+                    .custom_formatter(move |d, _| {
+                        if d <= floor as f64 {
+                            format!("{} dB", tr("-Inf."))
+                        } else {
+                            format!("{} dB", crate::fmt::num(d, decimals))
+                        }
+                    })
+                    .custom_parser(move |s| {
+                        if s.trim().to_lowercase().contains("inf") {
+                            Some(floor as f64)
+                        } else {
+                            crate::fmt::parse(s)
+                        }
+                    }),
+            )
+        }
+        Show::Percent => {
+            let mut p = *v * 100.0;
+            let r = ui.add(crate::fmt::slider(
+                &mut p,
+                spec.min * 100.0..=spec.max * 100.0,
+                decimals,
+                " %",
+            ));
+            *v = p / 100.0;
+            r
+        }
+        Show::GainDb => {
+            let top = 20.0 * spec.max.max(1e-6).log10();
+            let mut db = if *v > 0.0 {
+                (20.0 * v.log10()).max(FLOOR_DB)
+            } else {
+                FLOOR_DB
+            };
+            let r = ui.add(
+                egui::Slider::new(&mut db, FLOOR_DB..=top)
+                    .custom_formatter(move |d, _| {
+                        if d <= FLOOR_DB as f64 {
+                            format!("{} dB", tr("-Inf."))
+                        } else {
+                            format!("{} dB", crate::fmt::num(d, decimals))
+                        }
+                    })
+                    .custom_parser(|s| {
+                        if s.trim().to_lowercase().contains("inf") {
+                            Some(FLOOR_DB as f64)
+                        } else {
+                            crate::fmt::parse(s)
+                        }
+                    }),
+            );
+            if r.changed() {
+                *v = if db <= FLOOR_DB {
+                    0.0
+                } else {
+                    10f32.powf(db / 20.0).clamp(spec.min, spec.max)
+                };
+            }
+            r
+        }
+        Show::Pan => {
+            // Shown the other way round: the slider's left is the left.
+            let mut d = -*v * 100.0;
+            let r = ui.add(
+                egui::Slider::new(&mut d, -100.0..=100.0)
+                    .custom_formatter(move |d, _| {
+                        if d.abs() < 0.05 {
+                            tr("Center").to_string()
+                        } else if d < 0.0 {
+                            format!("{} % L", crate::fmt::num(-d, 1))
+                        } else {
+                            format!("{} % R", crate::fmt::num(d, 1))
+                        }
+                    })
+                    .custom_parser(crate::fmt::parse),
+            );
+            if r.changed() {
+                *v = (-d / 100.0).clamp(spec.min, spec.max);
+            }
+            r
+        }
+    }
 }

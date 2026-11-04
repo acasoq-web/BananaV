@@ -43,14 +43,14 @@ enum MaskDrag {
     /// The picked path moved (all of its anchors).
     Path {
         path: usize,
-        from: (f32, f32),
+        from: (f64, f64),
         shapes: Vec<Vec<MaskAnchor>>,
     },
     /// The anchors picked moved together, `grabbed` (the one under the
     /// pointer) snapping.
     Anchors {
         grabbed: AnchorRef,
-        from: (f32, f32),
+        from: (f64, f64),
         shapes: Vec<Vec<MaskAnchor>>,
     },
     /// An anchor's tangent's end: the one after it, or before; `alone`,
@@ -66,28 +66,28 @@ enum MaskDrag {
     /// the box), from where the drag began.
     Rotate {
         path: usize,
-        center: (f32, f32),
-        from: (f32, f32),
+        center: (f64, f64),
+        from: (f64, f64),
         shapes: Vec<Vec<MaskAnchor>>,
     },
     /// The picked path scaled about the corner of its box opposite the
     /// one dragged.
     Scale {
         path: usize,
-        fixed: (f32, f32),
-        corner: (f32, f32),
+        fixed: (f64, f64),
+        corner: (f64, f64),
         shapes: Vec<Vec<MaskAnchor>>,
     },
     /// A rectangle or an oval being drawn from where the drag began.
-    Shape { tool: MaskTool, from: (f32, f32) },
+    Shape { tool: MaskTool, from: (f64, f64) },
     /// The picked path's segment from its anchor `segment` bent from the
     /// point `t` of the way along it: that point follows the pointer, the
     /// anchors' tangents round it (curved anchors stay curved).
     Bend {
         path: usize,
         segment: usize,
-        t: f32,
-        from: (f32, f32),
+        t: f64,
+        from: (f64, f64),
         shapes: Vec<Vec<MaskAnchor>>,
     },
     /// A rectangle picking the anchors inside it, from `from` (the
@@ -103,7 +103,7 @@ enum MaskDrag {
 /// keys held.
 struct Press {
     o: Pos2,
-    at: (f32, f32),
+    at: (f64, f64),
     primary: bool,
     double: bool,
     mods: egui::Modifiers,
@@ -288,7 +288,11 @@ impl MaskEditor {
                 m.map_path_at(local, i, |p| [p[0] + to[0] - c[0], p[1] + to[1] - c[1]]);
             }
         }
-        let p = &mut m.paths[i];
+        // As they are here: a keyframe may have its own.
+        let units = bv_timeline::pancrop::local_units(local);
+        let shown = m.paths_at_units(units).swap_remove(i);
+        let mut edited = shown.clone();
+        let p = &mut edited;
         section(ui, &mut self.sections[2], tr("Path"), |ui| {
             prop_grid(ui, "pcm-caminho", |ui| {
                 let modes: Vec<(MaskMode, &str)> =
@@ -332,6 +336,9 @@ impl MaskEditor {
                 ui.end_row();
             });
         });
+        if edited != shown {
+            m.set_look_at(local, i, &edited);
+        }
         (m != before).then_some(Some(m))
     }
 
@@ -349,7 +356,7 @@ impl MaskEditor {
         sp: &Space,
         mask: Option<&PanCropMask>,
         local: Tick,
-        grid: Option<[f32; 2]>,
+        grid: Option<[f64; 2]>,
         interactive: bool,
     ) -> Option<Option<PanCropMask>> {
         let mut m = editable(mask);
@@ -358,7 +365,7 @@ impl MaskEditor {
         self.forget_gone(&shapes);
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let mods = ui.input(|i| i.modifiers);
-        let snap = |p: (f32, f32)| match grid {
+        let snap = |p: (f64, f64)| match grid {
             Some([gx, gy]) if gx > 0.0 && gy > 0.0 => {
                 ((p.0 / gx).round() * gx, (p.1 / gy).round() * gy)
             }
@@ -380,7 +387,7 @@ impl MaskEditor {
         if let Some(o) = press {
             let h = Press {
                 o,
-                at: sp.media(o),
+                at: sp.media64(o),
                 primary,
                 double: interactive && resp.double_clicked(),
                 mods,
@@ -417,7 +424,7 @@ impl MaskEditor {
             && resp.dragged()
             && let (Some(d), Some(p)) = (self.drag.clone(), pointer)
         {
-            let at = sp.media(p);
+            let at = sp.media64(p);
             match d {
                 MaskDrag::Path {
                     path,
@@ -491,14 +498,14 @@ impl MaskEditor {
                     mut shapes,
                 } => {
                     // Shift: in steps of 15°.
-                    let angle = |q: (f32, f32)| (q.1 - center.1).atan2(q.0 - center.0);
+                    let angle = |q: (f64, f64)| (q.1 - center.1).atan2(q.0 - center.0);
                     let mut a = angle(at) - angle(from);
                     if mods.shift {
-                        let step = 15f32.to_radians();
+                        let step = 15f64.to_radians();
                         a = (a / step).round() * step;
                     }
                     let (s, c) = a.sin_cos();
-                    let turn = |v: [f32; 2]| [v[0] * c - v[1] * s, v[0] * s + v[1] * c];
+                    let turn = |v: [f64; 2]| [v[0] * c - v[1] * s, v[0] * s + v[1] * c];
                     for x in &mut shapes[path] {
                         let r = turn([x.at[0] - center.0, x.at[1] - center.1]);
                         x.at = [center.0 + r[0], center.1 + r[1]];
@@ -513,7 +520,7 @@ impl MaskEditor {
                     corner,
                     mut shapes,
                 } => {
-                    let span = |a: f32, b: f32| if (b - a).abs() < 1e-3 { 1e-3 } else { b - a };
+                    let span = |a: f64, b: f64| if (b - a).abs() < 1e-3 { 1e-3 } else { b - a };
                     let mut sx = (at.0 - fixed.0) / span(fixed.0, corner.0);
                     let mut sy = (at.1 - fixed.1) / span(fixed.1, corner.1);
                     if mods.shift {
@@ -554,7 +561,7 @@ impl MaskEditor {
                     let mut picked = base;
                     for (i, s) in shapes.iter().enumerate() {
                         for (k, a) in s.iter().enumerate() {
-                            if r.contains(sp.screen((a.at[0], a.at[1]))) {
+                            if r.contains(sp.screen64((a.at[0], a.at[1]))) {
                                 picked.insert((i, k));
                             }
                         }
@@ -573,7 +580,7 @@ impl MaskEditor {
         }
         if resp.drag_stopped() {
             if let (Some(MaskDrag::Shape { tool, from }), Some(p)) = (self.drag.take(), pointer) {
-                let path = drawn_shape(tool, from, snap(sp.media(p)), mods);
+                let path = drawn_shape(tool, from, snap(sp.media64(p)), mods);
                 if path
                     .bounds()
                     .is_some_and(|(lo, hi)| hi[0] - lo[0] >= 2.0 && hi[1] - lo[1] >= 2.0)
@@ -633,7 +640,7 @@ impl MaskEditor {
                 _ if self.corner_at(sp, &shapes, p).is_some() => CursorIcon::ResizeNwSe,
                 MaskTool::SplitTangent if on_line() => CursorIcon::Cell,
                 MaskTool::Normal if on_line() => CursorIcon::Grab,
-                _ if path_at(&shapes, sp.media(p)).is_some() => CursorIcon::Move,
+                _ if path_at(&shapes, sp.media64(p)).is_some() => CursorIcon::Move,
                 _ => CursorIcon::Default,
             };
             if icon == CursorIcon::None {
@@ -654,7 +661,9 @@ impl MaskEditor {
             && let Some(i) = self.selected
             && let Some(edit) = self.path_bar(ui, sp, &m, local, i)
         {
-            let p = &mut m.paths[i];
+            // As it is here: a keyframe may have its own.
+            let units = bv_timeline::pancrop::local_units(local);
+            let mut p = m.paths_at_units(units).swap_remove(i);
             match edit {
                 PathEdit::Mode(mode) => p.mode = mode,
                 // A second click on the feather in use: none.
@@ -666,6 +675,7 @@ impl MaskEditor {
                     }
                 }
             }
+            m.set_look_at(local, i, &p);
         }
         (m != before).then(|| (!m.paths.is_empty() || m.enabled).then_some(m))
     }
@@ -866,7 +876,7 @@ impl MaskEditor {
         shapes: &[Vec<MaskAnchor>],
         m: &mut PanCropMask,
         local: Tick,
-        corner: (f32, f32),
+        corner: (f64, f64),
     ) {
         let corner = MaskAnchor::corner([corner.0, corner.1]);
         if let Some(d) = self.drawing
@@ -928,7 +938,7 @@ impl MaskEditor {
         local: Tick,
         path: usize,
         segment: usize,
-        t: f32,
+        t: f64,
         primary: bool,
     ) {
         m.split_segment(path, segment, t);
@@ -1024,7 +1034,7 @@ impl MaskEditor {
         let near = |path: usize| {
             shapes[path]
                 .iter()
-                .position(|a| sp.screen((a.at[0], a.at[1])).distance(p) <= GRAB)
+                .position(|a| sp.screen64((a.at[0], a.at[1])).distance(p) <= GRAB)
                 .map(|i| (path, i))
         };
         if let Some(found) = self.selected.and_then(near) {
@@ -1047,7 +1057,7 @@ impl MaskEditor {
                 .into_iter()
                 .find(|(_, t)| {
                     *t != [0.0; 2]
-                        && sp.screen((a.at[0] + t[0], a.at[1] + t[1])).distance(p) <= GRAB
+                        && sp.screen64((a.at[0] + t[0], a.at[1] + t[1])).distance(p) <= GRAB
                 })
                 .map(|(after, _)| (after, path, i))
         })
@@ -1061,7 +1071,7 @@ impl MaskEditor {
         sp: &Space,
         shapes: &[Vec<MaskAnchor>],
         p: Pos2,
-    ) -> Option<(usize, usize, f32)> {
+    ) -> Option<(usize, usize, f64)> {
         let on = |path: usize| {
             let open = self.drawing == Some(path);
             segment_hit(sp, &shapes[path], p, open).map(|(s, t)| (path, s, t))
@@ -1074,12 +1084,12 @@ impl MaskEditor {
 
     /// The picked path's rotation handle under `p`, while its box shows:
     /// its box's middle (in the media), what it turns about.
-    fn rotate_at(&self, sp: &Space, shapes: &[Vec<MaskAnchor>], p: Pos2) -> Option<(f32, f32)> {
+    fn rotate_at(&self, sp: &Space, shapes: &[Vec<MaskAnchor>], p: Pos2) -> Option<(f64, f64)> {
         if !self.boxed {
             return None;
         }
         let (lo, hi) = mask::bounds(shapes.get(self.selected?)?)?;
-        let b = Rect::from_min_max(sp.screen((lo[0], lo[1])), sp.screen((hi[0], hi[1])));
+        let b = Rect::from_min_max(sp.screen64((lo[0], lo[1])), sp.screen64((hi[0], hi[1])));
         let knob = pos2(b.center().x, b.top()) - vec2(0.0, ROTATE_ARM);
         (knob.distance(p) <= GRAB).then_some(((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0))
     }
@@ -1091,7 +1101,7 @@ impl MaskEditor {
         sp: &Space,
         shapes: &[Vec<MaskAnchor>],
         p: Pos2,
-    ) -> Option<((f32, f32), (f32, f32))> {
+    ) -> Option<((f64, f64), (f64, f64))> {
         if !self.boxed {
             return None;
         }
@@ -1102,7 +1112,7 @@ impl MaskEditor {
             ((hi[0], hi[1]), (lo[0], lo[1])),
             ((lo[0], hi[1]), (hi[0], lo[1])),
         ] {
-            if sp.screen(c).distance(p) <= GRAB {
+            if sp.screen64(c).distance(p) <= GRAB {
                 return Some((o, c));
             }
         }
@@ -1114,7 +1124,7 @@ impl MaskEditor {
         shapes[d].len() >= 3
             && shapes[d]
                 .first()
-                .is_some_and(|a| sp.screen((a.at[0], a.at[1])).distance(p) <= GRAB)
+                .is_some_and(|a| sp.screen64((a.at[0], a.at[1])).distance(p) <= GRAB)
     }
 
     /// The workspace's menu in the Mask row. Its tangents' items work on
@@ -1196,6 +1206,7 @@ impl MaskEditor {
                         before: [-t[0], -t[1]],
                         after: t,
                         split: false,
+                        even: true,
                     }
                 });
             }
@@ -1242,7 +1253,12 @@ impl MaskEditor {
     ) {
         let media = Rect::from_min_max(sp.screen((0.0, 0.0)), sp.screen(sp.src));
         if m.active() {
-            let tex = self.shade(ui.ctx(), m, local, sp.src);
+            let tex = self.shade(
+                ui.ctx(),
+                m,
+                local,
+                (f64::from(sp.src.0), f64::from(sp.src.1)),
+            );
             painter.image(
                 tex,
                 media,
@@ -1260,7 +1276,7 @@ impl MaskEditor {
             // (In: inside it, Out: outside, Both: half each way).
             if path.feather != MaskFeather::None && path.feather_pct > 0.0 && s.len() >= 2 {
                 let short = sp.src.0.min(sp.src.1) as f64;
-                let d = path.feather_pct as f64 / 100.0 * short;
+                let d = path.feather_pct / 100.0 * short;
                 let poly = mask::polygon(s);
                 let reach: &[f64] = match path.feather {
                     MaskFeather::In => &[-d],
@@ -1270,7 +1286,7 @@ impl MaskEditor {
                 for &k in reach {
                     let mut pts: Vec<Pos2> = mask::offset_polygon(&poly, k)
                         .into_iter()
-                        .map(|q| sp.screen((q[0] as f32, q[1] as f32)))
+                        .map(|q| sp.screen64((q[0], q[1])))
                         .collect();
                     if let Some(&first) = pts.first() {
                         pts.push(first);
@@ -1288,7 +1304,8 @@ impl MaskEditor {
                 && self.boxed
                 && let Some((lo, hi)) = mask::bounds(s)
             {
-                let b = Rect::from_min_max(sp.screen((lo[0], lo[1])), sp.screen((hi[0], hi[1])));
+                let b =
+                    Rect::from_min_max(sp.screen64((lo[0], lo[1])), sp.screen64((hi[0], hi[1])));
                 // The rotation handle above the box.
                 let top = pos2(b.center().x, b.top());
                 let knob = top - vec2(0.0, ROTATE_ARM);
@@ -1324,17 +1341,17 @@ impl MaskEditor {
                 if !self.anchors.contains(&(i, k)) {
                     continue;
                 }
-                let c = sp.screen((a.at[0], a.at[1]));
+                let c = sp.screen64((a.at[0], a.at[1]));
                 for t in [a.before, a.after] {
                     if t != [0.0; 2] {
-                        let e = sp.screen((a.at[0] + t[0], a.at[1] + t[1]));
+                        let e = sp.screen64((a.at[0] + t[0], a.at[1] + t[1]));
                         painter.line_segment([c, e], Stroke::new(1.0, yellow));
                         painter.circle(e, 3.5, Color32::WHITE, Stroke::new(1.0, Color32::BLACK));
                     }
                 }
             }
             for (k, a) in s.iter().enumerate() {
-                let c = sp.screen((a.at[0], a.at[1]));
+                let c = sp.screen64((a.at[0], a.at[1]));
                 let r = Rect::from_center_size(c, vec2(6.0, 6.0));
                 let (fill, edge) = if self.anchors.contains(&(i, k)) {
                     (crate::theme::banana(), Color32::WHITE)
@@ -1372,9 +1389,11 @@ impl MaskEditor {
         local: Tick,
         i: usize,
     ) -> Option<PathEdit> {
-        let (lo, hi) = mask::bounds(m.shapes_at(local).get(i)?)?;
-        let path = m.paths.get(i)?;
-        let b = Rect::from_min_max(sp.screen((lo[0], lo[1])), sp.screen((hi[0], hi[1])));
+        let units = bv_timeline::pancrop::local_units(local);
+        let paths = m.paths_at_units(units);
+        let path = paths.get(i)?;
+        let (lo, hi) = mask::bounds(&path.anchors)?;
+        let b = Rect::from_min_max(sp.screen64((lo[0], lo[1])), sp.screen64((hi[0], hi[1])));
         let bar = Rect::from_min_size(
             pos2(b.center().x - 82.0, b.bottom() + 10.0),
             vec2(164.0, 26.0),
@@ -1418,7 +1437,7 @@ impl MaskEditor {
         ctx: &egui::Context,
         m: &PanCropMask,
         local: Tick,
-        src: (f32, f32),
+        src: (f64, f64),
     ) -> egui::TextureId {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1434,8 +1453,7 @@ impl MaskEditor {
             ((src.0 * k).round() as usize).max(1),
             ((src.1 * k).round() as usize).max(1),
         );
-        let short = src.0.min(src.1) as f64;
-        let keep = m.coverage(local, w, h, [k as f64, k as f64], short);
+        let keep = m.coverage(bv_timeline::pancrop::local_units(local), w, h, [k, k], 1.0);
         let pixels: Vec<Color32> = keep
             .iter()
             .map(|c| Color32::from_black_alpha(((1.0 - c.clamp(0.0, 1.0)) * 150.0) as u8))
@@ -1471,7 +1489,7 @@ impl crate::app::BananaApp {
             .clip(id)
             .and_then(|c| self.project().media(c.media))
             .and_then(|m| m.video)
-            .map(|v| (v.width as f32, v.height as f32));
+            .map(|v| (f64::from(v.width), f64::from(v.height)));
         let Some((w, h)) = size else {
             return false;
         };
@@ -1502,20 +1520,20 @@ impl crate::app::BananaApp {
 /// anchor it starts at and how far along it (0–1) its point nearest `p`
 /// is — found among samples, then narrowed down between the samples next
 /// to it. `open`: the path is being drawn, its closing segment not there.
-fn segment_hit(sp: &Space, shape: &[MaskAnchor], p: Pos2, open: bool) -> Option<(usize, f32)> {
+fn segment_hit(sp: &Space, shape: &[MaskAnchor], p: Pos2, open: bool) -> Option<(usize, f64)> {
     const SAMPLES: usize = 64;
     let n = shape.len();
     if n < 2 {
         return None;
     }
-    let dist = |i: usize, t: f32| {
+    let dist = |i: usize, t: f64| {
         let q = mask::segment_point(shape, i, t);
-        sp.screen((q[0], q[1])).distance(p)
+        sp.screen64((q[0], q[1])).distance(p)
     };
-    let mut best: Option<(usize, f32, f32)> = None;
+    let mut best: Option<(usize, f64, f32)> = None;
     for i in 0..if open { n - 1 } else { n } {
         for k in 0..=SAMPLES {
-            let t = k as f32 / SAMPLES as f32;
+            let t = k as f64 / SAMPLES as f64;
             let d = dist(i, t);
             if best.is_none_or(|(_, _, bd)| d < bd) {
                 best = Some((i, t, d));
@@ -1523,7 +1541,7 @@ fn segment_hit(sp: &Space, shape: &[MaskAnchor], p: Pos2, open: bool) -> Option<
         }
     }
     let (i, t, _) = best?;
-    let step = 1.0 / SAMPLES as f32;
+    let step = 1.0 / SAMPLES as f64;
     let (mut lo, mut hi) = ((t - step).max(0.0), (t + step).min(1.0));
     for _ in 0..40 {
         let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
@@ -1567,7 +1585,7 @@ fn toggle_corner(shape: &mut [MaskAnchor], i: usize) {
 /// stretched by how much each pulls that point (the cubic's own weights);
 /// at a curved anchor the tangent on the other side turns along, keeping
 /// its length, so the curve stays smooth there.
-fn bend(shape: &mut [MaskAnchor], segment: usize, t: f32, by: [f32; 2]) {
+fn bend(shape: &mut [MaskAnchor], segment: usize, t: f64, by: [f64; 2]) {
     let n = shape.len();
     if n < 2 {
         return;
@@ -1580,7 +1598,7 @@ fn bend(shape: &mut [MaskAnchor], segment: usize, t: f32, by: [f32; 2]) {
     let (mut a, mut b) = (shape[segment], shape[j]);
     a.after = [a.after[0] + w1 * by[0], a.after[1] + w1 * by[1]];
     b.before = [b.before[0] + w2 * by[0], b.before[1] + w2 * by[1]];
-    let turn = |other: [f32; 2], this: [f32; 2]| {
+    let turn = |other: [f64; 2], this: [f64; 2]| {
         let (l, tl) = (other[0].hypot(other[1]), this[0].hypot(this[1]));
         if l == 0.0 || tl == 0.0 {
             other
@@ -1599,7 +1617,7 @@ fn bend(shape: &mut [MaskAnchor], segment: usize, t: f32, by: [f32; 2]) {
 }
 
 /// A move `d` (media pixels), held along its longer axis with Shift.
-fn axis(d: (f32, f32), mods: egui::Modifiers) -> (f32, f32) {
+fn axis(d: (f64, f64), mods: egui::Modifiers) -> (f64, f64) {
     match mods.shift {
         true if d.0.abs() > d.1.abs() => (d.0, 0.0),
         true => (0.0, d.1),
@@ -1608,14 +1626,14 @@ fn axis(d: (f32, f32), mods: egui::Modifiers) -> (f32, f32) {
 }
 
 /// The topmost path whose inside has `p` (media pixels).
-fn path_at(shapes: &[Vec<MaskAnchor>], p: (f32, f32)) -> Option<usize> {
+fn path_at(shapes: &[Vec<MaskAnchor>], p: (f64, f64)) -> Option<usize> {
     (0..shapes.len()).rev().find(|&i| {
         let poly = mask::polygon(&shapes[i]);
         let n = poly.len();
         if n < 3 {
             return false;
         }
-        let (x, y) = (p.0 as f64, p.1 as f64);
+        let (x, y) = p;
         let mut inside = false;
         for k in 0..n {
             let (a, b) = (poly[k], poly[(k + 1) % n]);
@@ -1630,7 +1648,7 @@ fn path_at(shapes: &[Vec<MaskAnchor>], p: (f32, f32)) -> Option<usize> {
 /// The shape a Rectangle or Oval drag draws from `a` to `b` (media
 /// pixels): Shift a square or a circle, Ctrl from its middle, Alt a
 /// rectangle's corners rounded or half an oval.
-fn drawn_shape(tool: MaskTool, a: (f32, f32), b: (f32, f32), mods: egui::Modifiers) -> MaskPath {
+fn drawn_shape(tool: MaskTool, a: (f64, f64), b: (f64, f64), mods: egui::Modifiers) -> MaskPath {
     let (mut dx, mut dy) = (b.0 - a.0, b.1 - a.1);
     if mods.shift {
         let s = dx.abs().max(dy.abs());
@@ -1657,7 +1675,7 @@ fn dashed(painter: &Painter, sp: &Space, anchors: &[MaskAnchor], dim: bool, open
     }
     let mut pts: Vec<Pos2> = mask::polygon(anchors)
         .into_iter()
-        .map(|q| sp.screen((q[0] as f32, q[1] as f32)))
+        .map(|q| sp.screen64((q[0], q[1])))
         .collect();
     if open {
         // Its last segment, back to the first anchor, not drawn yet: the
@@ -1697,9 +1715,9 @@ mod tests {
             MaskAnchor::corner([120.0, 0.0]),
         ];
         toggle_corner(&mut s, 1);
-        let third = 60f32.hypot(30.0) / 3.0;
+        let third = 60f64.hypot(30.0) / 3.0;
         let near =
-            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
+            |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
         assert!(
             near(s[1].before, [-third, 0.0]) && near(s[1].after, [third, 0.0]),
             "{:?}",
@@ -1720,6 +1738,7 @@ mod tests {
                 before: [-10.0, 0.0],
                 after: [10.0, 0.0],
                 split: false,
+                even: false,
             },
             MaskAnchor::corner([100.0, 0.0]),
             MaskAnchor::corner([50.0, 80.0]),

@@ -132,6 +132,185 @@ fn place(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// A pixel of the source, the edge's past its edges.
+fn held(x: i32, y: i32) -> vec4<f32> {
+    let cx = clamp(x, 0, i32(P.sw) - 1);
+    let cy = clamp(y, 0, i32(P.sh) - 1);
+    return src[u32(cy) * P.sw + u32(cx)];
+}
+
+// A pixel of the source for a turned or mirrored picture: past its left and
+// bottom edges nothing, past its others one pixel more of the edge's and then
+// nothing.
+fn open(x: i32, y: i32) -> vec4<f32> {
+    if x < 0 || y >= i32(P.sh) || x > i32(P.sw) || y < -1 {
+        return vec4<f32>(0.0);
+    }
+    return held(x, y);
+}
+
+fn mix_four(a: vec4<f32>, b: vec4<f32>, c: vec4<f32>, d: vec4<f32>, fx: f32, fy: f32) -> vec4<f32> {
+    let top = vec4<f32>(a.x + (b.x - a.x) * fx, a.y + (b.y - a.y) * fx, a.z + (b.z - a.z) * fx, a.w + (b.w - a.w) * fx);
+    let bottom = vec4<f32>(c.x + (d.x - c.x) * fx, c.y + (d.y - c.y) * fx, c.z + (d.z - c.z) * fx, c.w + (d.w - c.w) * fx);
+    return vec4<f32>(
+        top.x + (bottom.x - top.x) * fy,
+        top.y + (bottom.y - top.y) * fy,
+        top.z + (bottom.z - top.z) * fy,
+        top.w + (bottom.w - top.w) * fy,
+    );
+}
+
+fn bilinear_held(u: f32, v: f32) -> vec4<f32> {
+    let x0 = floor(u);
+    let y0 = floor(v);
+    let x = i32(x0);
+    let y = i32(y0);
+    return mix_four(held(x, y), held(x + 1, y), held(x, y + 1), held(x + 1, y + 1), u - x0, v - y0);
+}
+
+fn bilinear_open(u: f32, v: f32) -> vec4<f32> {
+    let x0 = floor(u);
+    let y0 = floor(v);
+    let x = i32(x0);
+    let y = i32(y0);
+    return mix_four(open(x, y), open(x + 1, y), open(x, y + 1), open(x + 1, y + 1), u - x0, v - y0);
+}
+
+fn bicubic_held(u: f32, v: f32) -> vec4<f32> {
+    let x0 = floor(u);
+    let y0 = floor(v);
+    let wx = catmull_rom(u - x0);
+    let wy = catmull_rom(v - y0);
+    let xi = i32(x0);
+    let yi = i32(y0);
+    var o = vec4<f32>(0.0);
+    for (var j = 0; j < 4; j++) {
+        for (var i = 0; i < 4; i++) {
+            let p = held(xi - 1 + i, yi - 1 + j);
+            let k = wx[i] * wy[j];
+            o = vec4<f32>(o.x + p.x * k, o.y + p.y * k, o.z + p.z * k, o.w + p.w * k);
+        }
+    }
+    return vec4<f32>(max(o.x, 0.0), max(o.y, 0.0), max(o.z, 0.0), clamp(o.w, 0.0, 1.0));
+}
+
+// A picture of the media where a Pan/Crop places it, without a turn or a
+// mirror: `f[0..6]` from the frame to the picture, `i` the pixels it reaches,
+// its edges hard. `j.x` 0 nearest, 1 bilinear, 2 bicubic.
+@compute @workgroup_size(16, 16)
+fn place_hard(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    let px = i32(id.x);
+    let py = i32(id.y);
+    if px < P.i.x || py < P.i.y || px >= P.i.z || py >= P.i.w {
+        dst[o] = vec4<f32>(0.0);
+        return;
+    }
+    let cx = f32(id.x) + 0.5;
+    let cy = f32(id.y) + 0.5;
+    let u = pf(0u) * cx + pf(1u) * cy + pf(2u) - 0.5;
+    let v = pf(3u) * cx + pf(4u) * cy + pf(5u) - 0.5;
+    switch P.j.x {
+        case 0u: {
+            dst[o] = held(i32(rround(u)), i32(rround(v)));
+        }
+        case 2u: {
+            dst[o] = bicubic_held(u, v);
+        }
+        default: {
+            dst[o] = bilinear_held(u, v);
+        }
+    }
+}
+
+// How much of a unit pixel lies on the inner side of a line `d` from its
+// middle, the line's normal `(nx, ny)`.
+fn line_share(d: f32, nx: f32, ny: f32) -> f32 {
+    let a = max(nx, ny);
+    let b = min(nx, ny);
+    let reach = (a + b) * 0.5;
+    if d >= reach {
+        return 1.0;
+    }
+    if d <= -reach {
+        return 0.0;
+    }
+    let m = abs(d);
+    if m <= (a - b) * 0.5 {
+        return 0.5 + d / a;
+    }
+    let r = reach - m;
+    let corner = r * r / (2.0 * a * b);
+    if d > 0.0 {
+        return 1.0 - corner;
+    }
+    return corner;
+}
+
+// How much of a pixel lies between two lines: where `v` (changing by
+// `(gx, gy)` a pixel) is `lo` and `hi`.
+fn between_share(v: f32, gx: f32, gy: f32, lo: f32, hi: f32) -> f32 {
+    let l = sqrt(gx * gx + gy * gy);
+    if l <= 0.0 {
+        return 1.0;
+    }
+    let nx = abs(gx) / l;
+    let ny = abs(gy) / l;
+    return min(line_share((v - lo) / l, nx, ny), line_share((hi - v) / l, nx, ny));
+}
+
+// The same for a turned or mirrored picture: `f[6..12]` from the frame to the
+// box's own place (0–1 each way), `f[12..16]` what a crop leaves of the
+// picture; both their edges as soft as the pixels they cross.
+@compute @workgroup_size(16, 16)
+fn place_soft(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    let px = i32(id.x);
+    let py = i32(id.y);
+    if px < P.i.x || py < P.i.y || px >= P.i.z || py >= P.i.w {
+        dst[o] = vec4<f32>(0.0);
+        return;
+    }
+    let cx = f32(id.x) + 0.5;
+    let cy = f32(id.y) + 0.5;
+    let uc = pf(0u) * cx + pf(1u) * cy + pf(2u);
+    let vc = pf(3u) * cx + pf(4u) * cy + pf(5u);
+    // Measured as sixteen bands a line do, each at its top.
+    let cy_edge = cy - 0.03125;
+    let a = pf(6u) * cx + pf(7u) * cy_edge + pf(8u);
+    let b = pf(9u) * cx + pf(10u) * cy_edge + pf(11u);
+    let ue = pf(0u) * cx + pf(1u) * cy_edge + pf(2u);
+    let ve = pf(3u) * cx + pf(4u) * cy_edge + pf(5u);
+    let share = min(
+        min(between_share(a, pf(6u), pf(7u), 0.0, 1.0), between_share(b, pf(9u), pf(10u), 0.0, 1.0)),
+        min(
+            between_share(ue, pf(0u), pf(1u), pf(12u), pf(14u)),
+            between_share(ve, pf(3u), pf(4u), pf(13u), pf(15u)),
+        ),
+    );
+    if share <= 0.0 {
+        dst[o] = vec4<f32>(0.0);
+        return;
+    }
+    let u = uc - 0.5;
+    let v = vc - 0.5;
+    var picture = vec4<f32>(0.0);
+    if P.j.x == 0u {
+        picture = open(i32(rround(u)), i32(rround(v)));
+    } else if P.j.x == 2u && u >= 1.0 && v >= 1.0 && u <= f32(P.sw) - 3.0 && v <= f32(P.sh) - 3.0 {
+        picture = bicubic_held(u, v);
+    } else {
+        picture = bilinear_open(u, v);
+    }
+    dst[o] = vec4<f32>(picture.x * share, picture.y * share, picture.z * share, picture.w * share);
+}
+
 // Half the size, each pixel the average of 2 × 2.
 @compute @workgroup_size(16, 16)
 fn half_size(@builtin(global_invocation_id) id: vec3<u32>) {

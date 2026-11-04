@@ -28,7 +28,7 @@ pub use bv_color::convert::set_threads;
 pub use bv_media::VideoPool;
 pub use bv_timeline::scene::{Rect, fit_rect, fit_rect_par};
 pub use layer::place_par;
-pub use layer::{place, place_with};
+pub use layer::{place, place_box, place_with};
 
 /// Cor mostrada no lugar de mídia que não pôde ser lida ("mídia offline").
 pub const OFFLINE: [f32; 4] = [0.25, 0.0, 0.02, 1.0];
@@ -685,7 +685,7 @@ fn adjusted(scene: &FrameScene<'_>, m: &MediaLayer<'_>, below: &ImageRgbaF32) ->
         framed_at: 0,
         media_size: (img.width, img.height),
         media_fx_scale: 1.0,
-        par: 1.0,
+        place: m.place,
         quality: m.quality,
     };
     for (k, e) in m.effects.iter().enumerate() {
@@ -757,7 +757,6 @@ fn media_layer(
         }
         src = Arc::new(img);
     }
-    let tf = &m.transform;
     // The media's effects work on its own picture; then the event's
     // Pan/Crop frames it, and the event's effects work on the framed
     // picture (VEGAS's default: Pan/Crop first in the event's chain).
@@ -765,11 +764,10 @@ fn media_layer(
     let (src, media_fx_scale) = if framed_at == 0 {
         (src, 1.0)
     } else {
-        let mut src = reduce_for_display(scene, &src, tf.scale, m.par);
+        let mut src = reduce_for_display(&src, &m.placement);
         // Effect sizes are in the project's pixels: in the source's here.
-        let (pw, ph) = scene.project_size;
-        let fit = fit_rect_par(src.width, src.height, m.par, pw, ph);
-        let fx_scale = src.height as f32 / (fit.h * tf.scale.max(1e-4));
+        let per_line = m.placement.picture_per_pixel(src.width, src.height).1;
+        let fx_scale = (per_line as f32 * scene.scale).max(1e-4);
         for (k, e) in m.effects[..framed_at].iter().enumerate() {
             match scene.media_call(m, k, fx_scale, None) {
                 Some(call) => effects::plugin(scene, &call, &mut src),
@@ -779,7 +777,7 @@ fn media_layer(
         }
         (Arc::new(src), fx_scale)
     };
-    let mut img = layer::place_par(&src, scene.width, scene.height, tf, m.quality, m.par);
+    let mut img = layer::place_box(&src, scene.width, scene.height, &m.placement, m.quality);
     // Reduce Interlace Flicker: on the framed picture, before the event's
     // effects.
     if m.clip.reduce_flicker {
@@ -788,9 +786,15 @@ fn media_layer(
     // Its Pan/Crop masks, framed as the picture is: they cut what shows of
     // it, or (Apply to FX) keep its effects inside them, the picture
     // without them elsewhere.
-    let mask = m
-        .mask_picture(src.width, src.height)
-        .map(|c| layer::place_par(&c, scene.width, scene.height, tf, m.quality, m.par));
+    let mask = m.mask_picture(src.width, src.height).map(|c| {
+        layer::place_box(
+            &c,
+            scene.width,
+            scene.height,
+            &m.placement.hard(),
+            m.quality,
+        )
+    });
     let unaffected = mask
         .as_ref()
         .filter(|_| m.clip.mask.as_ref().is_some_and(|k| k.apply_to_fx))
@@ -799,7 +803,7 @@ fn media_layer(
         framed_at,
         media_size: (src.width, src.height),
         media_fx_scale,
-        par: m.par,
+        place: m.place,
         quality: m.quality,
     };
     for (k, e) in m.effects.iter().enumerate().skip(framed_at) {
@@ -869,18 +873,9 @@ pub fn offline_color(scene: &FrameScene<'_>) -> [f32; 4] {
 
 /// Halves the source while it is more than twice the size it shows at, so
 /// effects do not work on pixels nobody sees.
-fn reduce_for_display(
-    scene: &FrameScene<'_>,
-    src: &ImageRgbaF32,
-    scale: f32,
-    par: f32,
-) -> ImageRgbaF32 {
-    let fit = fit_rect_par(src.width, src.height, par, scene.width, scene.height);
+fn reduce_for_display(src: &ImageRgbaF32, place: &bv_timeline::pancrop::Placement) -> ImageRgbaF32 {
     let mut img = src.clone();
-    while img.width as f32 >= fit.w * scale * 2.0
-        && img.height as f32 >= fit.h * scale * 2.0
-        && img.width > 1
-    {
+    while place.reduces(img.width, img.height) && img.width > 1 {
         img = layer::half_size(&img);
     }
     img
@@ -1452,7 +1447,7 @@ mod tests {
         );
         let (w, h) = info
             .video
-            .map(|v| (v.width as f32, v.height as f32))
+            .map(|v| (f64::from(v.width), f64::from(v.height)))
             .unwrap();
         let m = p.add_media(info);
         let id = p.insert_media(m, Tick::ZERO, Some(v), None).unwrap()[0];
@@ -1503,9 +1498,15 @@ mod tests {
             &p.settings,
         ));
         let clip = p.insert_media(m, Tick::ZERO, Some(v), None).unwrap()[0];
-        let c = p.clip_mut(clip).unwrap();
-        c.transform.scale = 0.5;
-        c.transform.x = -0.25;
+        p.set_clip_framing(
+            clip,
+            &bv_timeline::Transform {
+                scale: 0.5,
+                x: -0.25,
+                ..bv_timeline::Transform::default()
+            },
+        )
+        .unwrap();
         let alpha = |p: &Project, x: u32| {
             render_frame_on(p, Tick::ZERO, 32, 18, &mut VideoPool::new(), [0.0; 4]).pixel(x, 9)[3]
         };

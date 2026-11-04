@@ -318,6 +318,7 @@ impl BananaApp {
                 start: from,
                 broadcast_wave,
                 effects,
+                tempo: self.project().settings.tempo,
             });
         }
         let bits = self.project().settings.bit_depth as u16;
@@ -565,6 +566,7 @@ impl BananaApp {
                 gain: t.level,
                 pan: t.pan,
                 active,
+                tempo: p.settings.tempo,
             });
         }
         for b in p.input_busses.iter().filter(|b| b.to_master && !b.muted) {
@@ -578,6 +580,7 @@ impl BananaApp {
                 gain: 10f32.powf(b.gain_db / 20.0),
                 pan: b.pan,
                 active: true,
+                tempo: p.settings.tempo,
             });
         }
         let db = |d: f32| 10f32.powf(d / 20.0);
@@ -604,6 +607,7 @@ impl BananaApp {
                     gain: volume * db(s.gain_db) * db(c.input_db) * db(c.channel.gain_db),
                     pan: c.channel.pan,
                     active: true,
+                    tempo: p.settings.tempo,
                 });
             }
         }

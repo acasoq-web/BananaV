@@ -156,8 +156,8 @@ impl Accel {
                     GpuChoice::Named(n) => Some(n.as_str()),
                     _ => None,
                 };
-                let opened = Gpu::open(name).and_then(|g| g.warm_up().map(|()| g));
-                {
+                let opened = Gpu::open(name);
+                let gpu = {
                     let mut st = me.state.lock().expect("acceleration");
                     if st.serial != serial {
                         return;
@@ -165,12 +165,23 @@ impl Accel {
                     match opened {
                         Ok(g) => {
                             st.status = GpuStatus::Ready(g.adapter().name.clone());
-                            st.gpu = Some(g);
+                            st.gpu = Some(g.clone());
+                            Some(g)
                         }
-                        Err(e) => st.status = GpuStatus::Failed(e.to_string()),
+                        Err(e) => {
+                            st.status = GpuStatus::Failed(e.to_string());
+                            None
+                        }
                     }
-                }
+                };
                 (me.repaint)();
+                // Frames draw on the card from now on, waiting only for
+                // the kernels they use; the others are compiled meanwhile.
+                if let Some(g) = gpu
+                    && let Err(e) = g.warm_up()
+                {
+                    me.failed(&g, &e);
+                }
             });
         if spawned.is_err() {
             self.state.lock().expect("acceleration").status =

@@ -48,6 +48,107 @@ pub fn description(k: EffectKind) -> &'static str {
         EffectKind::ModernEq => tr(
             "Up to eight bands drawn on a graph, on both channels, one of them, the middle or the sides.",
         ),
+        EffectKind::Volume => tr("Raises or lowers the volume, up to 6 dB."),
+        EffectKind::Pan => {
+            tr("Moves a stereo sound left or right, blending one channel into the other.")
+        }
+        EffectKind::SmoothEnhance => {
+            tr("Softens the highs (smooth) or brings them forward (enhance).")
+        }
+        EffectKind::NoiseGateFx => tr("Silences the sound while it stays below the threshold."),
+        EffectKind::TrackNoiseGate => tr("Silences the track while it stays below the threshold."),
+        EffectKind::SimpleDelay => {
+            tr("An echo, or many fading away, its time in seconds or in notes of the tempo.")
+        }
+        EffectKind::Dither => {
+            tr("Rounds the sound to a bit depth with a little noise, so it stays clean.")
+        }
+        EffectKind::ResonantFilter => {
+            tr("A low-, band- or high-pass filter that can ring at its frequency.")
+        }
+        EffectKind::ParametricEq => tr("One shelf, band-pass or notch, accurate down to the lows."),
+        EffectKind::Chorus => {
+            tr("Thickens the sound with slightly detuned, delayed copies of itself.")
+        }
+        EffectKind::FlangeWahWah => tr("A sweeping flange, phaser or wah-wah."),
+        EffectKind::ReverbFx => {
+            tr("A room's reverberation: 19 spaces, early reflections and pre-delay.")
+        }
+        EffectKind::TrackCompressor => {
+            tr("Evens out the level, from gentle compression to a limiter.")
+        }
+        EffectKind::TrackEq => tr("Four bands, each a low shelf, a peak or a high shelf."),
+        EffectKind::ParagraphicEq => tr("Four peak or notch bands, with low and high shelves."),
+        EffectKind::MultiTapDelay => {
+            tr("Up to eight echoes of one delay line, each with its own time, level and side.")
+        }
+        EffectKind::MultiBandDynamics => tr(
+            "Four bands, each compressed on its own: tames plosives, sibilants or a boomy low end.",
+        ),
+        EffectKind::ExpressDelay => tr("A quick echo, fed back by a share of itself."),
+        EffectKind::ExpressDistortion => tr("A quick distortion, from warm to mangled."),
+        EffectKind::ExpressEqualization => tr("Quick bass, mid and treble."),
+        EffectKind::ExpressNoiseGate => {
+            tr("Silences the sound while it stays below the threshold.")
+        }
+        EffectKind::ExpressChorus => {
+            tr("A quick chorus: one to three modulated copies of the sound.")
+        }
+        EffectKind::ExpressFlangeWahWah => tr("A quick flange or wah-wah."),
+        EffectKind::ExpressDynamics => tr("A quick compressor, up to a limiter."),
+        EffectKind::ExpressStutter => tr("Switches the sound on and off in a fast rhythm."),
+        EffectKind::ExpressAmplitudeModulation => {
+            tr("The volume rises and falls in a smooth wave (tremolo).")
+        }
+        EffectKind::ExpressGraphicEq => tr("Ten bands an octave apart, from 28 Hz to 15 kHz."),
+        EffectKind::ExpressReverb => tr("A quick reverb: a room, its size and how lively it is."),
+        EffectKind::ExpressAudioRestoration => {
+            tr("Takes clicks and crackle out and turns the steady hiss of old recordings down.")
+        }
+        EffectKind::AmplitudeModulation => {
+            tr("The volume follows a wave you draw, slow (tremolo) or fast (ring tones).")
+        }
+        EffectKind::GraphicDynamics => {
+            tr("Compression, limiting or gating drawn as an input/output curve.")
+        }
+        EffectKind::Distortion => {
+            tr("Reshapes the wave along curves you draw, each half on its own.")
+        }
+        EffectKind::GraphicEq => tr("A frequency response you draw, accurate down to the lows."),
+        EffectKind::WaveHammer => {
+            tr("A compressor and a volume maximizer for mastering, up to 5.1.")
+        }
+        EffectKind::StudioGate => tr("Lowers the sound below the threshold, smoothly and quickly."),
+        EffectKind::DeEsser => tr("Tames the hiss of \"s\" sounds in a voice."),
+        EffectKind::StudioLimiter => {
+            tr("Makes the sound louder without going over the top, then clips it gently.")
+        }
+        EffectKind::TremoloPan => tr("A tremolo, or an auto-pan when the sides move apart."),
+        EffectKind::TubeStage => tr("The warmth and grit of a tube preamp."),
+        EffectKind::StudioCompressor => {
+            tr("A musical compressor with parallel mix, soft clip and side-chain filter.")
+        }
+        EffectKind::Phaser => tr("Sweeping notches of 4, 8 or 12 stages, with feedback."),
+        EffectKind::ChorusFlanger => {
+            tr("A chorus, flanger or wide ensemble of three voices a side.")
+        }
+        EffectKind::StudioReverb => tr("A plate, room or hall, with size, time and damping."),
+        EffectKind::StereoDelay => {
+            tr("Two delays, digital, analog or bucket brigade, in ms or notes of the tempo.")
+        }
+        EffectKind::TimeStretch | EffectKind::ExpressTimeStretch => {
+            tr("Makes the sound longer or shorter without changing its pitch.")
+        }
+        EffectKind::PitchShift => {
+            tr("Raises or lowers the pitch, like a tape or keeping the length.")
+        }
+        EffectKind::GapperSnipper => tr("Inserts silences into the sound or cuts bits out of it."),
+        EffectKind::Vibrato => {
+            tr("The pitch wavers along a wave you draw, like a tape speeding up and slowing down.")
+        }
+        EffectKind::VocalStrip => {
+            tr("A voice's chain in one: high-pass, gate, de-esser, compressor and tone.")
+        }
         EffectKind::Plugin => tr("An effect from an OFX plug-in."),
         EffectKind::Vst => tr("An audio effect from a VST 3 plug-in."),
     }

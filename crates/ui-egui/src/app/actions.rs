@@ -232,8 +232,7 @@ impl BananaApp {
                     c.fade_in_curve = src.fade_in_curve;
                     c.fade_out_curve = src.fade_out_curve;
                     if kind == TrackKind::Video {
-                        c.transform = src.transform;
-                        c.transform_keys = src.transform_keys.clone();
+                        c.pan_crop = src.pan_crop.clone();
                         c.transition = src.transition;
                         // Its velocity and transition progress envelopes.
                         c.envelopes = src.envelopes.clone();
@@ -1040,44 +1039,21 @@ impl BananaApp {
     /// fill the output frame.
     pub(crate) fn toggle_maintain_aspect(&mut self) {
         let keep = self
-            .all_selected(Some(TrackKind::Video), |c| c.transform.keeps_aspect())
+            .all_selected(Some(TrackKind::Video), |c| c.pan_crop.keep_aspect)
             .unwrap_or(true);
         let ids = self.selected_of(TrackKind::Video);
         self.set_maintain_aspect(&ids, !keep);
     }
 
     /// Maintain Aspect Ratio on video events `ids` (`keep`), or off: their
-    /// media stretched to fill the output frame. The switch is kept in
-    /// their framing (`Transform::keep_aspect`, Pan/Crop's Source).
+    /// media stretched to fill the output frame (Pan/Crop's Source).
     pub(crate) fn set_maintain_aspect(&mut self, ids: &[ClipId], keep: bool) {
         let ids = ids.to_vec();
-        let s = self.project().settings;
         self.modify(|p| {
             for id in ids {
-                let Some(v) = p
-                    .clip(id)
-                    .and_then(|c| p.media(c.media))
-                    .and_then(|m| m.video)
-                else {
-                    continue;
-                };
-                let Some(c) = p.clip_mut(id) else { continue };
-                if keep {
-                    c.transform.scale = 1.0;
-                    c.transform.stretch = 1.0;
-                } else {
-                    // Fill: scale to the width, stretch the height to match.
-                    let (sx, sy) = (
-                        s.width as f32 / v.width as f32,
-                        s.height as f32 / v.height as f32,
-                    );
-                    let fit = sx.min(sy);
-                    c.transform.scale = sx / fit;
-                    c.transform.stretch = sy / sx;
+                if let Some(c) = p.clip_mut(id) {
+                    c.pan_crop.keep_aspect = keep;
                 }
-                c.transform.keep_aspect = Some(keep);
-                c.transform.box_size = [1.0; 2];
-                c.transform_keys.clear();
             }
         });
     }
@@ -1352,9 +1328,13 @@ pub(crate) fn fill_frame(p: &mut bv_timeline::Project, ids: &[ClipId]) {
         let par = v.pixel_aspect.ratio() / s.pixel_aspect.ratio();
         let sx = s.width as f32 / (v.width as f32 * par).max(1.0);
         let sy = s.height as f32 / (v.height as f32).max(1.0);
-        if let Some(c) = p.clip_mut(id) {
-            c.transform.scale = sx.max(sy) / sx.min(sy).max(1e-6);
-        }
+        let _ = p.set_clip_framing(
+            id,
+            &bv_timeline::Transform {
+                scale: sx.max(sy) / sx.min(sy).max(1e-6),
+                ..bv_timeline::Transform::default()
+            },
+        );
     }
 }
 
@@ -1601,11 +1581,8 @@ mod tests {
                 // 4:3 in a 16:9 frame: enlarged to fill its width.
                 let s = p.settings;
                 let fill = (s.width as f32 / 640.0) / (s.height as f32 / 480.0);
-                assert!(
-                    (c.transform.scale - fill).abs() < 1e-4,
-                    "{}",
-                    c.transform.scale
-                );
+                let scale = p.clip_transform_at(c.id, c.start).unwrap().scale;
+                assert!((scale - fill).abs() < 1e-4, "{scale}");
             }
         }
         // A still image lasts as long as asked.

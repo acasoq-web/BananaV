@@ -222,9 +222,10 @@ fn new_band(kind: BandType, freq: f32, gain_db: f32) -> Band {
         } else {
             0.0
         },
-        q: 1.0,
+        q: std::f32::consts::FRAC_1_SQRT_2,
         slope: 12,
         route: Route::Stereo,
+        linear: false,
     }
 }
 
@@ -248,7 +249,10 @@ fn type_at(freq: f32) -> BandType {
 /// slot; which (none when all eight are in use).
 fn add_at(s: &mut Settings, freq: f32, db: f32) -> Option<usize> {
     let b = s.bands.iter().position(|b| !b.used)?;
-    s.bands[b] = new_band(type_at(freq), freq, db);
+    s.bands[b] = Band {
+        linear: s.bands[b].linear,
+        ..new_band(type_at(freq), freq, db)
+    };
     Some(b)
 }
 
@@ -268,7 +272,10 @@ fn add_free(s: &mut Settings) -> Option<usize> {
         .windows(2)
         .map(|w| (w[0], w[1]))
         .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))?;
-    s.bands[b] = new_band(BandType::Peaking, ((lo + hi) / 2.0).exp(), 0.0);
+    s.bands[b] = Band {
+        linear: s.bands[b].linear,
+        ..new_band(BandType::Peaking, ((lo + hi) / 2.0).exp(), 0.0)
+    };
     Some(b)
 }
 
@@ -399,6 +406,40 @@ fn top_bar(ui: &mut Ui, view: &mut View, e: &mut Effect, id: egui::Id) {
                     }
                 }
             });
+        // The bands' phase all at once: "Mixed" while they differ.
+        ui.add_space(12.0);
+        ui.label(tr("Phase:"));
+        let now = Settings::of(e);
+        let used: Vec<&Band> = now.bands.iter().filter(|b| b.used).collect();
+        let linear = !used.is_empty() && used.iter().all(|b| b.linear);
+        let mixed = !linear && used.iter().any(|b| b.linear);
+        let shown = if mixed {
+            tr("Mixed")
+        } else if linear {
+            tr("Linear")
+        } else {
+            trc("phase", "Minimum")
+        };
+        egui::ComboBox::from_id_salt(id.with("phase"))
+            .width(84.0)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                for (to, name) in [(false, trc("phase", "Minimum")), (true, tr("Linear"))] {
+                    if ui.selectable_label(!mixed && linear == to, name).clicked() {
+                        let mut s = Settings::of(e);
+                        for b in &mut s.bands {
+                            b.linear = to;
+                        }
+                        s.write(e);
+                    }
+                }
+            })
+            .response
+            .on_hover_text(if mixed {
+                tr("Mixed band models")
+            } else {
+                tr("All bands use the same global band model")
+            });
         let settings = icon_button_ex(ui, Icon::Settings, tr("Settings"), false, true);
         egui::Popup::menu(&settings).show(|ui| {
             if menus::toggle_item(ui, tr("Show Tooltips"), view.tooltips) {
@@ -418,6 +459,23 @@ fn top_bar(ui: &mut Ui, view: &mut View, e: &mut Effect, id: egui::Id) {
                     if menus::check_item(ui, name, now == k, true, "") {
                         let mut s = Settings::of(e);
                         s.oversampling = k;
+                        s.write(e);
+                    }
+                }
+            });
+            // How long the linear-phase bands' filter is (and how late).
+            menus::sub(ui, tr("Linear Phase Quality"), true, |ui| {
+                let now = Settings::of(e).quality;
+                for (k, name) in [
+                    (0u8, tr("Lowest")),
+                    (1, trc("quality", "Low")),
+                    (2, trc("quality", "Medium")),
+                    (3, trc("quality", "High")),
+                    (4, tr("Highest")),
+                ] {
+                    if menus::check_item(ui, name, now == k, true, "") {
+                        let mut s = Settings::of(e);
+                        s.quality = k;
                         s.write(e);
                     }
                 }
@@ -449,7 +507,7 @@ fn graph(ui: &mut Ui, view: &mut View, s: &mut Settings, rate: f32, id: egui::Id
     let wheel = ui.input(|i| i.smooth_scroll_delta.y);
     if wheel != 0.0
         && let Some(b) = hovered
-        && s.bands[b].kind.has_q()
+        && s.bands[b].has_q()
     {
         let band = &mut s.bands[b];
         band.q = (band.q * (wheel * 0.004).exp()).clamp(0.1, 30.0);
@@ -598,13 +656,16 @@ fn band_text(b: usize, band: &Band) -> String {
     if band.kind.has_gain() {
         parts.push(text(Unit::Db, band.gain_db, false));
     }
-    if band.kind.has_q() {
+    if band.has_q() {
         parts.push(format!("Q {}", text(Unit::Plain, band.q, false)));
     }
     if band.kind.has_slope() {
-        parts.push(trf!("{} dB/oct", band.slope));
+        parts.push(trf!("{} dB/oct", band.steepness()));
     }
     parts.push(route_name(band.route).to_string());
+    if band.linear {
+        parts.push(tr("Linear").to_string());
+    }
     parts.join(" · ")
 }
 
@@ -951,20 +1012,14 @@ fn band_controls(ui: &mut Ui, view: &mut View, s: &mut Settings, id: egui::Id) {
             }
             ui.add_space(8.0);
             ui.add_enabled_ui(band.kind.has_slope(), |ui| {
+                let now = band.steepness();
                 egui::ComboBox::from_id_salt(id.with(("slope", b)))
                     .width(96.0)
-                    .selected_text(trf!(
-                        "{} dB/oct",
-                        if band.kind.has_slope() {
-                            band.slope
-                        } else {
-                            12
-                        }
-                    ))
+                    .selected_text(trf!("{} dB/oct", now))
                     .show_ui(ui, |ui| {
-                        for slope in [6u8, 12, 18, 24, 30, 36] {
+                        for &slope in band.kind.slopes() {
                             if ui
-                                .selectable_label(band.slope == slope, trf!("{} dB/oct", slope))
+                                .selectable_label(now == slope, trf!("{} dB/oct", slope))
                                 .clicked()
                             {
                                 band.slope = slope;
@@ -973,10 +1028,28 @@ fn band_controls(ui: &mut Ui, view: &mut View, s: &mut Settings, id: egui::Id) {
                     })
                     .response
                     .on_hover_text(tr("Slope"))
-                    .on_disabled_hover_text(tr(
-                        "Only the passes have a slope to pick; the others' is 12 dB/oct.",
-                    ));
+                    .on_disabled_hover_text(tr("This filter type comes in one slope only."));
             });
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr("Phase:"));
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (linear, name, tip) in [
+                (
+                    false,
+                    trc("phase", "Minimum"),
+                    tr("Band uses a minimum phase model"),
+                ),
+                (true, tr("Linear"), tr("Band uses a linear phase model")),
+            ] {
+                if ui
+                    .selectable_label(band.linear == linear, name)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    band.linear = linear;
+                }
+            }
         });
         ui.horizontal(|ui| {
             ui.label(tr("Channel Routing:"));
@@ -998,7 +1071,8 @@ fn band_controls(ui: &mut Ui, view: &mut View, s: &mut Settings, id: egui::Id) {
         ui.horizontal(|ui| {
             Knob::FREQUENCY.show(ui, &mut band.freq, true);
             Knob::GAIN.show(ui, &mut band.gain_db, band.kind.has_gain());
-            Knob::Q.show(ui, &mut band.q, band.kind.has_q());
+            let has_q = band.has_q();
+            Knob::Q.show(ui, &mut band.q, has_q);
         });
     });
 }
@@ -1083,7 +1157,7 @@ enum Unit {
 
 /// A value as a knob writes it (`off`: under Mono Below's start, "Off").
 fn text(unit: Unit, v: f32, off: bool) -> String {
-    if off && v < eq::MONO_BELOW_OFF {
+    if off && v <= eq::MONO_BELOW_OFF {
         return tr("Off").to_string();
     }
     let v = f64::from(v);
@@ -1100,7 +1174,7 @@ fn text(unit: Unit, v: f32, off: bool) -> String {
 fn read(unit: Unit, typed: &str, off: bool) -> Option<f64> {
     let t = typed.trim().to_lowercase();
     if off && (t == "off" || t == tr("Off").to_lowercase()) {
-        return Some(0.0);
+        return Some(f64::from(eq::MONO_BELOW_OFF));
     }
     let v = crate::fmt::parse(&t)?;
     Some(if unit == Unit::Hz && t.contains('k') {
@@ -1122,7 +1196,7 @@ struct Knob {
     bipolar: bool,
     default: f32,
     unit: Unit,
-    /// Its start is "Off": the value 0 (Mono Below).
+    /// Its start is "Off": its least value (Mono Below's 20 Hz).
     off: bool,
 }
 
@@ -1173,19 +1247,19 @@ impl Knob {
     const MONO_BELOW: Knob = Knob {
         name: "Mono Below",
         min: eq::MONO_BELOW_OFF,
-        max: 1000.0,
+        max: 200.0,
         log: true,
         bipolar: false,
-        default: 0.0,
+        default: eq::MONO_BELOW_OFF,
         unit: Unit::Hz,
         off: true,
     };
     const WIDTH: Knob = Knob {
         name: "Stereo Width",
         min: 0.0,
-        max: 200.0,
+        max: 100.0,
         log: false,
-        bipolar: true,
+        bipolar: false,
         default: 100.0,
         unit: Unit::Percent,
         off: false,
@@ -1203,7 +1277,7 @@ impl Knob {
 
     /// How far round (0 to 1) value `v` turns it.
     fn turn(&self, v: f32) -> f32 {
-        if self.off && v < eq::MONO_BELOW_OFF {
+        if self.off && v <= self.min {
             return 0.0;
         }
         let t = if self.log {
@@ -1224,7 +1298,7 @@ impl Knob {
         let mut t = t.clamp(0.0, 1.0);
         if self.off {
             if t < OFF_T {
-                return 0.0;
+                return self.min;
             }
             t = (t - OFF_T) / (1.0 - OFF_T);
         }
@@ -1403,12 +1477,13 @@ mod tests {
         assert!((k.turn(632.46) - 0.5).abs() < 1e-3);
         assert!((k.value(0.5) - 632.46).abs() < 0.1);
         let m = Knob::MONO_BELOW;
-        assert_eq!(m.turn(0.0), 0.0);
-        assert_eq!(m.value(0.02), 0.0);
-        assert!((m.value(1.0) - 1000.0).abs() < 1e-2);
+        assert_eq!(m.turn(20.0), 0.0);
+        assert_eq!(m.value(0.02), 20.0);
+        assert!((m.value(1.0) - 200.0).abs() < 1e-2);
         assert!((m.value(m.turn(120.0)) - 120.0).abs() < 1e-2);
+        assert_eq!(text(Unit::Hz, 20.0, true), tr("Off"));
         assert_eq!(read(Unit::Hz, "2,5 kHz", false), Some(2500.0));
-        assert_eq!(read(Unit::Hz, "off", true), Some(0.0));
+        assert_eq!(read(Unit::Hz, "off", true), Some(20.0));
         assert_eq!(read(Unit::Db, "−6 dB", false), Some(-6.0));
     }
 }

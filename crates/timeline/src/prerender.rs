@@ -120,8 +120,7 @@ impl Project {
                         .is_some_and(|m| m.effects.iter().all(|e| !e.enabled));
                     c.effects.iter().all(|e| !e.enabled)
                         && media_fx
-                        && c.transform.is_identity()
-                        && c.transform_keys.is_empty()
+                        && c.pan_crop.is_default()
                         && !c.mask.as_ref().is_some_and(|m| m.active())
                         && c.level >= 1.0
                         && c.fade_in == Tick::ZERO

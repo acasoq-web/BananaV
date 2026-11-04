@@ -222,7 +222,9 @@ fn pixel_fill(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // LUT Filter: a table's 1D shaper (`j.x` entries of `src`, over f 0–2 to
 // f 3–5) and its lattice (`j.y`³ entries after them, red changing
-// fastest, over f 6–8 to f 9–11), as `bv-lut` applies them.
+// fastest, over f 6–8 to f 9–11), as `bv-lut` applies them; `j.z` reads
+// it by tetrahedra, `j.w` holds the colors within 0–1 before and after
+// (Color Grading's LUTs).
 fn lut_unit(v: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
     let t = (v - lo) / max(hi - lo, vec3<f32>(1e-12));
     return clamp(t, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -318,7 +320,10 @@ fn lut_filter(@builtin(global_invocation_id) id: vec3<u32>) {
         dst[o] = vec4<f32>(0.0, 0.0, 0.0, a);
         return;
     }
-    let c = px.xyz / a;
+    var c = px.xyz / a;
+    if P.j.w != 0u {
+        c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     var v = c;
     if P.j.x > 0u {
         v = lut_shaper(v);
@@ -326,7 +331,10 @@ fn lut_filter(@builtin(global_invocation_id) id: vec3<u32>) {
     if P.j.y > 0u {
         v = lut_cube(v);
     }
-    let out = c + (v - c) * pf(12u);
+    var out = c + (v - c) * pf(12u);
+    if P.j.w != 0u {
+        out = clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     dst[o] = vec4<f32>(out * a, a);
 }
 
@@ -497,201 +505,346 @@ fn overlay(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[o] = over(src[u32(sy) * P.sw + u32(sx)], dst[o]);
 }
 
-// Color Grading's own steps (`color_grading.rs`' `Grade::step`, from the
-// Color Wheels to the HSL Curves; its LUTs are passes of their own) on
-// `dst` (`w` × `h`, changed in place), the straight colors: `src` holds
-// the settings, then the tables (`sw` entries each) —
-// 0–3 the Color Wheels (Lift, Gamma, Gain, Offset: r, g, b, master),
-// 4–7 the RL Color Wheels (Shadows, Midtones, Highlights, Offset),
-// 8 the RL thresholds (x, y) and White Balance's temperature and tint
-// (z, w), 9 Levels (in black, in white, out min, out max), 10 Tone
-// (brightness, contrast, center, saturation), 11 Log exposure and HSL
-// (hue, saturation, luminance), 12 switches (x: the RL wheels, y: the HSL
-// Curves, z: Levels); from 16 the Curves' tables (Brightness, Red, Green,
-// Blue), then the HSL Curves' (0–3, then 4–5).
+// Color Grading (`grading.rs`' `Grade::apply`, between its LUTs, which
+// are passes of their own) on `dst` (`w` × `h`, changed in place): the
+// straight colors, held within 0–1 first. `src` holds the settings, a
+// row each, then the tables, an entry a row (x):
+// 0 switches: White Balance, Levels, the RL wheels by channel, by Y;
+// 1 switches: the Color Curves by channel, by Y, Lift; the HSL Curves'
+//   count (w);
+// 2 Saturation (1: none), Exposure's scale, Brightness, whether the
+//   panel's Exposure is on;
+// 3 Contrast's scale and center, the panel's Exposure's scale before its
+//   table, the HSL's hue;
+// 4 the HSL's saturation and luminance, whether each CDL is on;
+// 5–7 White Balance's matrix, a row each; 8 Levels (in min, in max, out
+// min, out max); 9 Lift; 10–12 the first CDL's slope, offset and power,
+// 13–15 the second's;
+// 16–21 the HSL Curves in their order: which (x: Hue vs Hue … Luminance
+//   vs Saturation), where its table starts (y) and its length (z);
+// 22–30 where each table starts (x) and its length (y): the RL wheels'
+//   red, green, blue and Y, the Color Curves' red, green, blue and Y, the
+//   panel's Exposure's.
 
-const GRADE_TABLES: u32 = 16u;
+const GRADE_WHITE_L: f32 = 95.580666;
 
-fn grade_component(v: vec4<f32>, c: u32) -> f32 {
-    if c == 0u {
-        return v.x;
-    }
-    if c == 1u {
-        return v.y;
-    }
-    if c == 2u {
-        return v.z;
-    }
-    return v.w;
+fn grade_hold(c: vec3<f32>) -> vec3<f32> {
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Table `c` of the group from `base` (`P.sw` entries) at x, held within
-// 0–1.
-fn grade_within(base: u32, c: u32, x: f32) -> f32 {
-    let n = P.sw;
-    let f = clamp(x, 0.0, 1.0) * f32(n - 1u);
-    let i = min(u32(f), n - 2u);
-    let k = f - f32(i);
-    let a = grade_component(src[base + i], c);
-    return a + (grade_component(src[base + i + 1u], c) - a) * k;
+// A table (`n` entries from `at`) at `v`: straight between its entries,
+// `v` held within 0–1; no table changes nothing.
+fn grade_lookup(at: u32, n: u32, v: f32) -> f32 {
+    if n == 0u {
+        return v;
+    }
+    if !(v > 0.0) {
+        return src[at].x;
+    }
+    if v >= 1.0 {
+        return src[at + n - 1u].x;
+    }
+    let p = v * f32(n - 1u);
+    let i = u32(floor(p));
+    let f = p - f32(i);
+    if i + 1u < n {
+        let a = src[at + i].x;
+        return a + (src[at + i + 1u].x - a) * f;
+    }
+    return src[at + i].x;
 }
 
-// The same, past its ends along their slope.
-fn grade_at(base: u32, c: u32, x: f32) -> f32 {
-    let n = P.sw;
-    let last = f32(n - 1u);
-    if x < 0.0 {
-        let t0 = grade_component(src[base], c);
-        return t0 + x * (grade_component(src[base + 1u], c) - t0) * last;
-    }
-    if x > 1.0 {
-        let tn = grade_component(src[base + n - 1u], c);
-        return tn + (x - 1.0) * (tn - grade_component(src[base + n - 2u], c)) * last;
-    }
-    return grade_within(base, c, x);
+// Table `k` of rows 22–30 at `v`.
+fn grade_table(k: u32, v: f32) -> f32 {
+    let d = src[22u + k];
+    return grade_lookup(u32(d.x), u32(d.y), v);
 }
 
-fn grade_smoothstep(a: f32, b: f32, x: f32) -> f32 {
-    let t = clamp((x - a) / max(b - a, 1e-6), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
+fn grade_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let lo = min(min(c.x, c.y), c.z);
+    let hi = max(max(c.x, c.y), c.z);
+    let l = (lo + hi) * 0.5;
+    if !(l > 0.0) {
+        return vec3<f32>(0.0, 0.0, l);
+    }
+    let d = hi - lo;
+    if !(d > 0.0) {
+        return vec3<f32>(0.0, d, l);
+    }
+    var s = d / (lo + hi);
+    if l > 0.5 {
+        s = d / ((2.0 - hi) - lo);
+    }
+    let dr = (hi - c.x) / d;
+    let dg = (hi - c.y) / d;
+    let db = (hi - c.z) / d;
+    var h = (3.0 - db) / 6.0;
+    if c.x == hi {
+        if c.y == lo {
+            h = (db + 5.0) / 6.0;
+        } else {
+            h = (1.0 - dg) / 6.0;
+        }
+    } else if c.y != hi {
+        if c.x == lo {
+            h = (dg + 3.0) / 6.0;
+        } else {
+            h = (5.0 - dr) / 6.0;
+        }
+    } else if c.z == lo {
+        h = (dr + 1.0) / 6.0;
+    }
+    return vec3<f32>(h, s, l);
 }
 
-fn grade_hsv(c: vec3<f32>) -> vec3<f32> {
-    let mx = max(max(c.x, c.y), c.z);
-    let mn = min(min(c.x, c.y), c.z);
-    let d = mx - mn;
-    if d <= 1e-7 || mx <= 0.0 {
-        return vec3<f32>(0.0, 0.0, mx);
+fn grade_from_hsl(hsl: vec3<f32>) -> vec3<f32> {
+    let h = hsl.x - floor(hsl.x);
+    let s = hsl.y;
+    let l = hsl.z;
+    var q = (s + 1.0) * l;
+    if l > 0.5 {
+        q = (l + s) - l * s;
     }
-    var h = (c.x - c.y) / d + 4.0;
-    if mx == c.x {
-        let q = (c.y - c.z) / d;
-        h = q - 6.0 * floor(q / 6.0);
-    } else if mx == c.y {
-        h = (c.z - c.x) / d + 2.0;
+    if q <= 0.0 {
+        return vec3<f32>(0.0);
     }
-    return vec3<f32>(h / 6.0, d / mx, mx);
+    let i = trunc(h * 6.0);
+    let p = (l + l) - q;
+    let f = (h * 6.0 - i) * (q - p);
+    let down = q - f;
+    let up = f + p;
+    let k = u32(i);
+    if k == 1u {
+        return vec3<f32>(down, q, p);
+    }
+    if k == 2u {
+        return vec3<f32>(p, q, up);
+    }
+    if k == 3u {
+        return vec3<f32>(p, down, q);
+    }
+    if k == 4u {
+        return vec3<f32>(up, p, q);
+    }
+    if k == 5u {
+        return vec3<f32>(q, p, down);
+    }
+    if k == 0u || k == 6u {
+        return vec3<f32>(q, up, p);
+    }
+    return vec3<f32>(0.0);
 }
 
-fn grade_from_hsv(hsv: vec3<f32>) -> vec3<f32> {
-    let h = (hsv.x - floor(hsv.x)) * 6.0;
-    let c = hsv.z * hsv.y;
-    let x = c * (1.0 - abs(h - 2.0 * trunc(h / 2.0) - 1.0));
-    let m = hsv.z - c;
-    let sector = u32(h);
-    var rgb = vec3<f32>(c, 0.0, x);
-    if sector == 0u {
-        rgb = vec3<f32>(c, x, 0.0);
-    } else if sector == 1u {
-        rgb = vec3<f32>(x, c, 0.0);
-    } else if sector == 2u {
-        rgb = vec3<f32>(0.0, c, x);
-    } else if sector == 3u {
-        rgb = vec3<f32>(0.0, x, c);
-    } else if sector == 4u {
-        rgb = vec3<f32>(x, 0.0, c);
+fn grade_to_hsv(c: vec3<f32>) -> vec3<f32> {
+    var p = vec4<f32>(c.y, c.z, 0.0, -1.0 / 3.0);
+    if c.y < c.z {
+        p = vec4<f32>(c.z, c.y, -1.0, 2.0 / 3.0);
     }
-    return rgb + vec3<f32>(m);
+    var q = vec4<f32>(p.x, p.y, p.w, c.x);
+    if p.x < c.x {
+        q = vec4<f32>(c.x, p.y, p.z, p.x);
+    }
+    let d = q.x - min(q.w, q.y);
+    let e = 1e-10;
+    return vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
 }
 
-fn grade_luma(c: vec3<f32>) -> f32 {
-    return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+fn grade_from_hsv(c: vec3<f32>) -> vec3<f32> {
+    let f = vec3<f32>(c.x) + vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+    let x = abs((f - floor(f)) * 6.0 - vec3<f32>(3.0)) - vec3<f32>(1.0);
+    let k = clamp(x, vec3<f32>(0.0), vec3<f32>(1.0)) - vec3<f32>(1.0);
+    return c.z * (vec3<f32>(1.0) + k * c.y);
 }
 
-// The grade's steps from the Color Wheels to the HSL Curves.
-fn grade_steps(color: vec3<f32>) -> vec3<f32> {
-    var c = color;
-    // Color Wheels: Lift, Gain, Gamma, Offset.
-    let lift = src[0u].xyz + vec3<f32>(src[0u].w);
-    let gamma = max(src[1u].xyz * src[1u].w, vec3<f32>(0.01));
-    let gain = src[2u].xyz * src[2u].w;
-    let offset = src[3u].xyz + vec3<f32>(src[3u].w);
-    var v = (c + lift * (vec3<f32>(1.0) - c)) * gain;
-    if v.x > 0.0 && gamma.x != 1.0 {
-        v.x = pow(v.x, 1.0 / gamma.x);
+fn grade_linear(c: f32) -> f32 {
+    if c > 0.04045 {
+        return pow(abs((c + 0.055) / 1.055), 2.4);
     }
-    if v.y > 0.0 && gamma.y != 1.0 {
-        v.y = pow(v.y, 1.0 / gamma.y);
+    return c / 12.92;
+}
+
+fn grade_lab_f(t: f32) -> f32 {
+    if t > 0.008856 {
+        return pow(abs(t), 0.3333);
     }
-    if v.z > 0.0 && gamma.z != 1.0 {
-        v.z = pow(v.z, 1.0 / gamma.z);
+    return 7.787 * t + 16.0 / 116.0;
+}
+
+fn grade_to_lab(c: vec3<f32>) -> vec3<f32> {
+    let r = grade_linear(c.x);
+    let g = grade_linear(c.y);
+    let b = grade_linear(c.z);
+    let fx = grade_lab_f((r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047);
+    let fy = grade_lab_f(r * 0.2126 + g * 0.7152 + b * 0.0722);
+    let fz = grade_lab_f((r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883);
+    return vec3<f32>(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz));
+}
+
+fn grade_lab_inverse(t: f32) -> f32 {
+    let t3 = t * t * t;
+    if t3 > 0.008856 {
+        return t3;
     }
-    c = v + offset;
-    // RL Color Wheels: by where the luma stands.
-    let sw = src[12u];
-    if sw.x != 0.0 {
-        let lo = src[8u].x;
-        let hi = src[8u].y;
-        let y = grade_luma(c);
-        let shadows = 1.0 - grade_smoothstep(lo - 0.05, lo + 0.05, y);
-        let highlights = grade_smoothstep(hi - 0.05, hi + 0.05, y);
-        let midtones = max(1.0 - shadows - highlights, 0.0);
-        c += shadows * (src[4u].xyz + vec3<f32>(src[4u].w))
-            + midtones * (src[5u].xyz + vec3<f32>(src[5u].w))
-            + highlights * (src[6u].xyz + vec3<f32>(src[6u].w))
-            + src[7u].xyz
-            + vec3<f32>(src[7u].w);
+    return (t - 16.0 / 116.0) / 7.787;
+}
+
+fn grade_encode(t: f32) -> f32 {
+    if t > 0.0031308 {
+        return 1.055 * pow(abs(t), 1.0 / 2.4) - 0.055;
     }
-    // Levels and Tone.
-    if sw.z != 0.0 {
-        let l = src[9u];
-        let span = max(l.y - l.x, 1e-4);
-        c = vec3<f32>(l.z) + (c - vec3<f32>(l.x)) / span * (l.w - l.z);
-    }
-    let tone = src[10u];
-    let more = src[11u];
-    c = (c + vec3<f32>(tone.x + more.x * 0.1 - tone.z)) * (1.0 + tone.y) + vec3<f32>(tone.z);
-    if tone.w != 1.0 {
-        let y = grade_luma(c);
-        c = vec3<f32>(y) + (c - vec3<f32>(y)) * tone.w;
-    }
-    // White Balance.
-    let temperature = src[8u].z;
-    let tint = src[8u].w;
-    if temperature != 0.0 || tint != 0.0 {
-        c.x *= 1.0 - 0.25 * temperature;
-        c.z *= 1.0 + 0.25 * temperature;
-        c.y *= 1.0 + 0.25 * tint;
-    }
-    // HSL: the chroma turned and scaled about the luma, the luma moved.
-    if more.y != 0.0 || more.z != 1.0 || more.w != 0.0 {
-        let y = grade_luma(c);
-        let cb = c.z - y;
-        let cr = c.x - y;
-        let s = sin(radians(more.y));
-        let k = cos(radians(more.y));
-        let cb2 = (cb * k - cr * s) * more.z;
-        let cr2 = (cb * s + cr * k) * more.z;
-        let y2 = y + more.w;
-        let r = y2 + cr2;
-        let b = y2 + cb2;
-        c = vec3<f32>(r, (y2 - 0.2126 * r - 0.0722 * b) / 0.7152, b);
-    }
-    // Curves: the luma through Brightness, then each channel.
-    let y = grade_luma(c);
-    let mapped = grade_at(GRADE_TABLES, 0u, y);
-    if y > 1e-5 {
-        c = c * (mapped / y);
-    } else {
-        c = c + vec3<f32>(mapped - y);
-    }
-    c = vec3<f32>(
-        grade_at(GRADE_TABLES, 1u, c.x),
-        grade_at(GRADE_TABLES, 2u, c.y),
-        grade_at(GRADE_TABLES, 3u, c.z),
+    return 12.92 * t;
+}
+
+fn grade_from_lab(lab: vec3<f32>) -> vec3<f32> {
+    let fy = (lab.x + 16.0) / 116.0;
+    let fx = lab.y / 500.0 + fy;
+    let fz = fy - lab.z / 200.0;
+    let x = grade_lab_inverse(fx) * 0.95047;
+    let y = grade_lab_inverse(fy);
+    let z = grade_lab_inverse(fz) * 1.08883;
+    return vec3<f32>(
+        grade_encode(x * 3.2406 + y * -1.5372 + z * -0.4986),
+        grade_encode(x * -0.9689 + y * 1.8758 + z * 0.0415),
+        grade_encode(x * 0.0557 + y * -0.204 + z * 1.057),
     );
-    // HSL Curves.
-    if sw.y != 0.0 {
-        let hsv = grade_hsv(max(c, vec3<f32>(0.0)));
-        let a = GRADE_TABLES + P.sw;
-        let b = a + P.sw;
-        let h2 = hsv.x + 0.5 * grade_within(a, 0u, hsv.x);
-        let s2 = hsv.y * (1.0 + grade_within(a, 1u, hsv.x)) * (1.0 + grade_within(a, 3u, hsv.y))
-            * (1.0 + grade_within(b, 1u, hsv.z));
-        let v2 = hsv.z * (1.0 + grade_within(a, 2u, hsv.x) + grade_within(b, 0u, hsv.y));
-        c = grade_from_hsv(vec3<f32>(h2, max(s2, 0.0), max(v2, 0.0)));
+}
+
+// One HSL Curve (`kind`, its table `n` entries from `at`) on a color: its
+// key from the color as it is.
+fn grade_hsl_curve(kind: u32, at: u32, n: u32, c: vec3<f32>) -> vec3<f32> {
+    if kind == 0u {
+        let hsv = grade_to_hsv(c);
+        var h = hsv.x - (grade_lookup(at, n, hsv.x) - 0.5);
+        if h < 0.0 {
+            h += 1.0;
+        }
+        if h > 1.0 {
+            h -= 1.0;
+        }
+        return grade_from_hsv(vec3<f32>(h, hsv.y, hsv.z));
     }
-    return c;
+    let hsl = grade_to_hsl(c);
+    if kind == 1u || kind == 3u || kind == 5u {
+        var key = hsl.x;
+        if kind == 3u {
+            key = hsl.y;
+        } else if kind == 5u {
+            key = grade_to_lab(c).x / GRADE_WHITE_L;
+        }
+        let z = grade_lookup(at, n, key);
+        return grade_from_hsl(vec3<f32>(hsl.x, clamp(hsl.y * 2.0 * z, 0.0, 1.0), hsl.z));
+    }
+    let lab = grade_to_lab(c);
+    var scale = 0.0;
+    if kind == 2u {
+        let w = grade_lookup(at, n, hsl.x);
+        var weight = 0.0;
+        if lab.x > 60.0 {
+            weight = (-1.0 / 35.6) * lab.x + 2.68;
+        } else if lab.x > 30.0 {
+            weight = lab.x / 30.0 - 1.0;
+        }
+        var chroma = min(hsl.y, 2.0 - 2.0 * hsl.z) - 1.0;
+        if hsl.z <= 0.5 {
+            chroma = min(hsl.y, 2.0 * hsl.z) - 1.0;
+        }
+        weight *= 1.75 / (1.0 + 18.0 * chroma * chroma);
+        scale = 1.0 - (1.0 - (2.25 * w - 0.125)) * weight;
+    } else {
+        scale = 2.0 * grade_lookup(at, n, hsl.y);
+    }
+    return grade_from_lab(vec3<f32>(clamp(lab.x * scale, 0.0, GRADE_WHITE_L), lab.y, lab.z));
+}
+
+fn grade_cdl_one(v: f32, slope: f32, offset: f32, power: f32) -> f32 {
+    let x = v * slope + offset;
+    if x > 0.0 {
+        return pow(x, power);
+    }
+    return x;
+}
+
+// The CDL whose slope, offset and power are rows `row` to `row` + 2.
+fn grade_cdl(row: u32, c: vec3<f32>) -> vec3<f32> {
+    let s = src[row].xyz;
+    let o = src[row + 1u].xyz;
+    let p = src[row + 2u].xyz;
+    return vec3<f32>(
+        grade_cdl_one(c.x, s.x, o.x, p.x),
+        grade_cdl_one(c.y, s.y, o.y, p.y),
+        grade_cdl_one(c.z, s.z, o.z, p.z),
+    );
+}
+
+fn grade_color(color: vec3<f32>) -> vec3<f32> {
+    var c = grade_hold(color);
+    let s0 = src[0u];
+    let s1 = src[1u];
+    let s2 = src[2u];
+    let s3 = src[3u];
+    let s4 = src[4u];
+    // The HSL Curves, each keyed on what the one before made.
+    let curves = u32(s1.w);
+    for (var k = 0u; k < curves; k++) {
+        let d = src[16u + k];
+        c = grade_hold(grade_hsl_curve(u32(d.x), u32(d.y), u32(d.z), c));
+    }
+    // The first part: White Balance, Levels, the RL wheels, the Color
+    // Curves.
+    if s0.x != 0.0 {
+        let lin = pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.4));
+        let m = vec3<f32>(dot(src[5u].xyz, lin), dot(src[6u].xyz, lin), dot(src[7u].xyz, lin));
+        c = pow(max(m, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4));
+    }
+    if s0.y != 0.0 {
+        let l = src[8u];
+        c = vec3<f32>(l.z) + (c - vec3<f32>(l.x)) * ((l.w - l.z) / (l.y - l.x));
+    }
+    if s0.z != 0.0 {
+        c = vec3<f32>(grade_table(0u, c.x), grade_table(1u, c.y), grade_table(2u, c.z));
+    }
+    if s0.w != 0.0 {
+        c = vec3<f32>(grade_table(3u, c.x), grade_table(3u, c.y), grade_table(3u, c.z));
+    }
+    if s1.x != 0.0 {
+        c = vec3<f32>(grade_table(4u, c.x), grade_table(5u, c.y), grade_table(6u, c.z));
+    }
+    if s1.y != 0.0 {
+        c = vec3<f32>(grade_table(7u, c.x), grade_table(7u, c.y), grade_table(7u, c.z));
+    }
+    c = grade_hold(c);
+    // The second: Lift, then Gain, Offset and Gamma by channel, then by Y.
+    if s1.z != 0.0 {
+        let l = src[9u].xyz;
+        c = l + c * (vec3<f32>(1.0) - l);
+    }
+    if s4.z != 0.0 {
+        c = grade_cdl(10u, c);
+    }
+    if s4.w != 0.0 {
+        c = grade_cdl(13u, c);
+    }
+    c = grade_hold(c);
+    // The third, and the HSL after it.
+    if s2.x != 1.0 {
+        let y = dot(vec3<f32>(0.2126, 0.7152, 0.0722), c);
+        c = vec3<f32>(y) + s2.x * (c - vec3<f32>(y));
+    }
+    c = c * s2.y + vec3<f32>(s2.z);
+    if s3.x != 0.0 {
+        c = c + s3.x * (c - vec3<f32>(s3.y));
+    }
+    if s2.w != 0.0 {
+        let e = c * s3.z;
+        c = vec3<f32>(grade_table(8u, e.x), grade_table(8u, e.y), grade_table(8u, e.z));
+    }
+    let hsl = grade_to_hsl(c);
+    c = grade_from_hsl(vec3<f32>(
+        hsl.x + s3.w,
+        clamp(hsl.y * s4.x, 0.0, 1.0),
+        clamp(hsl.z * s4.y, 0.0, 1.0),
+    ));
+    return grade_hold(c);
 }
 
 @compute @workgroup_size(16, 16)
@@ -706,7 +859,7 @@ fn grade(@builtin(global_invocation_id) id: vec3<u32>) {
         dst[o] = vec4<f32>(0.0, 0.0, 0.0, a);
         return;
     }
-    dst[o] = vec4<f32>(grade_steps(px.xyz / a) * a, a);
+    dst[o] = vec4<f32>(grade_color(px.xyz / a) * a, a);
 }
 
 // Bézier Masking (`bv-effects`'s plug-in, the same math as its render):

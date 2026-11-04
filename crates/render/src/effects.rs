@@ -270,18 +270,8 @@ pub fn apply(img: &mut ImageRgbaF32, e: &Effect, scale: f32) {
         }
         // Audio effects do not touch the picture; plug-ins' go through the
         // scene's plug-ins (`plugin`).
-        EffectKind::Gain
-        | EffectKind::Eq3
-        | EffectKind::HighPass
-        | EffectKind::LowPass
-        | EffectKind::Compressor
-        | EffectKind::Limiter
-        | EffectKind::NoiseGate
-        | EffectKind::Delay
-        | EffectKind::Reverb
-        | EffectKind::ModernEq
-        | EffectKind::Vst
-        | EffectKind::Plugin => {}
+        // (the audio effects, all of them).
+        _ => {}
     }
 }
 

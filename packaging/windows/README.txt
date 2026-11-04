@@ -1,16 +1,14 @@
 BananaV — video editor (Windows)
 ================================
 
-ULTRA ALPHA BUILD
-- This is a very early test build. Expect missing features, bugs and
-  crashes. Do not use it for important work, keep copies of your media
-  and projects, and expect projects saved now not to open in later builds.
-- Tell us what breaks: https://discord.gg/vtC7Yasz98
 - Website: https://bananav-editor.github.io/
+- Help and community: https://discord.gg/vtC7Yasz98
 
-Run BananaV.exe. Nothing to install: it runs from any folder. The build
-is not signed yet, so Windows may warn about an unknown publisher the
-first time ("More info", then "Run anyway").
+The installer (BananaV-...-setup.exe) puts BananaV in your Start menu, with
+no administrator password, and Settings > Apps uninstalls it. The zip needs
+no installation: unpack it anywhere and run BananaV.exe. The builds are not
+signed yet, so Windows may warn about an unknown publisher the first time
+("More info", then "Run anyway").
 
 Requirements
 - Windows 10 or 11: the x64 package on Intel and AMD processors, the ARM64
@@ -32,8 +30,7 @@ License
   Free Software Foundation, either version 3 of the License, or (at your
   option) any later version (LICENSE.txt, beside this file). It comes
   with ABSOLUTELY NO WARRANTY.
-- Its source code will be published at https://github.com/acasoq-web/BananaV
-  soon, with the first public release.
+- Its source code is at https://github.com/acasoq-web/BananaV.
 - The open-source libraries it is built with, and their licenses, are in
   THIRD-PARTY-NOTICES.txt, beside this file.
 

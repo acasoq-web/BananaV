@@ -98,7 +98,7 @@ impl EventPropertiesDialog {
             take_name: p.take_name(clip, c.active_take()).unwrap_or_default(),
             muted: c.muted,
             locked: c.locked,
-            keep_aspect: c.transform.keeps_aspect(),
+            keep_aspect: c.pan_crop.keep_aspect,
             reduce_flicker: c.reduce_flicker,
             past_end,
             resample: c.resample,

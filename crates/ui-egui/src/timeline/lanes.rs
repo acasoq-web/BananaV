@@ -4518,25 +4518,52 @@ pub(super) fn paint_grid(
 /// it longest; events of other speeds are left alone.
 pub(crate) fn sync_offsets(project: &Project) -> std::collections::HashMap<ClipId, Tick> {
     use std::collections::HashMap;
-    let mut by_media: HashMap<bv_timeline::MediaId, Vec<(TrackKind, &bv_timeline::Clip)>> =
-        HashMap::new();
+    type Events<'a> = Vec<&'a bv_timeline::Clip>;
+    // Each media's video events and audio events.
+    let mut by_media: HashMap<bv_timeline::MediaId, (Events<'_>, Events<'_>)> = HashMap::new();
     for (t, c) in project.clips() {
         if c.freeze.is_none() {
-            by_media.entry(c.media).or_default().push((t.kind, c));
+            let (video, audio) = by_media.entry(c.media).or_default();
+            match t.kind {
+                TrackKind::Video => video.push(c),
+                TrackKind::Audio => audio.push(c),
+            }
         }
     }
     // Where the media's start falls on the timeline.
     let origin = |c: &bv_timeline::Clip| c.start - c.to_timeline(c.source_in);
     let half_frame = Tick(project.settings.frame_rate.frame_duration().0 / 2);
     let mut out = HashMap::new();
-    for events in by_media.values() {
-        for &(kind, c) in events {
-            let partner = events
-                .iter()
-                .filter(|(k, o)| *k != kind && o.rate == c.rate)
-                .map(|(_, o)| (o, c.end().min(o.end()) - c.start.max(o.start)))
-                .filter(|(_, overlap)| *overlap > Tick::ZERO)
-                .max_by_key(|(_, overlap)| *overlap);
+    // Drawn every frame, and one long recording may be cut into thousands
+    // of events: only the partners that overlap are looked at. By their
+    // starts, with how far the ones so far reach, those that can overlap
+    // an event are found going back from where it ends.
+    let mut match_with = |events: &[&bv_timeline::Clip], others: &mut Events<'_>| {
+        others.sort_by_key(|o| o.start);
+        let mut reach = Tick::ZERO;
+        let reaches: Vec<Tick> = others
+            .iter()
+            .map(|o| {
+                reach = reach.max(o.end());
+                reach
+            })
+            .collect();
+        for c in events {
+            let mut partner: Option<(&bv_timeline::Clip, Tick)> = None;
+            let until = others.partition_point(|o| o.start < c.end());
+            for i in (0..until).rev() {
+                if reaches[i] <= c.start {
+                    break;
+                }
+                let o = others[i];
+                let overlap = c.end().min(o.end()) - c.start.max(o.start);
+                if o.rate == c.rate
+                    && overlap > Tick::ZERO
+                    && partner.is_none_or(|(_, longest)| overlap > longest)
+                {
+                    partner = Some((o, overlap));
+                }
+            }
             if let Some((o, _)) = partner {
                 let d = origin(c) - origin(o);
                 if d.abs() >= half_frame {
@@ -4544,6 +4571,10 @@ pub(crate) fn sync_offsets(project: &Project) -> std::collections::HashMap<ClipI
                 }
             }
         }
+    };
+    for (video, audio) in by_media.values_mut() {
+        match_with(video, audio);
+        match_with(audio, video);
     }
     out
 }
@@ -5182,7 +5213,7 @@ pub(crate) fn paint(
                     ClipButton::Generated => (Icon::Generator, ON_EVENT),
                     ClipButton::PanCrop => (
                         Icon::PanCrop,
-                        if clip.transform.is_identity() {
+                        if clip.pan_crop.is_default() {
                             ON_EVENT
                         } else {
                             theme::banana()
@@ -5734,7 +5765,7 @@ mod edge_tests {
         // A 5 s event from 2 s: edges at 2 s and 7 s.
         p.insert_media(m, Tick::from_seconds(2), Some(v), None)
             .unwrap();
-        // 1 s = 100 px: 8 px of snap are 80 ms.
+        // 1 s = 100 px: 7 px of snap are 70 ms.
         let mut view = TimelineView {
             ticks_per_px: Tick::SECOND.0 as f64 / 100.0,
             ..TimelineView::default()
@@ -5743,10 +5774,11 @@ mod edge_tests {
         let near = Tick::from_seconds_f64(6.95);
         assert_eq!(view.snap_cursor(&app, &p, near), Tick::from_seconds(7));
         assert!(view.snap_line.is_some(), "the snap line shows");
-        // Too far: just onto a frame.
-        let far = Tick::from_seconds_f64(6.5);
+        // Too far (8 px): just onto a frame.
         let rate = p.settings.frame_rate;
-        assert_eq!(view.snap_cursor(&app, &p, far), rate.snap_floor(far));
+        for far in [6.92, 6.5].map(Tick::from_seconds_f64) {
+            assert_eq!(view.snap_cursor(&app, &p, far), rate.snap_floor(far));
+        }
         // Snapping off: no snap.
         app.snapping = false;
         assert_eq!(view.snap_cursor(&app, &p, near), rate.snap_floor(near));
@@ -5939,6 +5971,36 @@ mod edge_tests {
         let r30 = FrameRate::FPS_30;
         assert_eq!(sync_text(r30.frame_start(62 * 30 + 5), r30), "+1:02:05");
         assert_eq!(sync_text(-r30.frame_start(15), r30), "-0:15");
+    }
+
+    #[test]
+    fn events_out_of_sync_are_matched_with_their_longest_overlap() {
+        use bv_timeline::{Clip, ClipId, Generator, MediaInfo};
+        let mut p = Project::default();
+        let m = p.add_media(MediaInfo::generated(Generator::ColorBars, &p.settings));
+        let s = |n: i64| Tick::from_seconds(n);
+        let clip = |id: u64, start: i64, length: i64, from: i64| {
+            let mut c = Clip::new(ClipId(id), m, s(start), s(length));
+            c.source_in = s(from);
+            c
+        };
+        // A long video event from 0 s, then shorter ones it reaches over.
+        p.tracks[0].clips = vec![
+            clip(901, 0, 100, 0),
+            clip(902, 10, 5, 10),
+            clip(903, 20, 5, 20),
+        ];
+        // The first audio event overlaps only the long one, 3 s off; the
+        // second overlaps the long one by 10 s and a short one by 5 s: the
+        // long one is its partner, and it is 5 s off.
+        p.tracks[1].clips = vec![clip(904, 50, 10, 53), clip(905, 15, 10, 20)];
+        let offsets = sync_offsets(&p);
+        assert_eq!(offsets[&ClipId(904)], s(-3));
+        assert_eq!(offsets[&ClipId(905)], s(-5));
+        // The long video event's longest overlap is the second audio event's
+        // (as long as the first's: either is its partner).
+        assert!([s(3), s(5)].contains(&offsets[&ClipId(901)]));
+        assert_eq!(offsets[&ClipId(903)], s(5));
     }
 
     /// The demo at 100 pixels a second, and where `secs` is on `track`.

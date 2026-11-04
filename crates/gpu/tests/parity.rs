@@ -445,7 +445,7 @@ fn pan_crop_masks() {
     let s = Tick::from_seconds;
     let (mut p, bars, _) = bars_and_gradient();
     let info = p.media(p.clip(bars).unwrap().media).unwrap().video.unwrap();
-    let (w, h) = (info.width as f32, info.height as f32);
+    let (w, h) = (info.width as f64, info.height as f64);
     let mut oval = MaskPath::oval([0.1 * w, 0.1 * h], [0.8 * w, 0.9 * h]);
     oval.feather = MaskFeather::Both;
     oval.feather_pct = 4.0;
@@ -458,13 +458,17 @@ fn pan_crop_masks() {
     };
     mask.add_path(oval);
     mask.add_path(hole);
+    p.set_clip_framing(
+        bars,
+        &Transform {
+            scale: 0.8,
+            rotation_deg: 10.0,
+            x: 0.05,
+            ..Transform::default()
+        },
+    )
+    .unwrap();
     let event = p.clip_mut(bars).unwrap();
-    event.transform = Transform {
-        scale: 0.8,
-        rotation_deg: 10.0,
-        x: 0.05,
-        ..Transform::default()
-    };
     event.mask = Some(mask.clone());
     check(&mut c, "pan/crop masks cutting", &p, s(1), TOL);
     let event = p.clip_mut(bars).unwrap();
@@ -521,7 +525,7 @@ fn framing_and_qualities() {
             let v = p.tracks[0].id;
             let bars = media(&mut p, Generator::Checkerboard { size: 7 });
             let id = p.insert_media(bars, Tick::ZERO, Some(v), None).unwrap()[0];
-            p.clip_mut(id).unwrap().transform = *tf;
+            p.set_clip_framing(id, tf).unwrap();
             check(&mut c, &format!("{quality:?} {name}"), &p, Tick::ZERO, TOL);
         }
     }
@@ -565,13 +569,16 @@ fn framing_and_qualities() {
     let v = p.tracks[0].id;
     let bars = media(&mut p, Generator::Checkerboard { size: 3 });
     let id = p.insert_media(bars, Tick::ZERO, Some(v), None).unwrap()[0];
-    let clip = p.clip_mut(id).unwrap();
-    clip.reduce_flicker = true;
-    clip.transform = Transform {
-        scale: 0.7,
-        y: 0.1,
-        ..Transform::default()
-    };
+    p.clip_mut(id).unwrap().reduce_flicker = true;
+    p.set_clip_framing(
+        id,
+        &Transform {
+            scale: 0.7,
+            y: 0.1,
+            ..Transform::default()
+        },
+    )
+    .unwrap();
     check(&mut c, "reduce interlace flicker", &p, Tick::ZERO, TOL);
 }
 

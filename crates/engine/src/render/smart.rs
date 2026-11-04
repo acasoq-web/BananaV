@@ -102,7 +102,7 @@ pub(crate) fn unedited(project: &Project, t: Tick, pass: &Passable) -> Option<(S
     let plain_event = layer.level >= 1.0
         && layer.fade.is_none()
         && m.effects.is_empty()
-        && m.transform.is_identity()
+        && m.clip.pan_crop.is_default()
         && m.blend.is_none()
         && m.deinterlace.is_none()
         && m.clip.mask.is_none()

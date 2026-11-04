@@ -1,12 +1,8 @@
 BananaV — video editor (Linux)
 ==============================
 
-ULTRA ALPHA BUILD
-- This is a very early test build. Expect missing features, bugs and
-  crashes. Do not use it for important work, keep copies of your media
-  and projects, and expect projects saved now not to open in later builds.
-- Tell us what breaks: https://discord.gg/vtC7Yasz98
 - Website: https://bananav-editor.github.io/
+- Help and community: https://discord.gg/vtC7Yasz98
 
 Make the AppImage executable (chmod +x BananaV-*.AppImage) and run it.
 Nothing to install.
@@ -37,8 +33,7 @@ License
   Free Software Foundation, either version 3 of the License, or (at your
   option) any later version (LICENSE.txt, beside this file). It comes
   with ABSOLUTELY NO WARRANTY.
-- Its source code will be published at https://github.com/acasoq-web/BananaV
-  soon, with the first public release.
+- Its source code is at https://github.com/acasoq-web/BananaV.
 - The open-source libraries it is built with, and their licenses, are in
   THIRD-PARTY-NOTICES.txt; the system libraries the AppImage carries, and
   theirs, in SYSTEM-LIBRARIES-NOTICES.txt, beside this file.

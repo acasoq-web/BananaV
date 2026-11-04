@@ -473,6 +473,43 @@ fn captura_curvas_de_fade() {
     snap(&mut h, "fade_ancoras");
 }
 
+/// File › Import and File › Export, VEG projects among the formats.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_menu_arquivo() {
+    let mut app = BananaApp::new(egui::Context::default());
+    set_language(Language::English);
+    app.load_demo();
+    app.welcome_for_review("closed");
+    let mut h = harness(app);
+    settle(&mut h);
+    // The menu bar's File, at the window's top.
+    let file = h
+        .get_all_by_label("File")
+        .map(|n| n.rect().center())
+        .find(|at| at.y < 40.0)
+        .expect("File");
+    click_with(&mut h, file, egui::PointerButton::Primary);
+    for (submenu, name) in [
+        ("Import", "arquivo_importar"),
+        ("Export", "arquivo_exportar"),
+    ] {
+        hover(&mut h, submenu);
+        assert!(
+            h.query_all_by_label_contains("VEG Project")
+                .next()
+                .is_some(),
+            "{submenu}'s VEG Project"
+        );
+        snap(&mut h, name);
+    }
+    click_with(
+        &mut h,
+        egui::pos2(1500.0, 19.0),
+        egui::PointerButton::Primary,
+    );
+}
+
 /// Media let go with the right mouse button: Add Across Time, Add Across
 /// Tracks, Add as Takes, Video Only and Audio Only (open), Cancel.
 #[test]

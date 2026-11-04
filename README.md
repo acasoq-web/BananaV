@@ -39,10 +39,11 @@ keyboard. It is written from scratch in Rust: its compositing, audio mixing,
 color management and most of its file formats are its own code, and the
 interface speaks English and Brazilian Portuguese.
 
-> **Early development.** BananaV has not reached 1.0: expect missing features
-> and rough edges, and save often. See the [roadmap](docs/ROADMAP.md) for what
-> is done and what comes next, and the [changelog](CHANGELOG.md) for what
-> changed in each build.
+**New in 0.2.0:** 51 audio effects, compatibility with `.veg` projects, color
+correction with LUTs, a rebuilt Pan/Crop, smooth playback and an installer for
+Windows. BananaV has not reached 1.0, so save often: see the
+[changelog](CHANGELOG.md) for what changed in each version and the
+[roadmap](docs/ROADMAP.md) for what comes next.
 
 ## Download
 
@@ -51,11 +52,13 @@ Get the latest version from the
 
 | System | Package | How to run |
 |---|---|---|
-| Windows 10 or 11 (x64, ARM64) | `BananaV-…-windows-x64.zip`, `…-windows-arm64.zip` | Unzip and run `BananaV.exe`: nothing to install. |
+| Windows 10 or 11 (x64, ARM64) | `BananaV-…-windows-x64-setup.exe`, `…-windows-arm64-setup.exe` | Open the installer and follow the steps: no administrator password needed. |
+| Windows, without installing | `BananaV-…-windows-x64.zip`, `…-windows-arm64.zip` | Unzip and run `BananaV.exe`. |
 | Linux, glibc 2.35 or newer (x64, ARM64) | `BananaV-…-linux-x64.AppImage`, `…-linux-arm64.AppImage` | `chmod +x` the AppImage and run it. |
 
-You need a graphics card with Direct3D 12, Vulkan or OpenGL. Each package has
-a README with the details and the licenses of what it includes.
+You need a graphics card with Direct3D 12, Vulkan or OpenGL. The builds are not
+signed yet: if Windows warns you, choose **More info**, then **Run anyway**. Each
+package has a README with the details and the licenses of what it includes.
 
 ## Features
 
@@ -72,11 +75,14 @@ a README with the details and the licenses of what it includes.
   BananaV's own (blurs, color, light and film looks, lens correction, mesh
   warp, 360° video, AI/ML-style smoothing, sharpening and dehazing…), most
   of them drawn on the graphics card.
-- **Color** — a color grading panel (wheels, curves, HSL, LUTs), video scopes,
+- **Color** — a color grading panel (wheels, curves, HSL, levels, white
+  balance, Camera and Look LUTs from `.cube` files, Export LUT), video scopes,
   and ACES 1.3 color management through BananaV's own OpenColorIO
   implementation.
-- **Audio** — a mixing console with busses and assignable effect chains,
-  volume, pan and effect automation, 5.1 surround panning, auto ducking,
+- **Audio** — 51 audio effects of BananaV's own (equalizers, dynamics, reverbs,
+  delays, modulation, distortion, pitch and time, restoration), each with its
+  panel and factory presets; a mixing console with busses and assignable effect
+  chains, volume, pan and effect automation, 5.1 surround panning, auto ducking,
   loudness meters (EBU R 128), beat and tempo detection.
 - **Plug-ins** — an OpenFX 1.5 host for video effects, transitions and
   generators, and a VST 3 host for audio effects. BananaV's own video effects
@@ -89,8 +95,9 @@ a README with the details and the licenses of what it includes.
   the computer has), image sequences and audio files; compositing on the
   graphics card (through wgpu: Direct3D 12, Vulkan or OpenGL) with the
   processor as the fallback.
-- **Interchange** — EDL, Final Cut Pro 7 XML and FCPXML, and OpenTimelineIO
-  (`.otio`, `.otioz`, `.otiod`).
+- **Interchange** — `.veg` projects (tracks, events, transitions, audio effects,
+  volumes, Pan/Crop, keyframes and busses), EDL, Final Cut Pro 7 XML and FCPXML,
+  and OpenTimelineIO (`.otio`, `.otioz`, `.otiod`).
 - **Discs and capture** — DVD-Video authoring and burning, Video CDs and audio
   CDs, with BananaV's own MPEG-2 and MPEG-1 encoders; screen capture of
   displays, windows, cameras and the computer's sound.

@@ -447,7 +447,9 @@ pub(crate) fn page(
                                 slider = slider.step_by(1.0 / f64::from(p.steps));
                             }
                             let r = ui.add_sized([220.0, 18.0], slider);
-                            if r.double_clicked() {
+                            if r.double_clicked()
+                                || crate::widgets::bar_double_clicked(ui, &r, false)
+                            {
                                 x = p.default;
                             }
                             if x != value {

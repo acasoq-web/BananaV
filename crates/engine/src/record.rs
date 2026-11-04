@@ -67,6 +67,8 @@ pub struct RecordTake {
     /// The effects the signal goes through before it is written (an input
     /// bus's: a wet recording).
     pub effects: Vec<bv_timeline::Effect>,
+    /// The project's tempo, for effects with tempo sync.
+    pub tempo: bv_timeline::Tempo,
 }
 
 /// A file recorded into a track.
@@ -264,6 +266,7 @@ impl Recorder {
                 let chain = (!t.effects.is_empty()).then(|| {
                     let mut c = bv_mixer::dsp::Chain::default();
                     let list: Vec<&bv_timeline::Effect> = t.effects.iter().collect();
+                    c.set_tempo(t.tempo);
                     c.sync(&list, rate, channels, false);
                     c
                 });

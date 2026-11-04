@@ -33,6 +33,32 @@ with the user's prints and the graphics card's parity tests.
   and `BV_PREVIEW_TRACE`, and `APPDATA` and `LOCALAPPDATA` pointing to
   copies, it measures the interface and the preview without touching the
   user's settings.
+- Why it feels slow: `BV_FRAME_TRACE=1` gives each frame of the window (how
+  long after the last one, how long it took, the preview's picture, what
+  asked for it), `BV_PREVIEW_TRACE=1` each frame drawn, `BV_GPU_TRACE=1` each
+  kernel's compile time (`cargo test --release -p bv-gpu --test warmup --
+  --ignored --nocapture`: a debug build compiles kernels without
+  optimizing them, far faster than a release build does).
+  `tools/stacks.cs` samples the threads of a running BananaV, its first
+  lines telling how to build it and a copy with symbols. While playing, the
+  window should paint about 60 times a second, its pictures evenly apart,
+  and a frame's time stay well under that: compare with these (Ryzen
+  16 threads, RTX 4070, a 1080p60 H.264 event with two effects):
+  60.0 pictures a second, 16.2–17.1 ms apart, none skipped, a little over
+  a processor core in all. Measure with BananaV in front and nobody using
+  the computer: with another window in front or the screen locked the same
+  build gives 15–50 pictures a second.
+- Against another program's files, none of them in the repository:
+  `BV_VEG_SAMPLES=<first samples' folder> BV_VEG_SAMPLES2=<second samples'
+  folder> BV_PANCROP_SAMPLES=<Pan/Crop cases' folder> cargo test -p bv-timeline
+  --lib veg::
+  -- --include-ignored` reads each sample as it says and writes it back,
+  structure by structure; `BV_VEG_SAMPLES2=… cargo test -p bv-ui-egui --lib
+  the_samples_transitions -- --ignored` brings its 27 transitions in;
+  `BV_PANCROP_SAMPLES=<folder> BV_PANCROP_OUT=<folder> cargo test -p bv-engine
+  --test pan_crop_renders -- --ignored --nocapture > out.txt` draws its
+  Pan/Crop cases and compares them with the program's renders, frame by
+  frame (`BV_PANCROP_FRAMES=1` lists each frame).
 - Media oracles: ffmpeg/ffprobe on PATH (development only; on Linux they
   test FFmpeg's backend too, and `bv-mf --test ffmpeg` checks it without
   them: a movie written and read back). Fixtures live in

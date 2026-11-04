@@ -37,6 +37,7 @@ pub enum Cmd {
     ImportProjectMedia,
     ImportEdl,
     ImportOtio,
+    ImportVeg,
     ImportXml,
     ImportFcpxml,
     /// File › Import › Closed Captioning.
@@ -48,6 +49,7 @@ pub enum Cmd {
     ExportFcpxml,
     ExportEdl,
     ExportOtio,
+    ExportVeg,
     Properties,
     Exit,
     // Edit
@@ -383,6 +385,7 @@ pub(crate) fn all() -> Vec<Cmd> {
         ImportProjectMedia,
         ImportEdl,
         ImportOtio,
+        ImportVeg,
         ImportXml,
         ImportFcpxml,
         ImportClosedCaptioning,
@@ -393,6 +396,7 @@ pub(crate) fn all() -> Vec<Cmd> {
         ExportFcpxml,
         ExportEdl,
         ExportOtio,
+        ExportVeg,
         Properties,
         Exit,
         Undo,
@@ -689,6 +693,7 @@ impl Cmd {
             ImportProjectMedia => tr("Project Media…"),
             ImportEdl => tr("EDL Text File (*.edl, *.txt)…"),
             ImportOtio => "OpenTimelineIO (*.otio, *.otioz)…",
+            ImportVeg => tr("VEG Project (Experimental) (*.veg)…"),
             ImportXml => "Final Cut Pro 7/DaVinci Resolve (*.xml)…",
             ImportClosedCaptioning => tr("Closed Captioning…"),
             ImportFcpxml => "Final Cut Pro X (*.fcpxml)…",
@@ -700,6 +705,7 @@ impl Cmd {
             ExportFcpxml => "Final Cut Pro X (*.fcpxml)…",
             ExportEdl => tr("EDL Text File (*.edl)…"),
             ExportOtio => "OpenTimelineIO (*.otio, *.otioz, *.otiod)…",
+            ExportVeg => tr("VEG Project (*.veg)…"),
             Properties => tr("Properties…"),
             Exit => tr("Exit"),
             Undo => {
@@ -1226,7 +1232,7 @@ impl Cmd {
                 .all_selected(Some(TrackKind::Audio), |c| c.normalize.is_some())
                 .unwrap_or(false),
             MaintainAspect => app
-                .all_selected(Some(TrackKind::Video), |c| c.transform.keeps_aspect())
+                .all_selected(Some(TrackKind::Video), |c| c.pan_crop.keep_aspect)
                 .unwrap_or(true),
             AllFrames => app
                 .all_selected(Some(TrackKind::Video), |c| c.all_frames)
@@ -1437,6 +1443,7 @@ impl Cmd {
             ImportProjectMedia => crate::interchange_ui::import_project_media(app),
             ImportEdl => crate::interchange_ui::import_edl(app),
             ImportOtio => app.request(Pending::ImportOtio),
+            ImportVeg => crate::veg_ui::import(app),
             ImportXml => app.request(Pending::ImportFcp(false)),
             ImportClosedCaptioning => app.import_closed_captioning(),
             ImportFcpxml => app.request(Pending::ImportFcp(true)),
@@ -1453,6 +1460,7 @@ impl Cmd {
             }
             ExportEdl => crate::interchange_ui::export(app, crate::interchange_ui::Format::Edl),
             ExportOtio => crate::otio_ui::export(app),
+            ExportVeg => crate::veg_ui::export(app),
             Properties => app.open_project_settings(),
             Exit => app.request(Pending::Exit),
             Undo => app.undo(),

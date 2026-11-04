@@ -33,6 +33,8 @@ impl Worker {
             .name("bv-track-mix".into())
             .spawn(move || {
                 let mut pool = AudioPool::new();
+                // Playing: what takes long is made on threads of its own.
+                pool.set_live(true);
                 while let Ok((project, start, frames, delays)) = rx.recv() {
                     let out =
                         bv_mixer::mix_track(&project, track, start, frames, &delays, &mut pool);

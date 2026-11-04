@@ -16,6 +16,31 @@ pub enum ParamKind {
     Toggle,
     /// Este e os dois parâmetros seguintes formam uma cor sRGB (R, G, B).
     Color,
+    /// One of [`ParamSpec::options`]: the value `min` is the first, each
+    /// next one a whole number more.
+    Choice,
+    /// Data an effect's own editor keeps (a graph's points…): never shown
+    /// as a control nor automated.
+    Data,
+    /// A graph's point count ([`ParamSpec::graph`]): its points follow it
+    /// as [`ParamKind::Data`], and the panel draws and edits them.
+    Graph,
+}
+
+/// How a value is shown and typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    /// As it is, with [`ParamSpec::unit`].
+    Value,
+    /// A linear gain, shown in dB (0 as −Inf.).
+    GainDb,
+    /// A part (0–1, or more), shown as a percentage.
+    Percent,
+    /// A pan, −1 to 1, positive to the left: shown as "50.0 % L" or
+    /// "50.0 % R", its slider's left the left.
+    Pan,
+    /// A level in dB, its lowest value shown as −Inf. (silence).
+    Db,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,9 +50,213 @@ pub struct ParamSpec {
     pub max: f32,
     pub default: f32,
     pub kind: ParamKind,
+    /// What follows the number ("Hz", "ms"…).
+    pub unit: &'static str,
+    /// How many decimals the number shows.
+    pub decimals: u8,
+    /// A [`ParamKind::Choice`]'s options, in the order of their values.
+    pub options: &'static [&'static str],
+    /// Its slider moves on a logarithmic scale (frequencies, times).
+    pub log: bool,
+    pub show: Show,
+    /// The heading it begins in its effect's panel ("": the one before's).
+    pub group: &'static str,
+    /// A [`ParamKind::Graph`]'s axes and size.
+    pub graph: Option<Graph>,
+    /// What it waits on: its control is greyed out unless each parameter
+    /// named (by its place) holds one of the values its mask lets through
+    /// (bit `v` for the whole value `v`: [`ON`], [`OFF`], [`either`]).
+    pub when: &'static [(u8, u32)],
+}
+
+/// A graph an effect's panel draws and edits ([`ParamKind::Graph`]): its
+/// axes and how many points it holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Graph {
+    /// The most points it holds.
+    pub points: u8,
+    /// Its axes' ranges: x left to right, y bottom to top.
+    pub x: (f32, f32),
+    pub y: (f32, f32),
+    /// The x axis on a logarithmic scale (frequencies).
+    pub log_x: bool,
+    /// The first and last points stay at the ends of the x axis.
+    pub pinned_ends: bool,
+    /// What follows each axis's numbers ("dB", "Hz"…).
+    pub x_unit: &'static str,
+    pub y_unit: &'static str,
 }
 
 impl ParamSpec {
+    /// A graph of up to `g.points` points: this parameter holds how many
+    /// it has (`count`), the [`Graph::params`] after it each point's x and
+    /// y.
+    pub const fn graph(name: &'static str, g: Graph, count: f32) -> ParamSpec {
+        ParamSpec {
+            kind: ParamKind::Graph,
+            graph: Some(g),
+            decimals: 0,
+            ..ParamSpec::num(name, 2.0, g.points as f32, count)
+        }
+    }
+}
+
+impl Graph {
+    /// How many parameters it takes after its count: x and y a point.
+    pub const fn params(&self) -> usize {
+        2 * self.points as usize
+    }
+
+    /// Its points' parameters (after the count), the first ones
+    /// `defaults`, the rest at the start of each axis.
+    pub const fn point_params<const N: usize>(&self, defaults: &[(f32, f32)]) -> [ParamSpec; N] {
+        let mut out = [ParamSpec::data("", 0.0, 0.0, 0.0); N];
+        let mut k = 0;
+        while k < N / 2 {
+            let (x, y) = if k < defaults.len() {
+                defaults[k]
+            } else {
+                (self.x.0, self.y.0)
+            };
+            out[2 * k] = ParamSpec::data("", self.x.0, self.x.1, x);
+            out[2 * k + 1] = ParamSpec::data("", self.y.0, self.y.1, y);
+            k += 1;
+        }
+        out
+    }
+}
+
+/// `a` then `b`, `C` long (its length, `A + B`, said where it is used).
+pub const fn join<const A: usize, const B: usize, const C: usize>(
+    a: [ParamSpec; A],
+    b: [ParamSpec; B],
+) -> [ParamSpec; C] {
+    assert!(A + B == C, "the joined list is as long as its parts");
+    let mut out = [ParamSpec::data("", 0.0, 0.0, 0.0); C];
+    let mut i = 0;
+    while i < A {
+        out[i] = a[i];
+        i += 1;
+    }
+    while i < C {
+        out[i] = b[i - A];
+        i += 1;
+    }
+    out
+}
+
+/// A [`ParamSpec::when`] mask: the switch on.
+pub const ON: u32 = 1 << 1;
+/// A [`ParamSpec::when`] mask: the switch off.
+pub const OFF: u32 = 1 << 0;
+
+/// A [`ParamSpec::when`] mask: a choice at `a` or at `b`.
+pub const fn either(a: u32, b: u32) -> u32 {
+    (1 << a) | (1 << b)
+}
+
+/// A [`ParamSpec::when`] mask: a whole number `v` or more.
+pub const fn at_least(v: u32) -> u32 {
+    !((1 << v) - 1)
+}
+
+impl ParamSpec {
+    /// A number from `min` to `max`.
+    pub const fn num(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
+        ParamSpec {
+            name,
+            min,
+            max,
+            default,
+            kind: ParamKind::Slider,
+            unit: "",
+            decimals: 2,
+            options: &[],
+            log: false,
+            show: Show::Value,
+            group: "",
+            graph: None,
+            when: &[],
+        }
+    }
+
+    /// A switch, off (0) or on (1).
+    pub const fn switch(name: &'static str, default: f32) -> ParamSpec {
+        ParamSpec {
+            kind: ParamKind::Toggle,
+            ..ParamSpec::num(name, 0.0, 1.0, default)
+        }
+    }
+
+    /// One of `options`, numbered from `first`.
+    pub const fn choice(
+        name: &'static str,
+        first: f32,
+        options: &'static [&'static str],
+        default: f32,
+    ) -> ParamSpec {
+        ParamSpec {
+            kind: ParamKind::Choice,
+            options,
+            decimals: 0,
+            ..ParamSpec::num(name, first, first + options.len() as f32 - 1.0, default)
+        }
+    }
+
+    /// Data for the effect's own editor, from `min` to `max`.
+    pub const fn data(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
+        ParamSpec {
+            kind: ParamKind::Data,
+            ..ParamSpec::num(name, min, max, default)
+        }
+    }
+
+    pub const fn unit(self, unit: &'static str) -> ParamSpec {
+        ParamSpec { unit, ..self }
+    }
+
+    pub const fn decimals(self, decimals: u8) -> ParamSpec {
+        ParamSpec { decimals, ..self }
+    }
+
+    pub const fn log(self) -> ParamSpec {
+        ParamSpec { log: true, ..self }
+    }
+
+    pub const fn show(self, show: Show) -> ParamSpec {
+        ParamSpec { show, ..self }
+    }
+
+    pub const fn group(self, group: &'static str) -> ParamSpec {
+        ParamSpec { group, ..self }
+    }
+
+    pub const fn when(self, when: &'static [(u8, u32)]) -> ParamSpec {
+        ParamSpec { when, ..self }
+    }
+
+    /// Whether its control is live with the effect's values `param`
+    /// (each parameter it waits on at a value it lets through).
+    pub fn live(&self, param: impl Fn(usize) -> f32) -> bool {
+        self.when.iter().all(|&(i, mask)| {
+            let v = param(i as usize).round();
+            (0.0..32.0).contains(&v) && mask & (1 << v as u32) != 0
+        })
+    }
+
+    /// Whether it is a control of the effect's panel (not data).
+    pub fn shown(&self) -> bool {
+        self.kind != ParamKind::Data
+    }
+
+    /// Whether FX automation can follow it.
+    pub fn automatable(&self) -> bool {
+        matches!(
+            self.kind,
+            ParamKind::Slider | ParamKind::Toggle | ParamKind::Choice
+        )
+    }
+
     /// Where `v` sits in the parameter's range, 0–1 (what FX automation's
     /// envelopes hold).
     pub fn to_unit(&self, v: f32) -> f32 {
@@ -45,38 +274,24 @@ impl ParamSpec {
         match self.kind {
             ParamKind::Toggle if u >= 0.5 => self.max,
             ParamKind::Toggle => self.min,
+            ParamKind::Choice => (self.min + u * (self.max - self.min)).round(),
             _ => self.min + u * (self.max - self.min),
         }
     }
 }
 
 const fn slider(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
-    ParamSpec {
-        name,
-        min,
-        max,
-        default,
-        kind: ParamKind::Slider,
-    }
+    ParamSpec::num(name, min, max, default)
 }
 
 const fn toggle(name: &'static str, default: f32) -> ParamSpec {
-    ParamSpec {
-        name,
-        min: 0.0,
-        max: 1.0,
-        default,
-        kind: ParamKind::Toggle,
-    }
+    ParamSpec::switch(name, default)
 }
 
 const fn color(name: &'static str, default: f32) -> ParamSpec {
     ParamSpec {
-        name,
-        min: 0.0,
-        max: 1.0,
-        default,
         kind: ParamKind::Color,
+        ..ParamSpec::num(name, 0.0, 1.0, default)
     }
 }
 
@@ -112,6 +327,109 @@ pub enum EffectKind {
     /// of them, the middle or the sides; the parameters are
     /// [`modern_eq`]'s.
     ModernEq,
+    /// VEGAS's Volume: a linear gain ([`crate::audio_fx::volume`]).
+    Volume,
+    /// VEGAS's Pan: one channel moved into the other ([`crate::audio_fx::pan`]).
+    Pan,
+    /// VEGAS's Smooth/Enhance ([`crate::audio_fx::smooth_enhance`]).
+    SmoothEnhance,
+    /// VEGAS's Noise Gate ([`crate::audio_fx::noise_gate`]); `NoiseGate`
+    /// is BananaV's older one.
+    NoiseGateFx,
+    /// VEGAS's Track Noise Gate ([`crate::audio_fx::track_noise_gate`]).
+    TrackNoiseGate,
+    /// VEGAS's Simple Delay ([`crate::audio_fx::simple_delay`]).
+    SimpleDelay,
+    /// VEGAS's Dither ([`crate::audio_fx::dither`]).
+    Dither,
+    /// VEGAS's Resonant Filter ([`crate::audio_fx::resonant_filter`]).
+    ResonantFilter,
+    /// VEGAS's Parametric EQ ([`crate::audio_fx::parametric_eq`]).
+    ParametricEq,
+    /// VEGAS's Chorus ([`crate::audio_fx::chorus`]).
+    Chorus,
+    /// VEGAS's Flange/Wah-wah ([`crate::audio_fx::flange_wah_wah`]).
+    FlangeWahWah,
+    /// VEGAS's Reverb ([`crate::audio_fx::reverb`]); `Reverb` is
+    /// BananaV's older one.
+    ReverbFx,
+    /// VEGAS's Track Compressor ([`crate::audio_fx::track_compressor`]).
+    TrackCompressor,
+    /// VEGAS's Track EQ ([`crate::audio_fx::track_eq`]).
+    TrackEq,
+    /// VEGAS's Paragraphic EQ ([`crate::audio_fx::paragraphic_eq`]).
+    ParagraphicEq,
+    /// VEGAS's Multi-Tap Delay ([`crate::audio_fx::multi_tap_delay`]).
+    MultiTapDelay,
+    /// VEGAS's Multi-Band Dynamics ([`crate::audio_fx::multi_band_dynamics`]).
+    MultiBandDynamics,
+    /// VEGAS's Delay of the Express set ([`crate::audio_fx::express_delay`]).
+    ExpressDelay,
+    /// VEGAS's Distortion of the Express set ([`crate::audio_fx::express_distortion`]).
+    ExpressDistortion,
+    /// VEGAS's Equalization of the Express set ([`crate::audio_fx::express_equalization`]).
+    ExpressEqualization,
+    /// VEGAS's Noise Gate of the Express set ([`crate::audio_fx::express_noise_gate`]).
+    ExpressNoiseGate,
+    /// VEGAS's Chorus of the Express set ([`crate::audio_fx::express_chorus`]).
+    ExpressChorus,
+    /// VEGAS's Flange/Wah-Wah of the Express set ([`crate::audio_fx::express_flange_wah_wah`]).
+    ExpressFlangeWahWah,
+    /// VEGAS's Dynamics of the Express set ([`crate::audio_fx::express_dynamics`]).
+    ExpressDynamics,
+    /// VEGAS's Stutter of the Express set ([`crate::audio_fx::express_stutter`]).
+    ExpressStutter,
+    /// VEGAS's Amplitude Modulation of the Express set ([`crate::audio_fx::express_amplitude_modulation`]).
+    ExpressAmplitudeModulation,
+    /// VEGAS's Graphic EQ of the Express set ([`crate::audio_fx::express_graphic_eq`]).
+    ExpressGraphicEq,
+    /// VEGAS's Reverb of the Express set ([`crate::audio_fx::express_reverb`]).
+    ExpressReverb,
+    /// VEGAS's Audio Restoration of the Express set
+    /// ([`crate::audio_fx::express_audio_restoration`]).
+    ExpressAudioRestoration,
+    /// VEGAS's Amplitude Modulation ([`crate::audio_fx::amplitude_modulation`]).
+    AmplitudeModulation,
+    /// VEGAS's Graphic Dynamics ([`crate::audio_fx::graphic_dynamics`]).
+    GraphicDynamics,
+    /// VEGAS's Distortion ([`crate::audio_fx::distortion`]).
+    Distortion,
+    /// VEGAS's Graphic EQ ([`crate::audio_fx::graphic_eq`]).
+    GraphicEq,
+    /// VEGAS's Wave Hammer Surround ([`crate::audio_fx::wave_hammer`]).
+    WaveHammer,
+    /// the studio set's Gate ([`crate::audio_fx::efx_gate`]).
+    StudioGate,
+    /// the studio set's DeEsser ([`crate::audio_fx::efx_deesser`]).
+    DeEsser,
+    /// the studio set's Limiter; `Limiter` is BananaV's older one ([`crate::audio_fx::efx_limiter`]).
+    StudioLimiter,
+    /// the studio set's Tremolo Pan ([`crate::audio_fx::efx_tremolo_pan`]).
+    TremoloPan,
+    /// the studio set's Tube Stage ([`crate::audio_fx::efx_tube_stage`]).
+    TubeStage,
+    /// the studio set's Vocal Strip ([`crate::audio_fx::efx_vocal_strip`]).
+    VocalStrip,
+    /// the studio set's Compressor; `Compressor` is BananaV's older one ([`crate::audio_fx::efx_compressor`]).
+    StudioCompressor,
+    /// the studio set's Phaser ([`crate::audio_fx::efx_phaser`]).
+    Phaser,
+    /// the studio set's Chorus/Flanger ([`crate::audio_fx::efx_chorus_flanger`]).
+    ChorusFlanger,
+    /// the studio set's Reverb ([`crate::audio_fx::efx_reverb`]).
+    StudioReverb,
+    /// the studio set's Stereo Delay ([`crate::audio_fx::efx_stereo_delay`]).
+    StereoDelay,
+    /// VEGAS's Time Stretch ([`crate::audio_fx::time_stretch`]).
+    TimeStretch,
+    /// VEGAS's Time Stretch of the Express set ([`crate::audio_fx::express_time_stretch`]).
+    ExpressTimeStretch,
+    /// VEGAS's Pitch Shift ([`crate::audio_fx::pitch_shift`]).
+    PitchShift,
+    /// VEGAS's Gapper/Snipper ([`crate::audio_fx::gapper_snipper`]).
+    GapperSnipper,
+    /// VEGAS's Vibrato ([`crate::audio_fx::vibrato`]).
+    Vibrato,
     /// A plug-in's effect (OpenFX): what it is lives in [`Effect::plugin`].
     Plugin,
     /// A VST 3 plug-in's audio effect: what it is lives in [`Effect::vst`].
@@ -119,21 +437,154 @@ pub enum EffectKind {
 }
 
 impl EffectKind {
-    pub const AUDIO: [EffectKind; 10] = [
-        EffectKind::Gain,
-        EffectKind::Eq3,
+    pub const AUDIO: [EffectKind; 51] = [
+        EffectKind::Volume,
+        EffectKind::Pan,
+        EffectKind::SmoothEnhance,
+        EffectKind::NoiseGateFx,
+        EffectKind::TrackNoiseGate,
+        EffectKind::SimpleDelay,
+        EffectKind::Dither,
+        EffectKind::ResonantFilter,
+        EffectKind::ParametricEq,
+        EffectKind::Chorus,
+        EffectKind::FlangeWahWah,
+        EffectKind::ReverbFx,
+        EffectKind::TrackCompressor,
+        EffectKind::TrackEq,
+        EffectKind::ParagraphicEq,
+        EffectKind::MultiTapDelay,
+        EffectKind::MultiBandDynamics,
+        EffectKind::ExpressDelay,
+        EffectKind::ExpressDistortion,
+        EffectKind::ExpressEqualization,
+        EffectKind::ExpressNoiseGate,
+        EffectKind::ExpressChorus,
+        EffectKind::ExpressFlangeWahWah,
+        EffectKind::ExpressDynamics,
+        EffectKind::ExpressStutter,
+        EffectKind::ExpressAmplitudeModulation,
+        EffectKind::ExpressGraphicEq,
+        EffectKind::ExpressReverb,
+        EffectKind::ExpressAudioRestoration,
+        EffectKind::AmplitudeModulation,
+        EffectKind::GraphicDynamics,
+        EffectKind::Distortion,
+        EffectKind::GraphicEq,
+        EffectKind::WaveHammer,
+        EffectKind::StudioGate,
+        EffectKind::DeEsser,
+        EffectKind::StudioLimiter,
+        EffectKind::TremoloPan,
+        EffectKind::TubeStage,
+        EffectKind::VocalStrip,
+        EffectKind::StudioCompressor,
+        EffectKind::Phaser,
+        EffectKind::ChorusFlanger,
+        EffectKind::StudioReverb,
+        EffectKind::StereoDelay,
+        EffectKind::TimeStretch,
+        EffectKind::ExpressTimeStretch,
+        EffectKind::PitchShift,
+        EffectKind::GapperSnipper,
+        EffectKind::Vibrato,
         EffectKind::ModernEq,
-        EffectKind::HighPass,
-        EffectKind::LowPass,
-        EffectKind::Compressor,
-        EffectKind::Limiter,
-        EffectKind::NoiseGate,
-        EffectKind::Delay,
-        EffectKind::Reverb,
     ];
 
+    /// Whether it changes the sound's length (or needs all of it at once):
+    /// then it works through Non-Real-Time Event FX, and a playing chain
+    /// lets the sound through it.
+    pub fn works_offline(self) -> bool {
+        matches!(
+            self,
+            EffectKind::TimeStretch
+                | EffectKind::ExpressTimeStretch
+                | EffectKind::PitchShift
+                | EffectKind::GapperSnipper
+                | EffectKind::Vibrato
+        )
+    }
+
+    /// Whether it works on sound: those offered and those only older
+    /// projects have (the compiler asks for every new kind here).
     pub fn is_audio(self) -> bool {
-        EffectKind::AUDIO.contains(&self) || self == EffectKind::Vst
+        match self {
+            EffectKind::Gain
+            | EffectKind::Eq3
+            | EffectKind::HighPass
+            | EffectKind::LowPass
+            | EffectKind::Compressor
+            | EffectKind::Limiter
+            | EffectKind::NoiseGate
+            | EffectKind::Delay
+            | EffectKind::Reverb
+            | EffectKind::ModernEq
+            | EffectKind::Volume
+            | EffectKind::Pan
+            | EffectKind::SmoothEnhance
+            | EffectKind::NoiseGateFx
+            | EffectKind::TrackNoiseGate
+            | EffectKind::SimpleDelay
+            | EffectKind::Dither
+            | EffectKind::ResonantFilter
+            | EffectKind::ParametricEq
+            | EffectKind::Chorus
+            | EffectKind::FlangeWahWah
+            | EffectKind::ReverbFx
+            | EffectKind::TrackCompressor
+            | EffectKind::TrackEq
+            | EffectKind::ParagraphicEq
+            | EffectKind::MultiTapDelay
+            | EffectKind::MultiBandDynamics
+            | EffectKind::ExpressDelay
+            | EffectKind::ExpressDistortion
+            | EffectKind::ExpressEqualization
+            | EffectKind::ExpressNoiseGate
+            | EffectKind::ExpressChorus
+            | EffectKind::ExpressFlangeWahWah
+            | EffectKind::ExpressDynamics
+            | EffectKind::ExpressStutter
+            | EffectKind::ExpressAmplitudeModulation
+            | EffectKind::ExpressGraphicEq
+            | EffectKind::ExpressReverb
+            | EffectKind::ExpressAudioRestoration
+            | EffectKind::AmplitudeModulation
+            | EffectKind::GraphicDynamics
+            | EffectKind::Distortion
+            | EffectKind::GraphicEq
+            | EffectKind::WaveHammer
+            | EffectKind::StudioGate
+            | EffectKind::DeEsser
+            | EffectKind::StudioLimiter
+            | EffectKind::TremoloPan
+            | EffectKind::TubeStage
+            | EffectKind::VocalStrip
+            | EffectKind::StudioCompressor
+            | EffectKind::Phaser
+            | EffectKind::ChorusFlanger
+            | EffectKind::StudioReverb
+            | EffectKind::StereoDelay
+            | EffectKind::TimeStretch
+            | EffectKind::ExpressTimeStretch
+            | EffectKind::PitchShift
+            | EffectKind::GapperSnipper
+            | EffectKind::Vibrato
+            | EffectKind::Vst => true,
+            EffectKind::BrightnessContrast
+            | EffectKind::ColorGrade
+            | EffectKind::Levels
+            | EffectKind::BlackAndWhite
+            | EffectKind::Sepia
+            | EffectKind::Invert
+            | EffectKind::GaussianBlur
+            | EffectKind::Sharpen
+            | EffectKind::Vignette
+            | EffectKind::Mirror
+            | EffectKind::Pixelate
+            | EffectKind::ChromaKey
+            | EffectKind::Glow
+            | EffectKind::Plugin => false,
+        }
     }
 
     /// The video effects offered: the Color Grading panel's. The others
@@ -164,12 +615,62 @@ impl EffectKind {
             EffectKind::Eq3 => "3-Band EQ",
             EffectKind::HighPass => "High-Pass",
             EffectKind::LowPass => "Low-Pass",
-            EffectKind::Compressor => "Compressor",
-            EffectKind::Limiter => "Limiter",
-            EffectKind::NoiseGate => "Noise gate",
+            EffectKind::Compressor => "Compressor (legacy)",
+            EffectKind::Limiter => "Limiter (legacy)",
+            EffectKind::NoiseGate => "Noise gate (legacy)",
             EffectKind::Delay => "Delay (Echo)",
-            EffectKind::Reverb => "Reverb",
+            EffectKind::Reverb => "Reverb (legacy)",
             EffectKind::ModernEq => "Modern Equalizer",
+            EffectKind::Volume => "Volume",
+            EffectKind::Pan => "Pan",
+            EffectKind::SmoothEnhance => "Smooth/Enhance",
+            EffectKind::NoiseGateFx => "Noise Gate",
+            EffectKind::TrackNoiseGate => "Track Noise Gate",
+            EffectKind::SimpleDelay => "Simple Delay",
+            EffectKind::Dither => "Dither",
+            EffectKind::ResonantFilter => "Resonant Filter",
+            EffectKind::ParametricEq => "Parametric EQ",
+            EffectKind::Chorus => "Chorus",
+            EffectKind::FlangeWahWah => "Flange/Wah-wah",
+            EffectKind::ReverbFx => "Reverb",
+            EffectKind::TrackCompressor => "Track Compressor",
+            EffectKind::TrackEq => "Track EQ",
+            EffectKind::ParagraphicEq => "Paragraphic EQ",
+            EffectKind::MultiTapDelay => "Multi-Tap Delay",
+            EffectKind::MultiBandDynamics => "Multi-Band Dynamics",
+            EffectKind::ExpressDelay => "Express Delay",
+            EffectKind::ExpressDistortion => "Express Distortion",
+            EffectKind::ExpressEqualization => "Express Equalization",
+            EffectKind::ExpressNoiseGate => "Express Noise Gate",
+            EffectKind::ExpressChorus => "Express Chorus",
+            EffectKind::ExpressFlangeWahWah => "Express Flange/Wah-Wah",
+            EffectKind::ExpressDynamics => "Express Dynamics",
+            EffectKind::ExpressStutter => "Express Stutter",
+            EffectKind::ExpressAmplitudeModulation => "Express Amplitude Modulation",
+            EffectKind::ExpressGraphicEq => "Express Graphic EQ",
+            EffectKind::ExpressReverb => "Express Reverb",
+            EffectKind::ExpressAudioRestoration => "Express Audio Restoration",
+            EffectKind::AmplitudeModulation => "Amplitude Modulation",
+            EffectKind::GraphicDynamics => "Graphic Dynamics",
+            EffectKind::Distortion => "Distortion",
+            EffectKind::GraphicEq => "Graphic EQ",
+            EffectKind::WaveHammer => "Wave Hammer Surround",
+            EffectKind::StudioGate => "Gate",
+            EffectKind::DeEsser => "DeEsser",
+            EffectKind::StudioLimiter => "Limiter",
+            EffectKind::TremoloPan => "Tremolo Pan",
+            EffectKind::TubeStage => "Tube Stage",
+            EffectKind::VocalStrip => "Vocal Strip",
+            EffectKind::StudioCompressor => "Compressor",
+            EffectKind::Phaser => "Phaser",
+            EffectKind::ChorusFlanger => "Chorus/Flanger",
+            EffectKind::StudioReverb => "Studio Reverb",
+            EffectKind::StereoDelay => "Stereo Delay",
+            EffectKind::TimeStretch => "Time Stretch",
+            EffectKind::ExpressTimeStretch => "Express Time Stretch",
+            EffectKind::PitchShift => "Pitch Shift",
+            EffectKind::GapperSnipper => "Gapper/Snipper",
+            EffectKind::Vibrato => "Vibrato",
             EffectKind::Plugin => "Plug-in",
             EffectKind::Vst => "VST 3 Plug-in",
         }
@@ -193,6 +694,51 @@ impl EffectKind {
             | EffectKind::LowPass => "Equalization",
             EffectKind::Compressor | EffectKind::Limiter | EffectKind::NoiseGate => "Dynamics",
             EffectKind::Delay | EffectKind::Reverb => "Ambience",
+            EffectKind::Volume | EffectKind::Pan => "Utility",
+            EffectKind::SmoothEnhance => "Equalization",
+            EffectKind::NoiseGateFx | EffectKind::TrackNoiseGate => "Dynamics",
+            EffectKind::SimpleDelay => "Ambience",
+            EffectKind::Dither => "Utility",
+            EffectKind::ResonantFilter | EffectKind::ParametricEq => "Equalization",
+            EffectKind::Chorus | EffectKind::FlangeWahWah => "Modulation",
+            EffectKind::ReverbFx => "Ambience",
+            EffectKind::TrackCompressor => "Dynamics",
+            EffectKind::TrackEq | EffectKind::ParagraphicEq => "Equalization",
+            EffectKind::MultiTapDelay => "Ambience",
+            EffectKind::MultiBandDynamics => "Dynamics",
+            EffectKind::ExpressDelay => "Ambience",
+            EffectKind::ExpressDistortion => "Distortion",
+            EffectKind::ExpressEqualization => "Equalization",
+            EffectKind::ExpressNoiseGate => "Dynamics",
+            EffectKind::ExpressChorus => "Modulation",
+            EffectKind::ExpressFlangeWahWah => "Modulation",
+            EffectKind::ExpressDynamics => "Dynamics",
+            EffectKind::ExpressStutter => "Modulation",
+            EffectKind::ExpressAmplitudeModulation => "Modulation",
+            EffectKind::ExpressGraphicEq => "Equalization",
+            EffectKind::ExpressReverb => "Ambience",
+            EffectKind::ExpressAudioRestoration => "Utility",
+            EffectKind::AmplitudeModulation => "Modulation",
+            EffectKind::GraphicDynamics => "Dynamics",
+            EffectKind::Distortion => "Distortion",
+            EffectKind::GraphicEq => "Equalization",
+            EffectKind::WaveHammer => "Dynamics",
+            EffectKind::StudioGate => "Dynamics",
+            EffectKind::DeEsser => "Dynamics",
+            EffectKind::StudioLimiter => "Dynamics",
+            EffectKind::TremoloPan => "Modulation",
+            EffectKind::TubeStage => "Distortion",
+            EffectKind::VocalStrip => "Dynamics",
+            EffectKind::StudioCompressor => "Dynamics",
+            EffectKind::Phaser => "Modulation",
+            EffectKind::ChorusFlanger => "Modulation",
+            EffectKind::StudioReverb => "Ambience",
+            EffectKind::StereoDelay => "Ambience",
+            EffectKind::TimeStretch => "Pitch and time",
+            EffectKind::ExpressTimeStretch => "Pitch and time",
+            EffectKind::PitchShift => "Pitch and time",
+            EffectKind::GapperSnipper => "Pitch and time",
+            EffectKind::Vibrato => "Pitch and time",
             EffectKind::Plugin => "Plug-ins",
             EffectKind::Vst => "VST3",
         }
@@ -339,6 +885,60 @@ impl EffectKind {
                 P
             }
             EffectKind::ModernEq => &MODERN_EQ,
+            EffectKind::Volume => crate::audio_fx::volume::PARAMS,
+            EffectKind::Pan => crate::audio_fx::pan::PARAMS,
+            EffectKind::SmoothEnhance => crate::audio_fx::smooth_enhance::PARAMS,
+            EffectKind::NoiseGateFx => crate::audio_fx::noise_gate::PARAMS,
+            EffectKind::TrackNoiseGate => crate::audio_fx::track_noise_gate::PARAMS,
+            EffectKind::SimpleDelay => crate::audio_fx::simple_delay::PARAMS,
+            EffectKind::Dither => crate::audio_fx::dither::PARAMS,
+            EffectKind::ResonantFilter => crate::audio_fx::resonant_filter::PARAMS,
+            EffectKind::ParametricEq => crate::audio_fx::parametric_eq::PARAMS,
+            EffectKind::Chorus => crate::audio_fx::chorus::PARAMS,
+            EffectKind::FlangeWahWah => crate::audio_fx::flange_wah_wah::PARAMS,
+            EffectKind::ReverbFx => crate::audio_fx::reverb::PARAMS,
+            EffectKind::TrackCompressor => crate::audio_fx::track_compressor::PARAMS,
+            EffectKind::TrackEq => crate::audio_fx::track_eq::PARAMS,
+            EffectKind::ParagraphicEq => crate::audio_fx::paragraphic_eq::PARAMS,
+            EffectKind::MultiTapDelay => crate::audio_fx::multi_tap_delay::PARAMS,
+            EffectKind::MultiBandDynamics => crate::audio_fx::multi_band_dynamics::PARAMS,
+            EffectKind::ExpressDelay => crate::audio_fx::express_delay::PARAMS,
+            EffectKind::ExpressDistortion => crate::audio_fx::express_distortion::PARAMS,
+            EffectKind::ExpressEqualization => crate::audio_fx::express_equalization::PARAMS,
+            EffectKind::ExpressNoiseGate => crate::audio_fx::express_noise_gate::PARAMS,
+            EffectKind::ExpressChorus => crate::audio_fx::express_chorus::PARAMS,
+            EffectKind::ExpressFlangeWahWah => crate::audio_fx::express_flange_wah_wah::PARAMS,
+            EffectKind::ExpressDynamics => crate::audio_fx::express_dynamics::PARAMS,
+            EffectKind::ExpressStutter => crate::audio_fx::express_stutter::PARAMS,
+            EffectKind::ExpressAmplitudeModulation => {
+                crate::audio_fx::express_amplitude_modulation::PARAMS
+            }
+            EffectKind::ExpressGraphicEq => crate::audio_fx::express_graphic_eq::PARAMS,
+            EffectKind::ExpressReverb => crate::audio_fx::express_reverb::PARAMS,
+            EffectKind::ExpressAudioRestoration => {
+                crate::audio_fx::express_audio_restoration::PARAMS
+            }
+            EffectKind::AmplitudeModulation => crate::audio_fx::amplitude_modulation::PARAMS,
+            EffectKind::GraphicDynamics => crate::audio_fx::graphic_dynamics::PARAMS,
+            EffectKind::Distortion => crate::audio_fx::distortion::PARAMS,
+            EffectKind::GraphicEq => crate::audio_fx::graphic_eq::PARAMS,
+            EffectKind::WaveHammer => crate::audio_fx::wave_hammer::PARAMS,
+            EffectKind::StudioGate => crate::audio_fx::efx_gate::PARAMS,
+            EffectKind::DeEsser => crate::audio_fx::efx_deesser::PARAMS,
+            EffectKind::StudioLimiter => crate::audio_fx::efx_limiter::PARAMS,
+            EffectKind::TremoloPan => crate::audio_fx::efx_tremolo_pan::PARAMS,
+            EffectKind::TubeStage => crate::audio_fx::efx_tube_stage::PARAMS,
+            EffectKind::VocalStrip => crate::audio_fx::efx_vocal_strip::PARAMS,
+            EffectKind::StudioCompressor => crate::audio_fx::efx_compressor::PARAMS,
+            EffectKind::Phaser => crate::audio_fx::efx_phaser::PARAMS,
+            EffectKind::ChorusFlanger => crate::audio_fx::efx_chorus_flanger::PARAMS,
+            EffectKind::StudioReverb => crate::audio_fx::efx_reverb::PARAMS,
+            EffectKind::StereoDelay => crate::audio_fx::efx_stereo_delay::PARAMS,
+            EffectKind::TimeStretch => crate::audio_fx::time_stretch::PARAMS,
+            EffectKind::ExpressTimeStretch => crate::audio_fx::express_time_stretch::PARAMS,
+            EffectKind::PitchShift => crate::audio_fx::pitch_shift::PARAMS,
+            EffectKind::GapperSnipper => crate::audio_fx::gapper_snipper::PARAMS,
+            EffectKind::Vibrato => crate::audio_fx::vibrato::PARAMS,
             // Its plug-in describes them.
             EffectKind::Plugin | EffectKind::Vst => &[],
         }
@@ -356,9 +956,9 @@ pub mod modern_eq {
     pub const BANDS: usize = 8;
     pub const PER_BAND: usize = 8;
     /// A band's, from its first: in use (added), on, type (High Pass, Low
-    /// Pass, Low Shelving, High Shelving, Band Pass, Peaking), frequency,
-    /// gain, Q, slope (dB an octave) and routing (Stereo, Left, Right,
-    /// Mid, Side).
+    /// Pass, Low Shelving, High Shelving, Band Pass, Peaking, Band Stop),
+    /// frequency, gain, Q, slope (dB an octave) and routing (Stereo, Left,
+    /// Right, Mid, Side).
     pub const USED: usize = 0;
     pub const ON: usize = 1;
     pub const TYPE: usize = 2;
@@ -375,8 +975,14 @@ pub mod modern_eq {
 
     /// Oversampling (Off, 2×, 4×, 8×: 0 to 3), after the bands.
     pub const OVERSAMPLING: usize = at(BANDS, 0);
+    /// Band `b`'s phase (0 minimum, 1 linear), after Oversampling.
+    pub const fn model(b: usize) -> usize {
+        OVERSAMPLING + 1 + b
+    }
+    /// Linear Phase Quality (0 to 4: how long the linear-phase filter is).
+    pub const QUALITY: usize = model(BANDS);
     /// How many parameters it has.
-    pub const COUNT: usize = OVERSAMPLING + 1;
+    pub const COUNT: usize = QUALITY + 1;
 }
 
 /// A Modern Equalizer band's parameters; where a band at rest sits.
@@ -385,7 +991,7 @@ macro_rules! eq_band {
         [
             toggle(concat!("Band ", $n), 0.0),
             toggle(concat!("Band ", $n, " On"), 1.0),
-            slider(concat!("Band ", $n, " Type"), 0.0, 5.0, 5.0),
+            slider(concat!("Band ", $n, " Type"), 0.0, 6.0, 5.0),
             slider(
                 concat!("Band ", $n, " Frequency (Hz)"),
                 20.0,
@@ -402,8 +1008,8 @@ macro_rules! eq_band {
 
 const MODERN_EQ_GLOBALS: [ParamSpec; modern_eq::GLOBALS] = [
     slider("Global Scale (%)", -200.0, 200.0, 100.0),
-    slider("Mono Below (Hz)", 0.0, 1000.0, 0.0),
-    slider("Stereo Width (%)", 0.0, 200.0, 100.0),
+    slider("Mono Below (Hz)", 20.0, 200.0, 20.0),
+    slider("Stereo Width (%)", 0.0, 100.0, 100.0),
     slider("Output Gain (dB)", -24.0, 24.0, 0.0),
 ];
 
@@ -418,9 +1024,22 @@ const MODERN_EQ_BANDS: [[ParamSpec; modern_eq::PER_BAND]; modern_eq::BANDS] = [
     eq_band!("8", 16_000.0),
 ];
 
+/// Each band's phase: minimum (0) or linear (1).
+const MODERN_EQ_MODELS: [ParamSpec; modern_eq::BANDS] = [
+    toggle("Band 1 Linear Phase", 0.0),
+    toggle("Band 2 Linear Phase", 0.0),
+    toggle("Band 3 Linear Phase", 0.0),
+    toggle("Band 4 Linear Phase", 0.0),
+    toggle("Band 5 Linear Phase", 0.0),
+    toggle("Band 6 Linear Phase", 0.0),
+    toggle("Band 7 Linear Phase", 0.0),
+    toggle("Band 8 Linear Phase", 0.0),
+];
+
 const MODERN_EQ: [ParamSpec; modern_eq::COUNT] = {
     let mut out = [MODERN_EQ_GLOBALS[0]; modern_eq::COUNT];
-    out[modern_eq::OVERSAMPLING] = slider("Oversampling", 0.0, 3.0, 0.0);
+    out[modern_eq::OVERSAMPLING] = slider("Oversampling", 0.0, 3.0, 1.0);
+    out[modern_eq::QUALITY] = slider("Linear Phase Quality", 0.0, 4.0, 2.0);
     let mut i = 0;
     while i < modern_eq::GLOBALS {
         out[i] = MODERN_EQ_GLOBALS[i];
@@ -433,6 +1052,7 @@ const MODERN_EQ: [ParamSpec; modern_eq::COUNT] = {
             out[modern_eq::at(b, p)] = MODERN_EQ_BANDS[b][p];
             p += 1;
         }
+        out[modern_eq::model(b)] = MODERN_EQ_MODELS[b];
         b += 1;
     }
     out
@@ -986,8 +1606,8 @@ pub enum FadeCurve {
     /// (`scene::video_curve`).
     #[default]
     Smooth,
-    /// The S turned around, as VEGAS's picture of it: fast at both ends,
-    /// slow in the middle (the smoothstep's inverse).
+    /// The S turned around, as VEGAS's: fast at both ends, level in the
+    /// middle — 4p³ − 6p² + 3p, its slopes 3, 0 and 3.
     Sharp,
 }
 
@@ -1001,9 +1621,7 @@ impl FadeCurve {
             FadeCurve::Fast => 1.0 - (1.0 - p) * (1.0 - p),
             FadeCurve::Slow => p * p,
             FadeCurve::Smooth => (p * std::f32::consts::FRAC_PI_2).sin(),
-            // Exact at the ends.
-            FadeCurve::Sharp if p <= 0.0 || p >= 1.0 => p,
-            FadeCurve::Sharp => 0.5 - ((1.0 - 2.0 * p).asin() / 3.0).sin(),
+            FadeCurve::Sharp => p * (3.0 + p * (4.0 * p - 6.0)),
         }
     }
 
@@ -1526,13 +2144,15 @@ mod tests {
         let a = FadeCurve::Smooth.eval(1.0 - p);
         let b = FadeCurve::Smooth.eval(p);
         assert!((a * a + b * b - 1.0).abs() < 1e-6);
-        // Sharp is the S turned around: the smoothstep's inverse, fast at
-        // both ends and slow in the middle.
-        for p in [0.1f32, 0.3, 0.5, 0.8] {
-            let s = p * p * (3.0 - 2.0 * p);
-            assert!((FadeCurve::Sharp.eval(s) - p).abs() < 1e-5, "{p}");
-        }
-        assert!(FadeCurve::Sharp.eval(0.25) > 0.25 && FadeCurve::Sharp.eval(0.75) < 0.75);
+        // Sharp is the S turned around, VEGAS's 4p³ − 6p² + 3p: fast at
+        // both ends, level in the middle.
+        let sharp = |p: f32| FadeCurve::Sharp.eval(p);
+        assert_eq!(sharp(0.5), 0.5);
+        assert!((sharp(0.25) - 0.4375).abs() < 1e-6);
+        assert!((sharp(0.75) - 0.5625).abs() < 1e-6);
+        let slope = |p: f32| (sharp(p + 1e-3) - sharp(p - 1e-3)) / 2e-3;
+        assert!(slope(0.5).abs() < 1e-3);
+        assert!((sharp(1e-3) / 1e-3 - 3.0).abs() < 1e-2);
     }
 
     #[test]

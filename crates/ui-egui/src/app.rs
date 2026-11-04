@@ -1234,6 +1234,19 @@ impl BananaApp {
         }
     }
 
+    /// While playing, how long until the window paints again: when the
+    /// project's next frame is due (drawn ahead, it shows then), and a 60th
+    /// of a second at most, for the needle and the meters. Painting more
+    /// often than that would draw the same window again, taking the
+    /// processor and the card from what shows.
+    fn until_next_picture(&self) -> Duration {
+        let rate = self.frame_rate();
+        let pos = self.playhead.unwrap_or(self.cursor);
+        let next = rate.frame_start(rate.frame_at(pos) + 1);
+        let wait = (next - pos).as_seconds_f64() / self.play_rate.abs().max(0.1);
+        Duration::from_secs_f64((wait + 0.001).clamp(0.002, 1.0 / 60.0))
+    }
+
     /// The timeline's playback: looping in the loop region when Loop
     /// Playback is on, else on past the project's end until stopped (as
     /// VEGAS's).
@@ -2100,7 +2113,9 @@ impl BananaApp {
     pub(crate) fn open_file(&mut self, path: PathBuf) {
         use crate::media_files::{FileKind, kind_of};
         match kind_of(&path) {
-            Some(FileKind::Project | FileKind::Timeline) => self.open_path(path),
+            Some(FileKind::Project | FileKind::Timeline | FileKind::VegProject) => {
+                self.open_path(path)
+            }
             _ => {
                 if let Some(&id) = self.import_paths(std::slice::from_ref(&path)).first() {
                     self.place_media(id, self.cursor, None);
@@ -2111,9 +2126,16 @@ impl BananaApp {
 
     /// Opens a project file, or an OpenTimelineIO timeline as a new one.
     pub(crate) fn open_path(&mut self, path: PathBuf) {
-        if crate::media_files::kind_of(&path) == Some(crate::media_files::FileKind::Timeline) {
-            crate::otio_ui::open(self, path);
-            return;
+        match crate::media_files::kind_of(&path) {
+            Some(crate::media_files::FileKind::Timeline) => {
+                crate::otio_ui::open(self, path);
+                return;
+            }
+            Some(crate::media_files::FileKind::VegProject) => {
+                crate::veg_ui::open(self, &path);
+                return;
+            }
+            _ => {}
         }
         let loaded = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
@@ -2333,7 +2355,8 @@ impl BananaApp {
             self.enter_key();
         }
         if pressed(none, Key::Escape) {
-            if self.engine.is_recording() {
+            // Esc stops, as VEGAS's Transport.Stop: the edit cursor stays.
+            if self.engine.is_recording() || self.is_playing() || self.scrub_rate != 0.0 {
                 self.stop();
             } else if self.timeline.edge_trim.is_some() {
                 // Out of edge-trimming or Expanded Edit Mode.
@@ -3247,6 +3270,31 @@ impl BananaApp {
         self.console.selected = None;
     }
 
+    /// The first audio event with an effect `k` at its defaults and its FX
+    /// window open, for the captures of the audio effects' panels. Whether
+    /// there was an audio event.
+    pub fn audio_effect_for_review(&mut self, k: bv_timeline::EffectKind) -> bool {
+        let Some(clip) = self
+            .project()
+            .tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Audio)
+            .flat_map(|t| t.clips.iter())
+            .map(|c| c.id)
+            .next()
+        else {
+            return false;
+        };
+        self.modify(|p| {
+            if let Some(c) = p.clip_mut(clip) {
+                c.effects.push(bv_timeline::Effect::new(k));
+            }
+        });
+        self.select_clip(clip, false);
+        self.open_clip_window("fx-audio");
+        true
+    }
+
     /// Equalizer of a few bands — a high pass, a peak on the middle, a high
     /// shelf on the sides, a bypassed notch — Mono Below on, and its FX
     /// window open. Whether there was an audio event.
@@ -3274,8 +3322,9 @@ impl BananaApp {
             q,
             slope: 24,
             route,
+            linear: false,
         };
-        s.bands[0] = band(BandType::HighPass, 70.0, 0.0, 1.0, Route::Stereo);
+        s.bands[0] = band(BandType::HighPass, 70.0, 0.0, 0.707, Route::Stereo);
         s.bands[1] = band(BandType::Peaking, 450.0, 4.5, 1.2, Route::Mid);
         s.bands[2] = band(BandType::HighShelf, 7000.0, -5.0, 1.0, Route::Side);
         s.bands[3] = Band {
@@ -3832,22 +3881,27 @@ impl BananaApp {
             return false;
         };
         let rate = self.project().settings.frame_rate;
-        let keys: Vec<bv_timeline::TransformKey> = (0..5)
+        let Some(place) = self.project().clip_place_in(id) else {
+            return false;
+        };
+        let keys: Vec<bv_timeline::pancrop::PanCropKey> = (0..5)
             .map(|i| {
-                let at = rate.snap_floor(Tick(c.duration.0 * i / 6));
                 let value = bv_timeline::Transform {
                     x: 0.05 * i as f32,
                     scale: 1.0 + 0.1 * i as f32,
                     rotation_deg: 4.0 * i as f32,
                     ..bv_timeline::Transform::default()
                 };
-                bv_timeline::TransformKey::new(at, value, bv_timeline::KeyCurve::Linear)
+                bv_timeline::pancrop::PanCropKey {
+                    at: rate.snap_floor(Tick(c.duration.0 * i / 6)),
+                    ..bv_timeline::pancrop::key_from_transform(&value, &place)
+                }
             })
             .collect();
         self.modify(|p| {
             if let Some(c) = p.clip_mut(id) {
-                c.transform = keys[0].value;
-                c.transform_keys = keys.clone();
+                c.pan_crop.ensure_size(place.media);
+                c.pan_crop.keys = keys.clone();
             }
         });
         self.pan_crop_properties_for_review(true);
@@ -3991,7 +4045,9 @@ impl BananaApp {
             if let Some(pos) = self.engine.position() {
                 self.playhead = Some(pos);
             }
-            ctx.request_repaint();
+            // egui takes a frame's predicted time off the delay.
+            let predicted = Duration::try_from_secs_f32(ctx.input(|i| i.predicted_dt));
+            ctx.request_repaint_after(self.until_next_picture() + predicted.unwrap_or_default());
         } else {
             self.playhead = None;
         }
@@ -4070,10 +4126,12 @@ impl BananaApp {
         }
         self.vu
             .update(self.engine.take_vu_levels(), std::time::Instant::now());
-        if self.meters.active()
-            || self.track_meters.values().any(MeterState::active)
-            || self.strip_meters.values().any(MeterState::active)
-            || self.vu.active()
+        // (While playing the window paints more often than that anyway.)
+        if !self.is_playing()
+            && (self.meters.active()
+                || self.track_meters.values().any(MeterState::active)
+                || self.strip_meters.values().any(MeterState::active)
+                || self.vu.active())
         {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
@@ -4416,7 +4474,7 @@ impl eframe::App for BananaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         self.frame(ui);
-        frame_trace(start);
+        frame_trace(ui.ctx(), start, self.preview.shown.map(|k| k.1));
     }
 
     /// Remembers the project open now, for the next start, and deletes the
@@ -4455,9 +4513,9 @@ fn follow_host_window() {
 
 /// `BV_FRAME_TRACE=1`: each frame of the main window on the standard error,
 /// how long after the last one it started and how long it took (the
-/// dialogs' windows, drawn inside it, included), to find out what slows
-/// the interface down.
-fn frame_trace(start: std::time::Instant) {
+/// dialogs' windows, drawn inside it, included), the preview's picture and
+/// what asked for the frame, to find out what slows the interface down.
+fn frame_trace(ctx: &egui::Context, start: std::time::Instant, shown: Option<Tick>) {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
     if !*TRACE.get_or_init(|| std::env::var_os("BV_FRAME_TRACE").is_some_and(|v| v == "1")) {
@@ -4467,7 +4525,17 @@ fn frame_trace(start: std::time::Instant) {
     let Ok(mut last) = LAST.lock() else { return };
     let since = last.map_or(0.0, |l| start.duration_since(l).as_secs_f64() * 1000.0);
     *last = Some(start);
-    eprintln!("frame +{since:.1} ms, took {took:.1} ms");
+    // The picture showing, and what asked for this frame.
+    let shown = shown.map_or(-1.0, Tick::as_seconds_f64);
+    let causes: Vec<String> = ctx
+        .repaint_causes()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    eprintln!(
+        "frame +{since:.1} ms, took {took:.1} ms, showing {shown:.3} s, asked by {}",
+        causes.join(" ")
+    );
 }
 
 /// Junta pedidos feitos durante o quadro (ex.: o menu "⋯" abrindo uma janela

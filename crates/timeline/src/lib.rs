@@ -9,6 +9,7 @@
 //! começa depois cobre o anterior. No áudio, tudo que se sobrepõe é somado.
 
 mod arrange;
+pub mod audio_fx;
 pub mod bins;
 pub mod busses;
 pub mod caption_files;
@@ -28,6 +29,7 @@ pub mod input_busses;
 pub mod interchange;
 mod markers;
 pub mod mask;
+mod mask_raster;
 mod model;
 pub mod motion;
 pub mod motion_tracks;
@@ -35,6 +37,7 @@ mod multicam;
 pub mod nesting;
 pub mod notes;
 pub mod otio;
+pub mod pancrop;
 pub mod prerender;
 mod ripple;
 pub mod scene;
@@ -45,6 +48,7 @@ pub mod surround;
 pub mod tags;
 pub mod takes;
 pub mod track_groups;
+pub mod veg;
 pub mod video_bus;
 pub mod xmeml;
 mod xml;
@@ -64,8 +68,9 @@ pub use ducking::{DuckLevels, Ducking};
 pub use edit::EditError;
 pub use envelope::{Envelope, EnvelopeKind, EnvelopeOwner, EnvelopePoint};
 pub use fx::{
-    Direction, Effect, EffectKind, FadeCurve, KeyCurve, KeyHandles, ParamKind, ParamSpec, PluginFx,
-    PluginKey, PluginParam, PluginValue, Transform, TransformKey, Transition, VstFx,
+    Direction, Effect, EffectKind, FadeCurve, Graph, KeyCurve, KeyHandles, ParamKind, ParamSpec,
+    PluginFx, PluginKey, PluginParam, PluginValue, Show, Transform, TransformKey, Transition,
+    VstFx,
 };
 pub use history::{Gesture, History};
 pub use input_busses::{InputBus, InputBusId, InputMonitor, MAX_INPUT_BUSSES};

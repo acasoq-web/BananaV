@@ -99,13 +99,16 @@ pub(crate) fn tiles(p: &Project, clip: ClipId) -> Option<(Project, Vec<Tile>)> {
                 e.rate = c.rate;
                 e.looped = c.looped;
                 e.hold_last = c.hold_last;
-                e.transform = Transform {
+            }
+            let _ = out.set_clip_framing(
+                id,
+                &Transform {
                     scale,
                     x: area.center().x - 0.5,
                     y: area.center().y - 0.5,
                     ..Transform::default()
-                };
-            }
+                },
+            );
         }
     }
     // Only video tracks draw.

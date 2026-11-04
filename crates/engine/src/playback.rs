@@ -676,6 +676,7 @@ fn mix_loop(
     stop: Arc<AtomicBool>,
 ) {
     let mut pool = AudioPool::new();
+    pool.set_live(true);
     let mut threads = (TRACK_BUFFER_MS.load(Ordering::Relaxed) > 0).then(TrackThreads::default);
     // The metronome's clicks at the project's rate, made once.
     let mut clicks: Option<ClicksAt> = None;

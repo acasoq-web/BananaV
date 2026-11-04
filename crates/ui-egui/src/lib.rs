@@ -103,6 +103,7 @@ mod track_defaults;
 mod track_motion;
 mod transition_window;
 mod transport_buttons;
+mod veg_ui;
 mod view360;
 mod vst;
 mod vst_ui;

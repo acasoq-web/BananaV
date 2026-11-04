@@ -61,7 +61,8 @@ VEGAS Pro; everything the user sees is BananaV's own.
   `crates/gpu/src/shaders`) draw it alike, and the parity tests compare
   them. Kernels compile with Direct3D's old FXC compiler: small, no
   `switch` over effects, no dynamic indexing of vectors, every thread
-  through the same rounds around a barrier.
+  through the same rounds around a barrier; `var<workgroup>` tables are
+  not zeroed (zeroing them cost FXC tens of seconds): write before reading.
 - **BananaV's own effects are OpenFX plug-ins** (`crates/effects`): their
   settings and on-screen controls described through OpenFX, never
   special-cased in the interface, and a path on the graphics card
@@ -83,8 +84,9 @@ VEGAS Pro; everything the user sees is BananaV's own.
   `telas_menus`, `telas_pt_br`) draws the interface into `target/telas`;
   `tools/capture_windows.ps1` captures the OS windows of a BananaV it
   starts itself.
-- `BV_PREVIEW_TRACE=1`, `BV_FRAME_TRACE=1`, `BV_OFX_TRACE=1` and
-  `BV_EFFECTS_TRACE=1` print what the preview, the interface, the plug-in
-  host and BananaV's effects do.
+- `BV_PREVIEW_TRACE=1`, `BV_FRAME_TRACE=1`, `BV_GPU_TRACE=1`,
+  `BV_OFX_TRACE=1` and `BV_EFFECTS_TRACE=1` print what the preview, the
+  interface, the kernels' compiler, the plug-in host and BananaV's effects
+  do; `tools/stacks.cs` samples where a running BananaV spends its time.
 - From Windows, `sh tools/linux_check.sh` runs clippy for Linux; `gh
   workflow run package.yml` makes the packages.

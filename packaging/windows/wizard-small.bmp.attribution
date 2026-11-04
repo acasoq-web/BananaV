@@ -1,0 +1,9 @@
+asset:        wizard-small.bmp
+title:        BananaV's logo on its dark color, for the Windows installer's pages
+author:       @acasoq-web, BananaV's owner
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-11-04 by @acasoq-web
+notes:        ../icons/bananav.png on the icon's dark color. Used by bananav.iss.
+              The name and the logo as marks: TRADEMARKS.md (draft).

@@ -1152,7 +1152,7 @@ fn take_frame(ui: &egui::Ui, st: &mut TrimmerState, engine: &bv_engine::Engine) 
     if st.shown == Some(key) {
         return;
     }
-    let img = ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
+    let img = super::preview::frame_image([f.width as usize, f.height as usize], &f.rgba);
     match &mut st.texture {
         Some(t) => t.set(img, TextureOptions::LINEAR),
         None => {

@@ -229,7 +229,10 @@ pub fn parse_grouped(s: &str) -> Option<f64> {
 }
 
 /// [`drag`] showing [`num_grouped`].
-pub fn drag_grouped<'a>(value: &'a mut f32, decimals: usize) -> crate::egui::DragValue<'a> {
+pub fn drag_grouped<'a, N: crate::egui::emath::Numeric>(
+    value: &'a mut N,
+    decimals: usize,
+) -> crate::egui::DragValue<'a> {
     crate::egui::DragValue::new(value)
         .custom_formatter(move |v, _| num_grouped(v, decimals))
         .custom_parser(parse_grouped)

@@ -2,6 +2,7 @@
 //! (posição, escala, rotação, corte) e amostragem bilinear.
 
 use bv_core::ImageRgbaF32;
+use bv_timeline::pancrop::Placement;
 use bv_timeline::scene::fit_rect_par;
 use bv_timeline::{RenderQuality, Transform};
 
@@ -331,6 +332,158 @@ pub fn place_par(
             return;
         }
         *px = sample_with(src, u, v, crop, quality);
+    });
+    out
+}
+
+/// A pixel of `src`, the edge's past its edges.
+#[inline]
+fn held(src: &ImageRgbaF32, x: i64, y: i64) -> [f32; 4] {
+    let x = x.clamp(0, src.width as i64 - 1);
+    let y = y.clamp(0, src.height as i64 - 1);
+    src.data[(y * src.width as i64 + x) as usize]
+}
+
+/// A pixel of `src` for a turned or mirrored picture, as VEGAS's renders show:
+/// past its left and bottom edges nothing, past its others one pixel more of
+/// the edge's and then nothing.
+#[inline]
+fn open(src: &ImageRgbaF32, x: i64, y: i64) -> [f32; 4] {
+    if x < 0 || y >= src.height as i64 || x > src.width as i64 || y < -1 {
+        [0.0; 4]
+    } else {
+        held(src, x, y)
+    }
+}
+
+#[inline]
+fn bilinear_by(
+    src: &ImageRgbaF32,
+    u: f32,
+    v: f32,
+    tex: impl Fn(&ImageRgbaF32, i64, i64) -> [f32; 4],
+) -> [f32; 4] {
+    let (x0, y0) = (u.floor(), v.floor());
+    let (fx, fy) = (u - x0, v - y0);
+    let (x, y) = (x0 as i64, y0 as i64);
+    let (a, b) = (tex(src, x, y), tex(src, x + 1, y));
+    let (c, d) = (tex(src, x, y + 1), tex(src, x + 1, y + 1));
+    std::array::from_fn(|i| {
+        let top = a[i] + (b[i] - a[i]) * fx;
+        let bottom = c[i] + (d[i] - c[i]) * fx;
+        top + (bottom - top) * fy
+    })
+}
+
+#[inline]
+fn bicubic_held(src: &ImageRgbaF32, u: f32, v: f32) -> [f32; 4] {
+    let (x0, y0) = (u.floor(), v.floor());
+    let (wx, wy) = (catmull_rom(u - x0), catmull_rom(v - y0));
+    let (x0, y0) = (x0 as i64, y0 as i64);
+    let mut out = [0.0f32; 4];
+    for (j, ky) in wy.iter().enumerate() {
+        for (i, kx) in wx.iter().enumerate() {
+            let p = held(src, x0 - 1 + i as i64, y0 - 1 + j as i64);
+            let k = kx * ky;
+            for c in 0..4 {
+                out[c] += p[c] * k;
+            }
+        }
+    }
+    // The negative lobes may overshoot: keep a valid premultiplied pixel.
+    out[3] = out[3].clamp(0.0, 1.0);
+    for c in &mut out[..3] {
+        *c = c.max(0.0);
+    }
+    out
+}
+
+/// `src` (a picture of the media, of any size) where a Pan/Crop places it on
+/// a frame `w` × `h`: its edges hard without a turn or a mirror, else as soft
+/// as the pixels they cross. The card's `place_hard` and `place_soft` kernels
+/// do the same.
+pub fn place_box(
+    src: &ImageRgbaF32,
+    w: u32,
+    h: u32,
+    place: &Placement,
+    quality: RenderQuality,
+) -> ImageRgbaF32 {
+    let mut out = ImageRgbaF32::transparent(w, h);
+    if place.empty {
+        return out;
+    }
+    let [x0, y0, x1, y1] = place.pixels((w, h));
+    let (x0, x1) = (x0 as usize, x1 as usize);
+    let (y0, y1) = (y0 as usize, y1 as usize);
+    let (mut m, _) = place.in_picture([f64::from(src.width), f64::from(src.height)]);
+    // A pixel for a pixel: as it is.
+    let whole = |v: f64| (v - v.round()).abs() < 1e-9;
+    if place.to_box.is_none()
+        && m[0] == 1.0
+        && m[1] == 0.0
+        && m[3] == 0.0
+        && m[4] == 1.0
+        && whole(m[2])
+        && whole(m[5])
+    {
+        let (dx, dy) = (m[2].round() as i64, m[5].round() as i64);
+        par::for_each_row(&mut out.data, w as usize, |y, row| {
+            if y >= y0 && y < y1 {
+                for (x, px) in row.iter_mut().enumerate().take(x1).skip(x0) {
+                    *px = held(src, x as i64 + dx, y as i64 + dy);
+                }
+            }
+        });
+        return out;
+    }
+    // Large reductions go through 2 × 2 averages first (Good and Best).
+    let mut reduced;
+    let mut src = src;
+    if matches!(quality, RenderQuality::Good | RenderQuality::Best) {
+        while m[0].hypot(m[1]) >= 2.0 && m[3].hypot(m[4]) >= 2.0 && src.width > 1 {
+            reduced = half_size(src);
+            src = &reduced;
+            m = place
+                .in_picture([f64::from(src.width), f64::from(src.height)])
+                .0;
+        }
+    }
+    let [ux, uy, u0, vx, vy, v0] = m.map(|v| v as f32);
+    let (sw, sh) = (src.width as f32, src.height as f32);
+    let soft = place.soft_edges();
+    par::for_each_pixel(&mut out.data, w as usize, |x, y, px| {
+        if x < x0 || x >= x1 || y < y0 || y >= y1 {
+            return;
+        }
+        let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let u = ux * cx + uy * cy + u0 - 0.5;
+        let v = vx * cx + vy * cy + v0 - 0.5;
+        match &soft {
+            None => {
+                *px = match quality {
+                    RenderQuality::Draft => held(src, u.round() as i64, v.round() as i64),
+                    RenderQuality::Preview | RenderQuality::Good => bilinear_by(src, u, v, held),
+                    RenderQuality::Best => bicubic_held(src, u, v),
+                };
+            }
+            Some(edges) => {
+                let c = edges.share(x as f64 + 0.5, y as f64 + 0.5) as f32;
+                if c <= 0.0 {
+                    return;
+                }
+                let picture = match quality {
+                    RenderQuality::Draft => open(src, u.round() as i64, v.round() as i64),
+                    RenderQuality::Best
+                        if u >= 1.0 && v >= 1.0 && u <= sw - 3.0 && v <= sh - 3.0 =>
+                    {
+                        bicubic_held(src, u, v)
+                    }
+                    _ => bilinear_by(src, u, v, open),
+                };
+                *px = picture.map(|p| p * c);
+            }
+        }
     });
     out
 }

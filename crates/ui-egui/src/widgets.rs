@@ -55,6 +55,25 @@ fn check_style(ui: &mut Ui) {
     }
 }
 
+/// Whether `slider`'s bar was double-clicked this frame, to put its
+/// default back as VEGAS's sliders do: egui's slider senses drags only, so
+/// its response never says it was clicked. `value_shown`: its number box
+/// is part of the response, after the bar.
+pub fn bar_double_clicked(ui: &Ui, slider: &Response, value_shown: bool) -> bool {
+    let mut bar = slider.rect;
+    if value_shown {
+        bar.set_width(ui.spacing().slider_width.min(bar.width()));
+    }
+    ui.is_enabled()
+        && slider.contains_pointer()
+        && ui.input(|i| {
+            let primary = egui::PointerButton::Primary;
+            // A third click soon after counts too (egui counts it apart).
+            (i.pointer.button_double_clicked(primary) || i.pointer.button_triple_clicked(primary))
+                && i.pointer.interact_pos().is_some_and(|p| bar.contains(p))
+        })
+}
+
 /// A check box with a clearly visible box.
 pub fn checkbox(ui: &mut Ui, checked: &mut bool, text: impl Into<egui::WidgetText>) -> Response {
     ui.scope(|ui| {
@@ -531,74 +550,174 @@ pub(crate) fn hue_rgb(angle: f32) -> [f32; 3] {
     }
 }
 
-/// Converte o deslocamento RGB numa posição no plano de croma (raio 1 = 0,5).
-pub(crate) fn offset_to_point(o: [f32; 3]) -> (f32, f32) {
-    let m = (o[0] + o[1] + o[2]) / 3.0;
-    let c = [o[0] - m, o[1] - m, o[2] - m];
-    let x = c[0] - 0.5 * (c[1] + c[2]);
-    let y = 0.866_025_4 * (c[1] - c[2]);
-    (x / 0.5, y / 0.5)
+/// A Color Grading wheel's radius in its points' units: VEGAS's wheels
+/// are 170 pixels across, and their points are kept in those pixels.
+pub(crate) const WHEEL_RADIUS: f64 = 85.0;
+
+/// What happened to a Color Grading wheel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WheelChange {
+    /// Its point moved (across, up: pixels of an 85-pixel wheel).
+    Moved([f64; 2]),
+    /// A double-click: the point back in the middle, the color at its
+    /// default.
+    Reset,
 }
 
-pub(crate) fn point_to_offset(x: f32, y: f32, master: f32) -> [f32; 3] {
-    // Inversa exata de `offset_to_point` (com a restrição de média zero).
-    let r = (x * x + y * y).sqrt();
-    let (x, y) = if r > 1.0 { (x / r, y / r) } else { (x, y) };
-    let c0 = x / 1.5;
-    let d = y / 0.866_025_4;
-    let c = [c0, (-c0 + d) / 2.0, (-c0 - d) / 2.0];
-    c.map(|v| v * 0.5 + master)
+/// `p` kept within the wheel: past its edge, on it, the same way round.
+fn on_wheel(p: [f64; 2]) -> [f64; 2] {
+    let r = p[0].hypot(p[1]);
+    if r > WHEEL_RADIUS {
+        [p[0] / r * WHEEL_RADIUS, p[1] / r * WHEEL_RADIUS]
+    } else {
+        p
+    }
 }
 
-/// Where a wheel's point (`offset_to_point`'s plane) shows on the screen,
-/// from its middle in radii (y down): the plane turned a quarter, red up,
-/// as VEGAS's wheels and the vectorscope have it.
-fn wheel_screen((x, y): (f32, f32)) -> egui::Vec2 {
-    vec2(-y, -x)
+/// The mouse wheel's notches over a widget this frame, and the keys held
+/// with them (Ctrl, Alt, Shift).
+fn notches_with_keys(events: &[egui::Event]) -> (f32, egui::Modifiers) {
+    let mut notches = 0.0;
+    let mut keys = egui::Modifiers::NONE;
+    for e in events {
+        if let egui::Event::MouseWheel {
+            unit,
+            delta,
+            modifiers,
+            ..
+        } = e
+        {
+            // Shift may turn the wheel sideways: either way counts.
+            let d = if delta.y != 0.0 { delta.y } else { delta.x };
+            notches += match unit {
+                egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => d,
+                egui::MouseWheelUnit::Point => d / 40.0,
+            };
+            keys |= *modifiers;
+        }
+    }
+    (notches, keys)
 }
 
-/// The point of the plane at a screen offset from a wheel's middle, in
-/// radii.
-fn wheel_plane(d: egui::Vec2) -> (f32, f32) {
-    (-d.y, -d.x)
-}
-
-/// A wheel as VEGAS 23 draws its own: a dark ball — lighter in the middle
-/// — in a ring of hues, red at the top; its crosshair, the ball's meridian
-/// through the point and its equator; the point, and a line to it in its
-/// color. Dragging moves the color (its mean kept), a double-click brings
-/// it back to the middle. `size` is the ring's outer diameter.
-pub(crate) fn grading_wheel(ui: &mut Ui, offset: &mut [f32; 3], size: f32) -> Response {
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+/// A Color Grading wheel as VEGAS's, `size` across: a dark ball — lighter
+/// in the middle — in a ring of the colors its point gives (`color_at`: a
+/// point's color), its crosshair, the ball's meridian through the point
+/// and its equator; the point (`dot`: across, up, pixels of an 85-pixel
+/// wheel), and a line to it in its color. As VEGAS's: dragging the wheel
+/// moves the point a twentieth of the way the pointer goes, dragging the
+/// point itself a thirty-second (the pointer hidden meanwhile), Ctrl ten
+/// times finer; a double-click puts it back in the middle, a right
+/// double-click where the pointer is; the mouse wheel moves it a pixel a
+/// notch (Ctrl: a tenth) — up and down, Alt across five times as far,
+/// Shift out and in, Shift and Alt round five degrees —, and the arrow
+/// keys a pixel (Ctrl: a tenth), with Shift out and in and round a degree.
+pub(crate) fn grading_wheel(
+    ui: &mut Ui,
+    size: f32,
+    dot: [f64; 2],
+    color_at: &dyn Fn([f64; 2]) -> Color32,
+) -> (Response, Option<WheelChange>) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
     let center = rect.center();
     let radius = size / 2.0 - 5.0;
-    let master = (offset[0] + offset[1] + offset[2]) / 3.0;
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        // Ctrl: finer.
-        let fine = ui.input(|i| i.modifiers.ctrl);
-        let (x, y) = if fine {
-            let (x0, y0) = offset_to_point(*offset);
-            let (dx, dy) = wheel_plane(resp.drag_delta() / radius * 0.25);
-            (x0 + dx, y0 + dy)
-        } else {
-            wheel_plane((p - center) / radius)
-        };
-        *offset = point_to_offset(x, y, master);
-        resp.mark_changed();
+    let scale = radius / WHEEL_RADIUS as f32;
+    let screen = |p: [f64; 2]| center + vec2(p[0] as f32, -(p[1] as f32)) * scale;
+    let mut change = None;
+    let mut to = dot;
+    let id = resp.id;
+    if resp.clicked() || resp.drag_started() {
+        resp.request_focus();
+    }
+    // Dragging: the point itself or the wheel.
+    if resp.drag_started() {
+        let from = ui.input(|i| i.pointer.press_origin()).unwrap_or(center);
+        let on_dot = from.distance(screen(dot)) <= 7.0;
+        ui.data_mut(|d| d.insert_temp(id, on_dot));
+    }
+    if resp.dragged() {
+        let on_dot = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        let mut k = if on_dot { 1.0 / 32.0 } else { 1.0 / 20.0 };
+        if ui.input(|i| i.modifiers.ctrl) {
+            k *= 0.1;
+        }
+        let d = resp.drag_delta();
+        if d != egui::Vec2::ZERO {
+            to = on_wheel([to[0] + f64::from(d.x) * k, to[1] - f64::from(d.y) * k]);
+        }
+        if on_dot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
     }
     if resp.double_clicked() {
-        *offset = [master; 3];
-        resp.mark_changed();
+        change = Some(WheelChange::Reset);
     }
-    // The joystick moves the point of the wheel under the pointer (its y
-    // up, the screen's down).
+    if resp.double_clicked_by(egui::PointerButton::Secondary)
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let d = (p - center) / scale;
+        to = on_wheel([f64::from(d.x), -f64::from(d.y)]);
+    }
+    // The mouse wheel over it.
+    if resp.hovered() {
+        let (n, keys) = ui.input(|i| notches_with_keys(&i.events));
+        if n != 0.0 {
+            let n = f64::from(n);
+            let step = if keys.ctrl || keys.command { 0.1 } else { 1.0 };
+            let (r, a) = (to[0].hypot(to[1]), to[1].atan2(to[0]));
+            to = on_wheel(match (keys.shift, keys.alt) {
+                (true, true) => {
+                    let a = a + (5.0 * n).to_radians();
+                    [r * a.cos(), r * a.sin()]
+                }
+                (true, false) => {
+                    let r = (r + n * step).max(0.0);
+                    [r * a.cos(), r * a.sin()]
+                }
+                (false, true) => [to[0] + n * step * 5.0, to[1]],
+                // Rolled up, the point goes down, as VEGAS's.
+                (false, false) => [to[0], to[1] - n * step],
+            });
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
+    // The arrow keys, while it has the focus.
+    if resp.has_focus() {
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+        let (dx, dy, keys) = ui.input(|i| {
+            let k = |key| f64::from(u8::from(i.key_pressed(key)));
+            (
+                k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft),
+                k(egui::Key::ArrowUp) - k(egui::Key::ArrowDown),
+                i.modifiers,
+            )
+        });
+        if dx != 0.0 || dy != 0.0 {
+            let step = if keys.ctrl || keys.command { 0.1 } else { 1.0 };
+            to = on_wheel(if keys.shift {
+                let r = (to[0].hypot(to[1]) + dy * step).max(0.0);
+                let a = to[1].atan2(to[0]) - dx.to_radians();
+                [r * a.cos(), r * a.sin()]
+            } else {
+                [to[0] + dx * step, to[1] + dy * step]
+            });
+        }
+    }
+    // The joystick moves the point of the wheel under the pointer.
     if let Some(v) = joystick_push(ui, &resp) {
-        let (x, y) = offset_to_point(*offset);
-        let (dx, dy) = wheel_plane(vec2(v.x, -v.y) * 0.8);
-        *offset = point_to_offset(x + dx, y + dy, master);
-        resp.mark_changed();
+        let k = 0.8 * WHEEL_RADIUS;
+        to = on_wheel([to[0] + f64::from(v.x) * k, to[1] - f64::from(v.y) * k]);
+    }
+    if change.is_none() && to != dot {
+        change = Some(WheelChange::Moved(to));
     }
     let painter = ui.painter();
     let gray = Color32::from_gray;
@@ -623,21 +742,15 @@ pub(crate) fn grading_wheel(ui: &mut Ui, offset: &mut [f32; 3], size: f32) -> Re
         [center - vec2(0.0, radius), center + vec2(0.0, radius)],
         dark,
     );
-    // The point, within the ring.
-    let (x, y) = offset_to_point(*offset);
-    let r = (x * x + y * y).sqrt();
-    let (x, y) = if r > 1.0 { (x / r, y / r) } else { (x, y) };
-    let r = r.min(1.0);
-    let point = center + wheel_screen((x, y)) * radius;
-    let c = hue_rgb(y.atan2(x));
-    let hue = Color32::from_rgb(
-        (c[0] * 255.0) as u8,
-        (c[1] * 255.0) as u8,
-        (c[2] * 255.0) as u8,
-    );
+    // The point, and the ball turned toward it.
+    let shown = match change {
+        Some(WheelChange::Moved(p)) => p,
+        Some(WheelChange::Reset) => [0.0; 2],
+        None => dot,
+    };
+    let point = screen(shown);
+    let r = (shown[0].hypot(shown[1]) / WHEEL_RADIUS).min(1.0) as f32;
     if r > 0.01 {
-        // The ball turned toward the point: its equator, and the meridian
-        // through the point.
         let u = (point - center) / (r * radius);
         let v = vec2(-u.y, u.x);
         let ellipse = |minor: f32| -> Vec<egui::Pos2> {
@@ -653,7 +766,8 @@ pub(crate) fn grading_wheel(ui: &mut Ui, offset: &mut [f32; 3], size: f32) -> Re
             Stroke::new(1.0, gray(20)),
         ));
         painter.add(egui::Shape::line(ellipse(r), Stroke::new(1.0, gray(150))));
-        // The line to the point, fading toward the middle.
+        // The line to the point in its color, fading toward the middle.
+        let color = color_at(shown);
         let steps = 10;
         for k in 0..steps {
             let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
@@ -663,30 +777,25 @@ pub(crate) fn grading_wheel(ui: &mut Ui, offset: &mut [f32; 3], size: f32) -> Re
                     center + (point - center) * t0,
                     center + (point - center) * t1,
                 ],
-                Stroke::new(2.5, hue.gamma_multiply(a)),
+                Stroke::new(2.5, color.gamma_multiply(a)),
             );
         }
     }
-    // The ring of hues: each hue where its point would be.
+    // The ring: each color where the point gives it.
     for i in 0..n {
         let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
         let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
-        let mid = (a0 + a1) / 2.0;
-        let (px, py) = wheel_plane(vec2(mid.cos(), -mid.sin()));
-        let c = hue_rgb(py.atan2(px));
-        let color = Color32::from_rgb(
-            (c[0] * 255.0) as u8,
-            (c[1] * 255.0) as u8,
-            (c[2] * 255.0) as u8,
-        );
+        let mid = f64::from((a0 + a1) / 2.0);
+        let color = color_at([mid.cos() * WHEEL_RADIUS, mid.sin() * WHEEL_RADIUS]);
         let at = |a: f32| center + vec2(a.cos(), -a.sin()) * (radius + 2.5);
         painter.line_segment([at(a0), at(a1)], Stroke::new(5.0, color));
     }
     painter.circle_filled(point, 5.0, gray(246));
     painter.circle_stroke(point, 5.0, Stroke::new(1.0, gray(90)));
-    resp.on_hover_text(tr(
-        "Drag to shift the color (Ctrl: finer) · double-click resets",
-    ))
+    let resp = resp.on_hover_text(tr(
+        "Drag to move the color (Ctrl: finer) · double-click: reset · right double-click: jump there · mouse wheel: move it (Alt: across, Shift: out and in, Shift+Alt: round)",
+    ));
+    (resp, change)
 }
 
 /// Icon button painted in its own color (e.g. a red "delete" cross).
@@ -970,51 +1079,35 @@ mod tests {
         assert_eq!(joystick_dead_zone(vec2(0.1, -0.05)), egui::Vec2::ZERO);
         let full = joystick_dead_zone(vec2(1.0, 0.0));
         assert!((full.x - 1.0).abs() < 1e-6 && full.y == 0.0);
-        let mut offset = [0.0f32; 3];
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+        let dot = std::cell::Cell::new([0.0f64; 2]);
+        let wheel = |ui: &mut Ui| {
             ui.ctx()
                 .data_mut(|d| d.insert_temp(egui::Id::new(JOYSTICK), vec2(1.0, 0.0)));
-            grading_wheel(ui, &mut offset, 100.0);
-        });
+            let grey = |_: [f64; 2]| Color32::GRAY;
+            if let (_, Some(WheelChange::Moved(p))) = grading_wheel(ui, 100.0, dot.get(), &grey) {
+                dot.set(p);
+            }
+        };
+        let mut harness = egui_kittest::Harness::new_ui(wheel);
         // Not under the pointer: nothing moves.
         harness.run_steps(3);
         drop(harness);
-        assert_eq!(offset, [0.0; 3]);
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(egui::Id::new(JOYSTICK), vec2(1.0, 0.0)));
-            grading_wheel(ui, &mut offset, 100.0);
-        });
+        assert_eq!(dot.get(), [0.0; 2]);
+        let mut harness = egui_kittest::Harness::new_ui(wheel);
         harness.hover_at(pos2(50.0, 50.0));
         harness.run_steps(5);
         drop(harness);
-        // Right on the screen, red up: the plane's y down.
-        let d = wheel_screen(offset_to_point(offset));
-        assert!(d.x > 0.0 && d.y.abs() < 1e-3, "pushed right: {d:?}");
+        // Right on the screen; kept on the wheel.
+        let [x, y] = dot.get();
+        assert!(x > 0.0 && y.abs() < 1e-6, "pushed right: {x} {y}");
+        assert!(x.hypot(y) <= WHEEL_RADIUS + 1e-9);
     }
 
     #[test]
-    fn the_wheel_shows_red_at_the_top() {
-        // Red's point is up; the screen and the plane go both ways.
-        let red = offset_to_point([0.5, 0.0, 0.0]);
-        let d = wheel_screen(red);
-        assert!(d.y < 0.0 && d.x.abs() < 1e-6, "{d:?}");
-        let (x, y) = wheel_plane(d);
-        assert!((x - red.0).abs() < 1e-6 && (y - red.1).abs() < 1e-6);
-    }
-
-    #[test]
-    fn roda_de_cor_ida_e_volta() {
-        for (x, y) in [(0.5, 0.0), (0.0, -0.8), (-0.3, 0.4), (0.0, 0.0)] {
-            let o = point_to_offset(x, y, 0.1);
-            let (bx, by) = offset_to_point(o);
-            assert!(
-                (bx - x).abs() < 1e-3 && (by - y).abs() < 1e-3,
-                "({x},{y}) → ({bx},{by})"
-            );
-            let m = (o[0] + o[1] + o[2]) / 3.0;
-            assert!((m - 0.1).abs() < 1e-5, "o brilho médio fica no master");
-        }
+    fn a_wheels_point_stays_on_it() {
+        assert_eq!(on_wheel([30.0, -40.0]), [30.0, -40.0]);
+        let [x, y] = on_wheel([300.0, 400.0]);
+        assert!((x - 51.0).abs() < 1e-9 && (y - 68.0).abs() < 1e-9);
     }
 
     #[test]

@@ -577,32 +577,83 @@ impl Compositor {
         Some(out)
     }
 
-    /// One of Color Grading's LUTs over `img`.
+    /// LUT Filter's pass: `img`'s straight colors through `lut`, mixed
+    /// with the picture by `strength`; `hold` keeps the colors within 0–1
+    /// before and after (Color Grading's LUTs).
+    fn lut_pass(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        lut: &bv_lut::Lut,
+        tetrahedral: bool,
+        strength: f32,
+        hold: bool,
+        img: &mut Img,
+    ) {
+        let (w, h) = (img.w, img.h);
+        if strength <= 0.0 {
+            return;
+        }
+        // The shaper's entries, then the lattice's.
+        let mut entries: Vec<f32> = Vec::with_capacity(lut_entries(lut) * 4);
+        let none = (Vec::new(), [0.0; 3], [1.0; 3]);
+        let (shaper, s_lo, s_hi) = lut
+            .shaper
+            .as_ref()
+            .map_or(none.clone(), |t| (t.entries.clone(), t.min, t.max));
+        let (cube, c_lo, c_hi) = lut
+            .cube
+            .as_ref()
+            .map_or(none, |t| (t.entries.clone(), t.min, t.max));
+        for e in shaper.iter().chain(&cube) {
+            entries.extend_from_slice(&[e[0], e[1], e[2], 0.0]);
+        }
+        if entries.is_empty() {
+            return;
+        }
+        let table = self.buffer(entries.len() as u64 * 4);
+        self.gpu
+            .queue
+            .write_buffer(&table, 0, bytemuck::cast_slice(&entries));
+        let mut p = Params::sized(w, h).with_f(&[
+            s_lo[0], s_lo[1], s_lo[2], s_hi[0], s_hi[1], s_hi[2], c_lo[0], c_lo[1], c_lo[2],
+            c_hi[0], c_hi[1], c_hi[2], strength,
+        ]);
+        p.j = [
+            shaper.len() as u32,
+            lut.cube.as_ref().map_or(0, |t| t.size as u32),
+            u32::from(tetrahedral),
+            u32::from(hold),
+        ];
+        p.sw = (entries.len() / 4) as u32;
+        p.sh = 1;
+        self.kernel(
+            enc,
+            K::LutFilter,
+            p,
+            &[&table, &img.buf],
+            Grid::Pixels(w, h),
+        );
+    }
+
+    /// One of Color Grading's LUTs over `img`, the colors held within 0–1
+    /// before and after it.
     fn grade_lut(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
         lut: Option<&accel::GradeLut>,
         img: &mut Img,
-        full: [f64; 2],
-        scale: f64,
     ) {
         match lut {
             Some(accel::GradeLut::Cube {
                 lut,
                 tetrahedral,
                 strength,
-            }) => {
-                let plan = Plan::Lut {
-                    lut: Some(lut.clone()),
-                    tetrahedral: *tetrahedral,
-                    strength: *strength,
-                };
-                self.own(enc, &plan, img, full, scale);
-            }
+            }) => self.lut_pass(enc, lut, *tetrahedral, *strength, true, img),
             Some(accel::GradeLut::AppleLog { video, strength }) => {
                 let (w, h) = (img.w, img.h);
                 let mut p = Params::sized(w, h).with_f(&[*strength]);
                 p.j[0] = u32::from(*video);
+                p.j[1] = 1;
                 self.kernel(enc, K::AppleLog, p, &[&img.buf], Grid::Pixels(w, h));
             }
             None => {}
@@ -674,7 +725,7 @@ impl Compositor {
                 self.kernel(enc, K::CookieCutter, p, &[&img.buf], Grid::Pixels(w, h));
             }
             Plan::Grade(g) => {
-                self.grade_lut(enc, g.camera.as_ref(), img, full, scale);
+                self.grade_lut(enc, g.camera.as_ref(), img);
                 let table = self.buffer(g.steps.len() as u64 * 16);
                 self.gpu
                     .queue
@@ -683,7 +734,7 @@ impl Compositor {
                 p.sw = g.entries;
                 p.sh = 1;
                 self.kernel(enc, K::Grade, p, &[&table, &img.buf], Grid::Pixels(w, h));
-                self.grade_lut(enc, g.look.as_ref(), img, full, scale);
+                self.grade_lut(enc, g.look.as_ref(), img);
             }
             Plan::Curves(tables) => {
                 // The three tables side by side: entry k's red, green and
@@ -2023,50 +2074,9 @@ impl Compositor {
                 tetrahedral,
                 strength,
             } => {
-                let Some(lut) = lut else { return };
-                if *strength <= 0.0 {
-                    return;
+                if let Some(lut) = lut {
+                    self.lut_pass(enc, lut, *tetrahedral, *strength, false, img);
                 }
-                // The shaper's entries, then the lattice's.
-                let mut entries: Vec<f32> = Vec::with_capacity(lut_entries(lut) * 4);
-                let none = (Vec::new(), [0.0; 3], [1.0; 3]);
-                let (shaper, s_lo, s_hi) = lut
-                    .shaper
-                    .as_ref()
-                    .map_or(none.clone(), |t| (t.entries.clone(), t.min, t.max));
-                let (cube, c_lo, c_hi) = lut
-                    .cube
-                    .as_ref()
-                    .map_or(none, |t| (t.entries.clone(), t.min, t.max));
-                for e in shaper.iter().chain(&cube) {
-                    entries.extend_from_slice(&[e[0], e[1], e[2], 0.0]);
-                }
-                if entries.is_empty() {
-                    return;
-                }
-                let table = self.buffer(entries.len() as u64 * 4);
-                self.gpu
-                    .queue
-                    .write_buffer(&table, 0, bytemuck::cast_slice(&entries));
-                let mut p = Params::sized(w, h).with_f(&[
-                    s_lo[0], s_lo[1], s_lo[2], s_hi[0], s_hi[1], s_hi[2], c_lo[0], c_lo[1],
-                    c_lo[2], c_hi[0], c_hi[1], c_hi[2], *strength,
-                ]);
-                p.j = [
-                    shaper.len() as u32,
-                    lut.cube.as_ref().map_or(0, |t| t.size as u32),
-                    *tetrahedral as u32,
-                    0,
-                ];
-                p.sw = (entries.len() / 4) as u32;
-                p.sh = 1;
-                self.kernel(
-                    enc,
-                    K::LutFilter,
-                    p,
-                    &[&table, &img.buf],
-                    Grid::Pixels(w, h),
-                );
             }
         }
     }

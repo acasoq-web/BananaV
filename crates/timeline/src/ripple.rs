@@ -5,7 +5,6 @@
 use bv_core::{Tick, TimeRange};
 
 use crate::edit::{EditError, clamp_fades};
-use crate::fx::TransformKey;
 use crate::model::{ClipId, Project, TrackId, TrackKind};
 
 type Result<T> = std::result::Result<T, EditError>;
@@ -382,31 +381,12 @@ impl Project {
         if let Some(mask) = crate::mask::PanCropMask::joined(&a.mask, &b.mask, offset) {
             a.mask = mask;
         }
-        if !a.transform_keys.is_empty() || !b.transform_keys.is_empty() {
-            if a.transform_keys.is_empty() {
-                a.transform_keys.push(TransformKey::new(
-                    Tick::ZERO,
-                    a.transform,
-                    Default::default(),
-                ));
-            }
-            let tail: Vec<TransformKey> = if b.transform_keys.is_empty() {
-                vec![TransformKey::new(
-                    Tick::ZERO,
-                    b.transform,
-                    Default::default(),
-                )]
-            } else {
-                b.transform_keys.clone()
-            };
-            // The key that split() left at the cut is replaced by b's first one.
-            a.transform_keys.retain(|k| k.at < offset);
-            a.transform_keys
-                .extend(tail.into_iter().map(|k| TransformKey {
-                    at: k.at + offset,
-                    ..k
-                }));
-        }
+        let size = if a.pan_crop.size[0] > 0 {
+            a.pan_crop.own_size()
+        } else {
+            b.pan_crop.own_size()
+        };
+        a.pan_crop.joined(&b.pan_crop, offset, size);
         a.duration += b.duration;
         a.fade_out = b.fade_out;
         a.fade_out_curve = b.fade_out_curve;

@@ -94,30 +94,39 @@ fn looks_in_place(text: &str) -> String {
 /// The factory presets of BananaV's own plug-in `id`: their names (in
 /// the interface's language) and values.
 pub fn builtin_plugin(id: &str) -> Vec<(String, PluginValues)> {
-    use bv_engine::plugins::PresetValue;
-    use bv_timeline::PluginValue;
     bv_engine::plugins::own_presets(id)
         .into_iter()
-        .map(|p| {
-            let values = p
-                .values
-                .into_iter()
-                .map(|(name, v)| {
-                    let value = match v {
-                        PresetValue::Num(n) => PluginValue::Num(n),
-                        PresetValue::Curves(c) => PluginValue::Curves(c),
-                        PresetValue::Text(t) => PluginValue::Text(looks_in_place(&t)),
-                    };
-                    (
-                        name.to_string(),
-                        PluginParam {
-                            value,
-                            keys: Vec::new(),
-                        },
-                    )
-                })
-                .collect();
-            (tr(p.name).to_string(), values)
+        .map(|p| (tr(p.name).to_string(), plugin_values(p.values)))
+        .collect()
+}
+
+/// The values of the factory preset of `id` whose name (as the code has it,
+/// not translated) passes `wanted`.
+pub fn builtin_plugin_named(id: &str, wanted: impl Fn(&str) -> bool) -> Option<PluginValues> {
+    bv_engine::plugins::own_presets(id)
+        .into_iter()
+        .find(|p| wanted(p.name))
+        .map(|p| plugin_values(p.values))
+}
+
+fn plugin_values(values: Vec<(&'static str, bv_engine::plugins::PresetValue)>) -> PluginValues {
+    use bv_engine::plugins::PresetValue;
+    use bv_timeline::PluginValue;
+    values
+        .into_iter()
+        .map(|(name, v)| {
+            let value = match v {
+                PresetValue::Num(n) => PluginValue::Num(n),
+                PresetValue::Curves(c) => PluginValue::Curves(c),
+                PresetValue::Text(t) => PluginValue::Text(looks_in_place(&t)),
+            };
+            (
+                name.to_string(),
+                PluginParam {
+                    value,
+                    keys: Vec::new(),
+                },
+            )
         })
         .collect()
 }
@@ -125,6 +134,13 @@ pub fn builtin_plugin(id: &str) -> Vec<(String, PluginValues)> {
 /// Predefinições de fábrica: (nome, pares índice→valor sobre o padrão).
 pub fn builtin(k: EffectKind) -> Vec<(&'static str, Vec<(usize, f32)>)> {
     use bv_timeline::fx::grade::*;
+    // The audio effects that follow VEGAS's: their presets name every value.
+    if let Some(list) = bv_timeline::audio_fx::presets(k) {
+        return list
+            .iter()
+            .map(|(name, values)| (tr(name), values.iter().copied().enumerate().collect()))
+            .collect();
+    }
     match k {
         EffectKind::ColorGrade => vec![
             (tr("Warm"), vec![(TEMPERATURE, 0.35), (TINT, 0.05)]),
@@ -212,30 +228,6 @@ pub fn builtin(k: EffectKind) -> Vec<(&'static str, Vec<(usize, f32)>)> {
     }
 }
 
-/// A Modern Equalizer band's values in a factory preset: band `b` in use,
-/// its type (`eq_type`), frequency, gain, Q, slope and routing
-/// (`eq_route`).
-fn eq_band(
-    b: usize,
-    kind: f32,
-    freq: f32,
-    gain: f32,
-    q: f32,
-    slope: f32,
-    route: f32,
-) -> Vec<(usize, f32)> {
-    use bv_timeline::fx::modern_eq::*;
-    vec![
-        (at(b, USED), 1.0),
-        (at(b, TYPE), kind),
-        (at(b, FREQUENCY), freq),
-        (at(b, GAIN), gain),
-        (at(b, Q), q),
-        (at(b, SLOPE), slope),
-        (at(b, ROUTING), route),
-    ]
-}
-
 /// The Modern Equalizer's band types and routings, as its parameters
 /// count them.
 mod eq_type {
@@ -243,6 +235,7 @@ mod eq_type {
     pub const LOW_PASS: f32 = 1.0;
     pub const LOW_SHELF: f32 = 2.0;
     pub const HIGH_SHELF: f32 = 3.0;
+    pub const BAND_PASS: f32 = 4.0;
     pub const PEAK: f32 = 5.0;
 }
 mod eq_route {
@@ -251,76 +244,645 @@ mod eq_route {
     pub const SIDE: f32 = 4.0;
 }
 
-/// The Modern Equalizer's factory presets: the uses its Help gives (a
-/// voice's rumble, a guitar's mids and highs, a resonance, mid/side drums)
-/// and everyday ones.
+/// One of the Modern Equalizer's factory presets: Global Scale (%), Mono
+/// Below (Hz), Stereo Width (%), Output Gain (dB) and Oversampling's
+/// choice; then its eight bands, each in use and on — type, slope (dB an
+/// octave), frequency, gain, Q and routing.
+fn eq_preset(globals: [f32; 5], bands: [(f32, f32, f32, f32, f32, f32); 8]) -> Vec<(usize, f32)> {
+    use bv_timeline::fx::modern_eq::*;
+    let mut v = vec![
+        (GLOBAL_SCALE, globals[0]),
+        (MONO_BELOW, globals[1]),
+        (STEREO_WIDTH, globals[2]),
+        (OUTPUT_GAIN, globals[3]),
+        (OVERSAMPLING, globals[4]),
+    ];
+    for (b, (kind, slope, freq, gain, q, route)) in bands.into_iter().enumerate() {
+        v.extend([
+            (at(b, USED), 1.0),
+            (at(b, ON), 1.0),
+            (at(b, TYPE), kind),
+            (at(b, SLOPE), slope),
+            (at(b, FREQUENCY), freq),
+            (at(b, GAIN), gain),
+            (at(b, Q), q),
+            (at(b, ROUTING), route),
+        ]);
+    }
+    v
+}
+
+/// The Modern Equalizer's factory presets, VEGAS's: each sets all eight
+/// bands.
 fn modern_eq() -> Vec<(&'static str, Vec<(usize, f32)>)> {
-    use bv_timeline::fx::modern_eq::{MONO_BELOW, STEREO_WIDTH};
     use eq_route::*;
     use eq_type::*;
     vec![
         (
-            tr("Rumble Remover"),
-            eq_band(0, HIGH_PASS, 80.0, 0.0, 1.0, 24.0, STEREO),
+            tr("Flat"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 505.779, -0.0691643, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 9931.17, -0.0691643, 0.707, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Voice Clarity"),
-            [
-                eq_band(0, HIGH_PASS, 90.0, 0.0, 1.0, 18.0, STEREO),
-                eq_band(1, PEAK, 250.0, -3.0, 1.2, 12.0, STEREO),
-                eq_band(2, PEAK, 3000.0, 3.0, 1.0, 12.0, STEREO),
-                eq_band(3, HIGH_SHELF, 10_000.0, 2.0, 1.0, 12.0, STEREO),
-            ]
-            .concat(),
+            tr("2000 Hz Notch"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, -20.0, 10.0, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Guitar: Mids Up, Highs Tamed"),
-            [
-                eq_band(0, PEAK, 800.0, 3.0, 0.8, 12.0, STEREO),
-                eq_band(1, PEAK, 3500.0, -3.0, 2.0, 12.0, STEREO),
-                eq_band(2, LOW_PASS, 14_000.0, 0.0, 1.0, 12.0, STEREO),
-            ]
-            .concat(),
+            tr("2000 Hz Resonance"),
+            eq_preset(
+                [100.0, 20.0, 100.0, -13.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 20.0, 10.0, STEREO),
+                    (PEAK, 12.0, 2000.0, 20.0, 10.0, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Resonance Notch (1 kHz)"),
-            eq_band(0, PEAK, 1000.0, -12.0, 8.0, 12.0, STEREO),
+            tr("Bass Boost"),
+            eq_preset(
+                [100.0, 20.0, 100.0, -3.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 10.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Wide Drums, Centered Snare"),
-            [
-                eq_band(0, PEAK, 200.0, 2.0, 1.5, 12.0, MID),
-                eq_band(1, HIGH_SHELF, 6000.0, 3.0, 1.0, 12.0, SIDE),
-                vec![(MONO_BELOW, 120.0), (STEREO_WIDTH, 120.0)],
-            ]
-            .concat(),
-        ),
-        (tr("Mono Bass (150 Hz)"), vec![(MONO_BELOW, 150.0)]),
-        (
-            tr("Telephone"),
-            [
-                eq_band(0, HIGH_PASS, 400.0, 0.0, 1.0, 24.0, STEREO),
-                eq_band(1, LOW_PASS, 3400.0, 0.0, 1.0, 24.0, STEREO),
-                eq_band(2, PEAK, 1500.0, 4.0, 1.0, 12.0, STEREO),
-            ]
-            .concat(),
+            tr("Loudness"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 6.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 16_000.0, 4.0, 0.5, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Warmth"),
-            [
-                eq_band(0, LOW_SHELF, 150.0, 3.0, 1.0, 12.0, STEREO),
-                eq_band(1, PEAK, 3000.0, -1.5, 1.0, 12.0, STEREO),
-            ]
-            .concat(),
+            tr("Low Cut Filter 100 Hz"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
         ),
         (
-            tr("Air"),
-            eq_band(0, HIGH_SHELF, 12_000.0, 4.0, 1.0, 12.0, STEREO),
+            tr("Low Pass 500 Hz"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 12.0, 500.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Mid Boost"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 6.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Phone"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 12.0, 790.0, 10.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 12.0, 3000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Sub Bass"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 30.0, 10.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Treble Boost"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.714066, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 16_000.0, 10.0, 0.5, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Bell Notch"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Wide Bell"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 817.997, 2.0, 0.382329, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 817.997, 2.0, 0.382329, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Band Pass 6 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 6.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 6.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Band Pass 12 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 12.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 12.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Band Pass 18 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 18.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (BAND_PASS, 18.0, 800.0, 0.0, 1.0, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: High Pass 6 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 6.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 104.28, 2.10131, 1.11575, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: High Pass 12 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 12.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 104.28, 2.10131, 1.11575, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: High Pass 24 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 24.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 104.28, 2.10131, 1.11575, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: High Pass 36 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 36.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 104.28, 2.10131, 1.11575, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low + High Pass 6 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 6.0, 30.4626, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 6.0, 18_000.0, -3.38905, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low + High Pass 12 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 12.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 12.0, 18_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low + High Pass 24 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 24.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 24.0, 18_000.0, -3.80403, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low + High Pass 36 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 36.0, 30.4626, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (LOW_PASS, 36.0, 18_000.0, -4.08069, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low Pass 6 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (LOW_PASS, 6.0, 17_800.0, -6.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low Pass 12 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (LOW_PASS, 12.0, 17_800.0, -6.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low Pass 24 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (LOW_PASS, 24.0, 17_800.0, -6.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low Pass 36 dB"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 817.997, -12.0, 10.0, STEREO),
+                    (LOW_PASS, 36.0, 17_800.0, -6.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Bands: Low + High Shelf"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 100.0, 0.0, 0.767937, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 59.8715, -0.943626, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Drums"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 24.0, 28.8747, 0.0, 0.809353, STEREO),
+                    (LOW_SHELF, 12.0, 59.87, -0.900002, 0.707, STEREO),
+                    (PEAK, 12.0, 104.28, 2.10131, 1.11575, STEREO),
+                    (PEAK, 12.0, 726.891, 1.59078, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5320.0, 2.6, 0.587, STEREO),
+                    (LOW_PASS, 24.0, 19_300.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Master: Mid/Side"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 31.0103, -5.48515, 0.544715, SIDE),
+                    (PEAK, 12.0, 87.5096, 0.613861, 1.16713, MID),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 2030.0, 1.0, 0.65, MID),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 7580.0, 2.4, 0.571, SIDE),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Master: Mid/Side, Basic"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (LOW_SHELF, 12.0, 31.0103, -5.48515, 0.544715, SIDE),
+                    (PEAK, 12.0, 180.7, -0.700001, 1.066, MID),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 2030.0, 1.0, 0.65, MID),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 7580.0, 2.4, 0.571, SIDE),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Master: Mid/Side Wide Radio Bass"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 43.5764, 0.0, 0.707, SIDE),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1018.57, 0.0594063, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Master: Smiley Face"),
+            eq_preset(
+                [100.0, 78.0877, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 49.688, 1.05, 0.707, STEREO),
+                    (PEAK, 12.0, 251.149, -0.918591, 0.703296, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 2750.0, 1.1, 0.511, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 6000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 10_000.0, 0.0, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Master: Smooth Top End"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 300.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 400.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 20_000.0, 1.4, 0.25, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Mix: Mid/Side More Clarity"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (PEAK, 12.0, 100.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 200.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 1720.0, 1.0, 0.713, MID),
+                    (PEAK, 12.0, 600.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 800.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1018.57, 0.0594063, 0.707, STEREO),
+                ],
+            ),
+        ),
+        (
+            tr("Vocal"),
+            eq_preset(
+                [100.0, 20.0, 100.0, 0.0, 1.0],
+                [
+                    (HIGH_PASS, 12.0, 43.5106, 0.0, 0.707, STEREO),
+                    (LOW_SHELF, 12.0, 104.28, -1.93069, 0.711529, STEREO),
+                    (PEAK, 12.0, 500.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 1000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 2000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 4000.0, 0.0, 0.707, STEREO),
+                    (PEAK, 12.0, 5320.0, 1.1, 0.707, STEREO),
+                    (HIGH_SHELF, 12.0, 9300.0, 2.9, 0.534, STEREO),
+                ],
+            ),
         ),
     ]
 }
 
 /// Predefinições de fábrica do Pan/Crop.
+/// The Pan/Crop's presets of a shape: their names and their widths over
+/// their heights, on screen.
+pub const PAN_CROP_SHAPES: [(&str, f64); 4] = [
+    ("1:1 Square aspect ratio", 1.0),
+    ("4:3 Standard TV aspect ratio", 4.0 / 3.0),
+    ("16:9 Widescreen TV aspect ratio", 16.0 / 9.0),
+    ("1.85:1 Academy aspect ratio", 1.85),
+];
+
 pub fn builtin_pan_crop() -> Vec<(&'static str, Transform)> {
     let d = Transform::default();
     vec![

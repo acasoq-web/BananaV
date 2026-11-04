@@ -65,9 +65,9 @@ pub fn describe(before: &Project, after: &Project) -> &'static str {
         if o == c {
             continue;
         }
-        let label = if o.transform_keys != c.transform_keys {
+        let label = if o.pan_crop.keys.len() != c.pan_crop.keys.len() {
             tr("Event Pan/Crop Position Keyframe")
-        } else if o.transform != c.transform {
+        } else if o.pan_crop != c.pan_crop {
             tr("Event Pan/Crop")
         } else if o.effects != c.effects {
             tr("Event FX")

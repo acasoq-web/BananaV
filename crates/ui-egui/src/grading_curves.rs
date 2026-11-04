@@ -5,14 +5,21 @@
 //! on —, or, the column wide enough (the pinned curves' left border
 //! dragged), side by side, each on its own graph. A graph zooms (its
 //! buttons in its corner, the mouse wheel, Num + and Num −; Num 5 resets
-//! it) and pans when zoomed (Num 8, 6, 4 and 2). A double-click on a curve adds a point; points drag (the
-//! ends: the shadows and the highlights); Page Up and Page Down pick the
-//! next or the previous point, the arrows move it, Shift with them its
-//! left tangent and Ctrl+Shift its right one; a point's menu locks or
-//! unlocks its tangents and deletes it; the yellow handles of the point
-//! picked shape the curve without moving it.
+//! it) and pans when zoomed (Num 8, 6, 4 and 2). Every point has its
+//! handles, as VEGAS's: a curve starts straight, its two ends' handles a
+//! quarter along it; a double-click adds a point where it is, its handles
+//! along the line between its neighbours and theirs turned toward it
+//! ([`add_dot`]); a double-click on a point makes its handles level
+//! ([`flatten`]). Points drag (the ends: the shadows and the highlights);
+//! Page Up and Page Down pick the next or the previous point, the arrows
+//! move it, Shift with them its left tangent and Ctrl+Shift its right
+//! one; the menu locks or unlocks a point's tangents, resets it to the
+//! diagonal, smooths the curve, shows the picked point's tangents or
+//! all, locks the points' axis (up and down only) or to the grid, and
+//! deletes a point; the yellow handles shape the curve without moving
+//! it.
 
-use bv_core::curve::{self, CurvePoint};
+use bv_core::curve::{self, CurvePoint, Handles};
 
 use crate::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use crate::i18n::tr;
@@ -120,8 +127,14 @@ pub struct GradingCurves {
     pub(crate) views: [View; 5],
     /// A drag under way: its curve, what it took and the curve as it was.
     drag: Option<(usize, Grip, Vec<CurvePoint>)>,
-    /// The point a menu is open for.
-    menu: Option<(usize, usize)>,
+    /// The menu open, and the point it is for.
+    menu: Option<Option<(usize, usize)>>,
+    /// Every point's tangents shown, else the picked point's.
+    pub all_tangents: bool,
+    /// Points move up and down only (Lock axis), or onto the grid's lines
+    /// near them (Lock to grid).
+    pub lock_axis: bool,
+    pub lock_grid: bool,
 }
 
 impl Default for GradingCurves {
@@ -132,17 +145,151 @@ impl Default for GradingCurves {
             views: [View::default(); 5],
             drag: None,
             menu: None,
+            all_tangents: false,
+            lock_axis: false,
+            lock_grid: false,
         }
     }
 }
 
-/// Curve `c` as edited: no points stand for the straight line.
+/// Curve `c` as edited: no points stand for the straight line VEGAS's
+/// curves start as — its ends' handles a quarter along it.
 fn points(c: &[CurvePoint]) -> Vec<CurvePoint> {
     if c.is_empty() {
-        vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+        let h = ([-0.25, -0.25], [0.25, 0.25]);
+        vec![
+            CurvePoint::with(0.0, 0.0, h.0, h.1),
+            CurvePoint::with(1.0, 1.0, h.0, h.1),
+        ]
     } else {
         c.to_vec()
     }
+}
+
+/// Point `i`'s neighbours' x (`wrap`: a hue curve's, its ends' a turn
+/// round); `None` past an end.
+fn neighbours(c: &[CurvePoint], i: usize, wrap: bool) -> (Option<f64>, Option<f64>) {
+    let n = c.len();
+    let before = if i > 0 {
+        Some(c[i - 1].x)
+    } else if wrap {
+        Some(c[n - 1].x - 1.0)
+    } else {
+        None
+    };
+    let after = if i + 1 < n {
+        Some(c[i + 1].x)
+    } else if wrap {
+        Some(c[0].x + 1.0)
+    } else {
+        None
+    };
+    (before, after)
+}
+
+/// Point `i`'s handles made level, as VEGAS's double-click on a point
+/// makes them: each half the way to its neighbour, at most 0.125 (`wrap`:
+/// a hue curve's, its ends' neighbours a turn round).
+pub(crate) fn flatten(c: &mut [CurvePoint], i: usize, wrap: bool) {
+    let x = c[i].x;
+    let (before, after) = neighbours(c, i, wrap);
+    let half = |gap: Option<f64>| gap.map_or(0.125, |g| g.clamp(0.0, 0.25) / 2.0);
+    c[i].handles = Some(Handles {
+        before: [-half(before.map(|b| x - b)), 0.0],
+        after: [half(after.map(|a| a - x)), 0.0],
+        split: false,
+    });
+}
+
+/// `c` with a point added at `at`, as VEGAS's double-click adds one: its
+/// handles along the line from the point before it to the one after —
+/// in, half the way to the next; out, half the way from the one before —
+/// and theirs toward it, half the way. Where it went.
+pub(crate) fn add_dot(c: &[CurvePoint], at: [f64; 2], wrap: bool) -> (Vec<CurvePoint>, usize) {
+    let mut out = c.to_vec();
+    let n = c.len();
+    let i = c.partition_point(|p| p.x < at[0]);
+    let prev = if i > 0 {
+        Some((i - 1, [c[i - 1].x, c[i - 1].y]))
+    } else if wrap && n > 0 {
+        Some((n - 1, [c[n - 1].x - 1.0, c[n - 1].y]))
+    } else {
+        None
+    };
+    let next = if i < n {
+        Some((i, [c[i].x, c[i].y]))
+    } else if wrap && n > 0 {
+        Some((0, [c[0].x + 1.0, c[0].y]))
+    } else {
+        None
+    };
+    let mut p = CurvePoint::new(at[0], at[1]);
+    if let (Some((_, a)), Some((_, b))) = (prev, next)
+        && b[0] - a[0] > 1e-9
+    {
+        let slope = (b[1] - a[1]) / (b[0] - a[0]);
+        let (din, dout) = ((at[0] - b[0]) / 2.0, (at[0] - a[0]) / 2.0);
+        p.handles = Some(Handles {
+            before: [din, din * slope],
+            after: [dout, dout * slope],
+            split: false,
+        });
+    }
+    out.insert(i, p);
+    let toward = |from: [f64; 2]| [(at[0] - from[0]) / 2.0, (at[1] - from[1]) / 2.0];
+    // The neighbours' places in `out`, past the point added.
+    let shifted = |k: usize| if k >= i { k + 1 } else { k };
+    if let Some((k, a)) = prev {
+        let k = shifted(k);
+        let mut h = curve::handles(&out, k);
+        h.after = toward(a);
+        out[k].handles = Some(h);
+    }
+    if let Some((k, b)) = next {
+        let k = shifted(k);
+        let mut h = curve::handles(&out, k);
+        h.before = toward(b);
+        out[k].handles = Some(h);
+    }
+    if out[i].handles.is_none() {
+        flatten(&mut out, i, wrap);
+    }
+    (out, i)
+}
+
+/// Every point given smooth handles: along the line from the point
+/// before it to the one after, a third of the way to each (an end's
+/// level).
+pub(crate) fn smooth(c: &mut [CurvePoint], wrap: bool) {
+    let old = c.to_vec();
+    let n = old.len() as isize;
+    let y_at = |k: isize| old[k.rem_euclid(n) as usize].y;
+    for i in 0..old.len() {
+        let x = old[i].x;
+        let (before, after) = neighbours(&old, i, wrap);
+        let slope = match (before, after) {
+            (Some(b), Some(a)) if a - b > 1e-9 => {
+                (y_at(i as isize + 1) - y_at(i as isize - 1)) / (a - b)
+            }
+            _ => 0.0,
+        };
+        let third = |gap: f64| gap.max(0.0) / 3.0;
+        let din = before.map_or(0.0, |b| third(x - b));
+        let dout = after.map_or(0.0, |a| third(a - x));
+        c[i].handles = Some(Handles {
+            before: [-din, -din * slope],
+            after: [dout, dout * slope],
+            split: false,
+        });
+    }
+}
+
+/// `p` near one of the grid's lines (its quarters) put on it.
+pub(crate) fn to_grid(p: [f64; 2]) -> [f64; 2] {
+    p.map(|v| {
+        let q = (v * 4.0).round() / 4.0;
+        if (v - q).abs() < 0.03 { q } else { v }
+    })
 }
 
 /// The curves with curve `k` given `c`.
@@ -382,11 +529,18 @@ fn graph(
             painter.rect_filled(r, 1.0, if on { color } else { theme::panel_dark() });
             painter.rect_stroke(r, 1.0, Stroke::new(1.2, color), egui::StrokeKind::Inside);
         }
-        // The picked point's handles (an end has none toward the side).
-        if let Some((pk, i)) = picked
-            && pk == k
-            && i < c.len()
-        {
+        // The picked point's handles, or every point's (an end has none
+        // toward the side).
+        let tangents: Vec<usize> = if view.all_tangents {
+            (0..c.len()).collect()
+        } else {
+            picked
+                .filter(|&(pk, i)| pk == k && i < c.len())
+                .map(|(_, i)| i)
+                .into_iter()
+                .collect()
+        };
+        for i in tangents {
             let h = curve::handles(&c, i);
             let base = [c[i].x, c[i].y];
             let at = to_screen(base);
@@ -445,10 +599,18 @@ fn graph(
     if resp.dragged()
         && let (Some((k, grip, base)), Some(p)) = (&view.drag, resp.interact_pointer_pos())
     {
-        let at = to_curve(p);
+        let mut at = to_curve(p);
         let mut c = base.clone();
         match *grip {
-            Grip::Point(i) => move_point(&mut c, i, at),
+            Grip::Point(i) => {
+                if view.lock_grid {
+                    at = to_grid(at);
+                }
+                if view.lock_axis {
+                    at[0] = c[i].x;
+                }
+                move_point(&mut c, i, at)
+            }
             Grip::Before(i) => crate::ofx_curves::move_handle(&mut c, i, false, at),
             Grip::After(i) => crate::ofx_curves::move_handle(&mut c, i, true, at),
         }
@@ -467,66 +629,110 @@ fn graph(
             None => None,
         };
     }
-    // A double-click adds a point to the curve nearest it (the picked
-    // one's first).
+    // A double-click on a point makes its handles level; elsewhere it adds
+    // a point there to the curve nearest it (the picked one's first).
     if resp.double_clicked()
         && let Some(p) = resp.interact_pointer_pos()
-        && !matches!(hit(p), Some((_, Grip::Point(_))))
     {
-        let at = to_curve(p);
-        let x = at[0].clamp(0.0, 1.0);
-        let nearest = order.iter().rev().copied().min_by(|&a, &b| {
-            let d = |k: usize| {
+        if let Some((k, Grip::Point(i))) = hit(p) {
+            let mut c = points(curves.get(k).map_or(&[][..], Vec::as_slice));
+            flatten(&mut c, i, false);
+            view.picked = Some((k, i));
+            out = Some(with(curves, k, c));
+        } else {
+            let at = to_curve(p);
+            let at = [at[0].clamp(0.0, 1.0), at[1].clamp(0.0, 1.0)];
+            let nearest = order.iter().rev().copied().min_by(|&a, &b| {
+                let d = |k: usize| {
+                    let c = points(curves.get(k).map_or(&[][..], Vec::as_slice));
+                    (curve::curve_at(&c, at[0]) - at[1]).abs()
+                };
+                d(a).total_cmp(&d(b))
+            });
+            if let Some(k) = nearest {
                 let c = points(curves.get(k).map_or(&[][..], Vec::as_slice));
-                (curve::curve_at(&c, x) - at[1]).abs()
-            };
-            d(a).total_cmp(&d(b))
-        });
-        if let Some(k) = nearest {
-            let c = points(curves.get(k).map_or(&[][..], Vec::as_slice));
-            let added = crate::ofx_curves::add_point(&c, x);
-            view.picked = added
-                .iter()
-                .position(|q| (q.x - x).abs() < 1e-9)
-                .map(|i| (k, i));
-            out = Some(with(curves, k, added));
+                let (added, i) = add_dot(&c, at, false);
+                view.picked = Some((k, i));
+                out = Some(with(curves, k, added));
+            }
         }
     }
-    // A point's menu: Lock Tangents, Delete.
+    // The menu: a point's (Lock Tangents, Reset, Delete) when one is under
+    // the pointer; the curve's and the graph's.
     if resp.secondary_clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        view.menu = match hit(p) {
-            Some((k, Grip::Point(i))) => {
-                view.picked = Some((k, i));
-                Some((k, i))
-            }
-            _ => None,
+        let point = match hit(p) {
+            Some((k, Grip::Point(i))) => Some((k, i)),
+            _ => view.picked,
         };
+        if let Some(pk) = point {
+            view.picked = Some(pk);
+        }
+        view.menu = Some(point);
     }
-    if let Some((k, i)) = view.menu {
-        let c = points(curves.get(k).map_or(&[][..], Vec::as_slice));
+    if let Some(point) = view.menu {
         resp.context_menu(|ui| {
-            if i >= c.len() {
-                ui.close();
-                return;
-            }
-            let locked = !curve::handles(&c, i).split;
-            if crate::menus::toggle_item(ui, tr("Lock Tangents"), locked) {
-                let mut c = c.clone();
-                crate::ofx_curves::lock_handles(&mut c, i, !locked);
-                out = Some(with(curves, k, c));
-            }
-            let end = i == 0 || i + 1 == c.len();
-            if ui
-                .add_enabled(!end, egui::Button::new(tr("Delete")))
-                .clicked()
+            let curve_of = |k: usize| points(curves.get(k).map_or(&[][..], Vec::as_slice));
+            if let Some((k, i)) = point
+                && i < curve_of(k).len()
             {
-                let mut c = c.clone();
-                c.remove(i);
-                view.picked = None;
-                out = Some(with(curves, k, c));
+                let c = curve_of(k);
+                let locked = !curve::handles(&c, i).split;
+                if crate::menus::toggle_item(ui, tr("Lock Tangents"), locked) {
+                    let mut c = c.clone();
+                    crate::ofx_curves::lock_handles(&mut c, i, !locked);
+                    out = Some(with(curves, k, c));
+                }
+                // Back on the diagonal, its handles level.
+                if crate::menus::item(ui, tr("Reset")) {
+                    let mut c = c.clone();
+                    let x = c[i].x;
+                    move_point(&mut c, i, [x, x]);
+                    flatten(&mut c, i, false);
+                    out = Some(with(curves, k, c));
+                    ui.close();
+                }
+                if crate::menus::item(ui, tr("Smooth curves")) {
+                    let mut c = c.clone();
+                    smooth(&mut c, false);
+                    out = Some(with(curves, k, c));
+                    ui.close();
+                }
+                ui.separator();
+            }
+            if crate::menus::check_item(ui, tr("All tangents"), view.all_tangents, true, "") {
+                view.all_tangents = true;
                 ui.close();
+            }
+            if crate::menus::check_item(ui, tr("Selected tangents"), !view.all_tangents, true, "") {
+                view.all_tangents = false;
+                ui.close();
+            }
+            if crate::menus::toggle_item(ui, tr("Lock axis"), view.lock_axis) {
+                view.lock_axis = !view.lock_axis;
+                ui.close();
+            }
+            if crate::menus::toggle_item(ui, tr("Lock to grid"), view.lock_grid) {
+                view.lock_grid = !view.lock_grid;
+                ui.close();
+            }
+            if let Some((k, i)) = point
+                && i < curve_of(k).len()
+            {
+                let c = curve_of(k);
+                ui.separator();
+                let end = i == 0 || i + 1 == c.len();
+                if ui
+                    .add_enabled(!end, egui::Button::new(tr("Delete")))
+                    .clicked()
+                {
+                    let mut c = c.clone();
+                    c.remove(i);
+                    view.picked = None;
+                    out = Some(with(curves, k, c));
+                    ui.close();
+                }
             }
         });
     }
@@ -687,6 +893,32 @@ mod tests {
         let far = z.panned(100.0, -100.0);
         assert!((far.center[0] - 0.75).abs() < 1e-9 && (far.center[1] - 0.25).abs() < 1e-9);
         assert_eq!(View::default().zoomed(1000.0, [0.5, 0.5]).zoom, ZOOM_MAX);
+    }
+
+    #[test]
+    fn points_are_added_and_levelled_as_vegass() {
+        // The straight line: a point added at (0.5, 0.7) takes handles
+        // along the line between its neighbours, theirs turned to it.
+        let c = points(&[]);
+        let (added, i) = add_dot(&c, [0.5, 0.7], false);
+        assert_eq!(i, 1);
+        let h = curve::handles(&added, 1);
+        assert!((h.before[0] + 0.25).abs() < 1e-9 && (h.before[1] + 0.25).abs() < 1e-9);
+        assert!((h.after[0] - 0.25).abs() < 1e-9 && (h.after[1] - 0.25).abs() < 1e-9);
+        let first = curve::handles(&added, 0).after;
+        assert!((first[0] - 0.25).abs() < 1e-9 && (first[1] - 0.35).abs() < 1e-9);
+        let last = curve::handles(&added, 2).before;
+        assert!((last[0] + 0.25).abs() < 1e-9 && (last[1] + 0.15).abs() < 1e-9);
+        // Level: half the way to each neighbour, at most 0.125.
+        let mut c = added;
+        flatten(&mut c, 1, false);
+        let h = curve::handles(&c, 1);
+        assert_eq!((h.before, h.after), ([-0.125, 0.0], [0.125, 0.0]));
+        // A hue curve's single point: its neighbours a turn round.
+        let mut one = vec![CurvePoint::new(0.3, 0.5)];
+        flatten(&mut one, 0, true);
+        assert_eq!(curve::handles(&one, 0).after, [0.125, 0.0]);
+        assert_eq!(to_grid([0.26, 0.6]), [0.25, 0.6]);
     }
 
     #[test]

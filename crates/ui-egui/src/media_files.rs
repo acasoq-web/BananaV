@@ -17,6 +17,8 @@ pub(crate) enum FileKind {
     /// `.otiod` bundle is a folder), Final Cut Pro 7's XML (`.xml`) or
     /// FCPXML (`.fcpxml`).
     Timeline,
+    /// Another editor's project (`.veg`).
+    VegProject,
 }
 
 /// What a file is, by its extension (`None`: nothing BananaV opens).
@@ -29,6 +31,8 @@ pub(crate) fn kind_of(path: &Path) -> Option<FileKind> {
     let ext = ext.as_str();
     if ext == "bvproj" {
         Some(FileKind::Project)
+    } else if ext == "veg" {
+        Some(FileKind::VegProject)
     } else if matches!(ext, "otio" | "otioz" | "otiod" | "xml" | "fcpxml") {
         Some(FileKind::Timeline)
     } else if VIDEO_EXTENSIONS.contains(&ext) {
@@ -71,11 +75,12 @@ pub(crate) fn media_filters(d: rfd::FileDialog) -> rfd::FileDialog {
 /// File › Open's filters: projects, timelines and media together first
 /// (VEGAS's Open opens both), then each kind.
 pub(crate) fn open_filters(d: rfd::FileDialog) -> rfd::FileDialog {
-    let mut all = vec!["bvproj", "otio", "otioz", "xml", "fcpxml"];
+    let mut all = vec!["bvproj", "veg", "otio", "otioz", "xml", "fcpxml"];
     all.extend(all_media());
     let d = d
         .add_filter(tr("All Project and Media Files"), &all)
         .add_filter(tr("BananaV Project"), &["bvproj"])
+        .add_filter(tr("VEG Project (*.veg)"), &["veg"])
         .add_filter("OpenTimelineIO (*.otio, *.otioz)", &["otio", "otioz"])
         .add_filter("Final Cut Pro 7/DaVinci Resolve (*.xml)", &["xml"])
         .add_filter("Final Cut Pro X (*.fcpxml)", &["fcpxml"])

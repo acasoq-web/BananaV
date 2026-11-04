@@ -4,7 +4,8 @@
 #
 # - Windows x64 and ARM64: BananaV.exe (the C runtime inside), a README,
 #   the license texts and the third-party notices
-#   (tools/third_party_notices.py) in a zip;
+#   (tools/third_party_notices.py), in a zip and in an installer
+#   (packaging/windows/bananav.iss, Inno Setup), which is tried out here;
 # - Linux x64 and ARM64: an AppImage, built on Ubuntu 22.04 for every
 #   distribution since (glibc 2.35), with FFmpeg's libraries built here
 #   under the LGPL (packaging/linux/build_ffmpeg.sh), the third-party and
@@ -66,10 +67,47 @@ jobs:
           cp crates/vst3-sys/licenses/vst3-pluginterfaces.txt "dist/$name/VST3-SDK-interfaces-license.txt"
           python tools/third_party_notices.py "$(rustc -vV | sed -n 's/^host: //p')" > "dist/$name/THIRD-PARTY-NOTICES.txt"
           echo "NAME=$name" >> "$GITHUB_ENV"
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          if (-not (Test-Path $iscc)) {
+            Invoke-WebRequest -OutFile innosetup.exe https://jrsoftware.org/download.php/is.exe
+            Start-Process -Wait innosetup.exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-'
+          }
+          & $iscc /Qp "/DAppVersion=$version" "/DArch=${{ matrix.arch }}" "/DFiles=$PWD\dist\$env:NAME" "/O$PWD\dist-setup" "/F$env:NAME-setup" packaging\windows\bananav.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: The installer, tried out
+        # Installs without a question, starts BananaV for a while, opens
+        # nothing else, and takes it all away again.
+        shell: pwsh
+        run: |
+          $setup = Start-Process -Wait -PassThru "dist-setup\$env:NAME-setup.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=desktopicon,projects'
+          if ($setup.ExitCode) { throw "the installer stopped with $($setup.ExitCode)" }
+          $app = "$env:LOCALAPPDATA\Programs\BananaV"
+          foreach ($file in "$app\BananaV.exe", "$app\bananav.ico", "$app\LICENSE.txt", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\BananaV.lnk", "$env:USERPROFILE\Desktop\BananaV.lnk") {
+            if (-not (Test-Path $file)) { throw "no $file" }
+          }
+          $command = (Get-ItemProperty 'HKCU:\Software\Classes\BananaV.Project\shell\open\command').'(default)'
+          if ($command -notlike '*BananaV.exe*') { throw "project files open with $command" }
+          $running = Start-Process -PassThru "$app\BananaV.exe"
+          Start-Sleep 20
+          if ($running.HasExited) { Write-Warning "BananaV stopped with exit code $($running.ExitCode)" } else { $running | Stop-Process -Force; "BananaV was still running after 20 s" }
+          Start-Process -Wait "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          foreach ($i in 1..30) { if (-not (Test-Path "$app\BananaV.exe")) { break }; Start-Sleep 1 }
+          if (Test-Path "$app\BananaV.exe") { throw "the uninstaller left BananaV.exe" }
+          if (Test-Path 'HKCU:\Software\Classes\BananaV.Project') { throw "the uninstaller left the project files' association" }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.NAME }}
           path: dist/${{ env.NAME }}
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}-setup
+          path: dist-setup/${{ env.NAME }}-setup.exe
           retention-days: 30
 
   linux:

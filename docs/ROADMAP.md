@@ -1244,8 +1244,15 @@ items move up to Done.
   points, Select Neutral Tone, the HSL Curves' Color Selector), Show
   Limits on Scopes, the Video Output level, More's Bézier Mask, Samsung
   Log, the Color Curves' dark look and side by side, dragging the hue
-  spectrum, and VEGAS's own math once prints measure it. (The graphics
-  card kernel came with audit pack 139.)
+  spectrum. (The graphics card kernel came with audit pack 139.) Since
+  2.0 the effect holds VEGAS's Color Grading's own parameters (each
+  wheel's color, Y and point; the curves as VEGAS's text) and works as
+  VEGAS's does with the graphics card on — its steps in their order,
+  the color held within 0–1 between them —, measured against VEGAS's own
+  renders of 20 cases: within one 8-bit level (two in the chained HSL
+  Curves), and with VEGAS's 8-bit steps within a level in a few pixels;
+  the wheels' points, the sliders, the boxes and the curves' points
+  behave as VEGAS's panel's. Older projects' Color Grading values reset.
 - **Adjust source media (audit pack 65)** — as VEGAS 2026's Help describes
   it ("Setting project properties"): File › Properties › Video's "Adjust
   source media to better match project or render settings", on for new
@@ -1274,7 +1281,9 @@ items move up to Done.
   LUT Filter's kernel (or Apple Log's curve) and its own steps — the
   Color Wheels, the RL Color Wheels, Levels and Tone, White Balance, HSL,
   the Curves and the HSL Curves — in one kernel; a test compares them with
-  the processor.
+  the processor. Since 2.0 the kernel works VEGAS's steps (the HSL Curves
+  chained, the RL wheels' and the curves' tables, the CDLs, the HSL
+  always), the LUTs' passes holding the colors within 0–1.
 - **The transitions on the graphics card (audit pack 138)** — BananaV's 24
   own transitions (the wipes, the irises and stars, Push, Slide, Squeeze,
   Split, Swap, Zoom, Spiral, Flash, Dissolve, Cross Effect, Portals, the 3D
@@ -2427,6 +2436,92 @@ items move up to Done.
   counted 24 points short, so the last button ran under the icons). The
   scroll buttons' look and place are BananaV's own until a print shows
   VEGAS's.
+- **VEG projects, imported and exported** — File › Import and File ›
+  Export › VEG Project, and File › Open of `.veg` files: the project's
+  settings (frame size and rate, sample rate, the ruler's timecode,
+  tempo), its media (where the project says, else beside it, else
+  offline), the video and audio tracks (names, volume and pan, mute,
+  compositing mode and level), the events with their takes, fades and
+  fade curves, speed, pitch and mute, the groups, the tracks' envelopes
+  (volume, pan, bus sends, composite level, fade to color), video effects
+  by their names (BananaV's own, or the same plug-ins installed),
+  markers, regions, command markers, the CD layout, the summary and the
+  project's comments, busses and bins. Read from the 40 test projects
+  VEGAS saved, every field they were made to show, and written back with
+  VEGAS's chunks in its order and its default structures. Since then: the
+  effects' parameters of every size (the Color Corrector's wheels, two
+  numbers each), the events' levels (volume, opacity), and the audio
+  effects of the tracks' and events' chains that BananaV has — 20 of
+  VEGAS's DirectX ones, among them a new track's Track Noise Gate, Track
+  EQ and Track Compressor, their settings read field by field; File ›
+  Import calls it experimental. Left out, and counted when a project
+  opens: generated media's events, the other audio effects (the graphs',
+  the Express ones, Wave Hammer, other makers'), transitions, Pan/Crop,
+  the events' envelopes. Still to see: VEGAS opening a project BananaV
+  wrote, and the settings of every audio effect checked against projects
+  VEGAS saved with each one at a preset.
+- **Smooth again** — the kernels' compilation (63 s in a release build, one
+  after another, and a minute or two with the processor busy) kept the
+  preview on the processor after every start: now the card draws as soon
+  as it opens, the kernels compile apart in parallel (6.5 s), and the three
+  slowest fell from 49 s to under 1 s (their `var<workgroup>` tables no
+  longer zeroed). A 1080p60 event with two effects plays at 60 pictures a
+  second, evenly, using about one core where it took eight at 15. The
+  window paints when frames are due instead of as often as the screen
+  allows (140 times a second), the Explorer's tree no longer touches the
+  disks every frame, frames reach the screen without a conversion per
+  pixel, and matching events out of sync no longer compares every pair
+  each frame (a long recording cut into thousands of events).
+- **A Windows installer (0.2.0)** — `packaging/windows/bananav.iss` (Inno
+  Setup, built and tried out by `package.yml` on x64 and ARM64): for one
+  user, without an administrator password, in English or Brazilian
+  Portuguese by the system's language; a Start menu shortcut, a desktop one
+  and `.bvproj` files opening in BananaV if wanted, BananaV started at the
+  end, and an uninstaller that leaves settings and projects. The website's
+  Windows download is the installer; the zip stays on the Releases page.
+- **The timeline's details, from VEGAS's default keyboard map and curves**
+  — the Sharp curve is VEGAS's 4p³ − 6p² + 3p in fades, envelopes and
+  keyframes (it was the smoothstep's inverse); snapping reaches 7
+  pixels, as VEGAS's; Esc stops playback, the edit cursor staying; the
+  Trimmer's W and E go to its start and end; the peak files VEGAS leaves
+  beside media (`.sfk`: the minimum and maximum of every 256 samples)
+  give their waveforms without reading the sound — not one of another
+  version of the file, and not after Rebuild Audio Peaks.
+- **Pan/Crop rebuilt, checked against VEGAS's renders** — an event's Pan/Crop is now a
+  box in its media's pixels (width, height, center, angle, pivot, curve,
+  smoothness), as the file keeps it; between keyframes the size, angle
+  and pivot move in a straight line, the center's turning undone around it
+  and the pivot on an X-spline with the smoothness as its tension. Output:
+  Maintain aspect ratio and Stretch to fill, hard edges and a Catmull-Rom
+  whose end pixels land on each other for a straight box, soft edges for a
+  turned or mirrored one, on the processor and on the card. Masks: 16 bands a
+  line, a recursive Gaussian, a curve for one-way feathers. Checked
+  through the `.veg` reader against VEGAS's renders, frame by frame:
+  geometry, 28 cases: 0.060/255 at worst on average, the 17 straight boxes
+  at most one level off anywhere, the 11 turned or mirrored ones 7 to 19
+  levels on a few pixels of their edges (about 0.2% of the frame over 2
+  levels); masks, 19 cases: identical pixel by pixel. The window: the pivot dragged, each
+  keyframe's own look of a path, the aspect ratio presets (1:1, 4:3, 16:9,
+  1.85:1), Resize Adjustment Event to Project in its menu.
+- **VEG: what an edit leaves** — the reader now brings transitions (27 of
+  27: 20 by their parameters, 7 of the file's own kind by the record of
+  their settings), their progress envelopes, the 51 audio effects at their
+  settings (39 DirectX ones including the graphs', 11 studio ones, the
+  Modern Equalizer) with their bypass, keyframes of every effect parameter
+  (numbers, points, colors, choices, with Bézier handles) and texts,
+  effects before the Pan/Crop or switched off, velocity, normalize, channels
+  and phase of events, Resample, Reduce Interlace and Undersample, Track
+  Motion, its shadow, glow and 3D box, Parent Motion and compositing
+  children, the track's phase and sends, and the busses' faders, mutes,
+  solos, effects and envelopes. An old mistake fixed: an envelope's kind was
+  read and written at the wrong byte, so every envelope was a volume one.
+  Export writes all of it but the audio chains: its structures are VEGAS's
+  byte for byte on the samples, and it reads back the same. Checked on
+  VEGAS's own sample projects (`BV_VEG_SAMPLES`, `BV_VEG_SAMPLES2`). Not
+  brought in: a transition at an event's end (BananaV's stand at entrances,
+  counted when a project opens), the Gradient Wipe's own pictures, pan up and
+  down and center level, effect automation (no sample has it). Still to
+  see: VEGAS opening what BananaV wrote.
 
 ## In progress
 

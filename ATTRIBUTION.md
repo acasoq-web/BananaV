@@ -66,6 +66,7 @@ their licenses ask for.
 | What | Where in BananaV | Author | License |
 |---|---|---|---|
 | OpenFX 1.5's C headers (unchanged, the reference `crates/ofx-sys` follows) | `vendor/openfx/` | OpenFX and contributors to the OpenFX project | BSD-3-Clause (`vendor/openfx/LICENSE.md`) |
+| Inno Setup 6, the tool that makes the Windows installer (not in the repository; its setup program is inside the installer) | `packaging/windows/bananav.iss`, `.github/workflows/package.yml` | Jordan Russell and Martijn Laan | Inno Setup License |
 | egui_dock 0.21.1, with BananaV's changes | `vendor/egui_dock/` (`BANANAV.md` lists the changes) | Adam Gąsior and contributors | MIT (`vendor/egui_dock/LICENSE`) |
 | egui-winit 0.36.2, with BananaV's change | `vendor/egui-winit/` (`BANANAV.md` lists the change) | Emil Ernerfeldt and contributors | MIT OR Apache-2.0 (`vendor/egui-winit/LICENSE-MIT`) |
 | VST 3's interface declarations, written from the SDK's headers | `crates/vst3-sys/` | Steinberg Media Technologies GmbH | MIT (`crates/vst3-sys/licenses/vst3-pluginterfaces.txt`) |

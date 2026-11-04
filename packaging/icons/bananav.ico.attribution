@@ -1,0 +1,10 @@
+asset:        bananav.ico
+title:        BananaV's application icon, sixteen to 256 pixels
+author:       @acasoq-web, BananaV's owner
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-11-04 by @acasoq-web
+notes:        bananav.png at each size. Used by the Windows installer and its
+              shortcuts (packaging/windows/bananav.iss).
+              The name and the logo as marks: TRADEMARKS.md (draft).

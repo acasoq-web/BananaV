@@ -286,8 +286,7 @@ impl<'a> Writer<'a> {
     /// Whether the format says all event `c` does.
     fn whole(&self, c: &Clip) -> bool {
         c.effects.is_empty()
-            && c.transform.is_identity()
-            && c.transform_keys.is_empty()
+            && c.pan_crop.is_default()
             && c.mask.is_none()
             && c.freeze.is_none()
             && c.reverse.is_none()

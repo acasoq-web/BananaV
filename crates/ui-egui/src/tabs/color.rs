@@ -32,7 +32,9 @@ use crate::egui::{
 use crate::fx_window::FxTarget;
 use crate::icons::Icon;
 use crate::theme;
+use bv_core::curve::CurvePoint;
 use bv_engine::ColorGradingPicker as Picker;
+use bv_engine::color_grading as cg;
 
 /// The Color Grading effect's identifier.
 pub(crate) const ID: &str = "org.bananav.ColorGrading";
@@ -97,24 +99,49 @@ const GROUPS: [(&str, Section, &[&str]); 5] = [
 const ITEM_PARAMS: [&[&[&str]]; 5] = [
     &[
         &[
-            "cameraLut",
-            "cameraStrength",
-            "cameraTetrahedral",
-            "cameraOn",
+            "lutEnable0",
+            "lutFilename0",
+            "lutInterpolation0",
+            "lutGain0",
         ],
-        &["lookLut", "lookStrength", "lookTetrahedral", "lookOn"],
+        &[
+            "lutEnable1",
+            "lutFilename1",
+            "lutInterpolation1",
+            "lutGain1",
+        ],
     ],
     &[
-        &["lift", "liftY"],
-        &["gamma", "gammaY"],
-        &["gain", "gainY"],
-        &["offset", "offsetY"],
+        &["liftR", "liftG", "liftB", "liftY"],
+        &["gammaR", "gammaG", "gammaB", "gammaY"],
+        &["gainR", "gainG", "gainB", "gainY"],
+        &["offsetR", "offsetG", "offsetB", "offsetY"],
     ],
     &[
-        &["shadows", "shadowsY"],
-        &["midtones", "midtonesY"],
-        &["highlights", "highlightsY"],
-        &["rlOffset", "rlOffsetY"],
+        &[
+            "logWheelShadowsR",
+            "logWheelShadowsG",
+            "logWheelShadowsB",
+            "logWheelShadowsY",
+        ],
+        &[
+            "logWheelMidtonesR",
+            "logWheelMidtonesG",
+            "logWheelMidtonesB",
+            "logWheelMidtonesY",
+        ],
+        &[
+            "logWheelHighlightsR",
+            "logWheelHighlightsG",
+            "logWheelHighlightsB",
+            "logWheelHighlightsY",
+        ],
+        &[
+            "logWheelOffsetR",
+            "logWheelOffsetG",
+            "logWheelOffsetB",
+            "logWheelOffsetY",
+        ],
     ],
     &[
         UTILITIES[0].1,
@@ -122,28 +149,37 @@ const ITEM_PARAMS: [&[&[&str]]; 5] = [
         UTILITIES[2].1,
         UTILITIES[3].1,
     ],
-    &[&["curves"], &["hslCurves"]],
+    &[
+        &COLOR_CURVES,
+        &[
+            "curveHvH", "curveHvS", "curveHvL", "curveSvS", "curveSvL", "curveLvS",
+        ],
+    ],
 ];
 
 /// The Utilities' blocks: their titles and parameters.
 const UTILITIES: [(&str, &[&str]); 4] = [
     (
         "Levels",
-        &["inputBlack", "inputWhite", "outputMin", "outputMax"],
+        &["inMinAdjust", "inMaxAdjust", "outMinAdjust", "outMaxAdjust"],
     ),
     (
         "Tone",
         &[
-            "brightness",
-            "contrast",
-            "contrastCenter",
-            "saturation",
-            "logExposure",
+            "brightnessAdjust",
+            "contrastAdjust",
+            "contrastCtrAdjust",
+            "saturationAdjust",
+            "exposureLnAdjust",
         ],
     ),
-    ("White Balance", &["temperature", "tint"]),
-    ("HSL", &["hue", "hslSaturation", "luminance"]),
+    ("White Balance", &["temperatureAdjust", "tintAdjust"]),
+    ("HSL", &["hueAdjust", "satAdjust", "valAdjust"]),
 ];
+
+/// The Color Curves' texts, as the editor lists them: Brightness, Red,
+/// Green, Blue.
+const COLOR_CURVES: [&str; 4] = ["curveY", "curveR", "curveG", "curveB"];
 
 /// The navigation's width and a row of it, as VEGAS's.
 const NAV_WIDTH: f32 = 186.0;
@@ -155,18 +191,24 @@ const BOX: egui::Vec2 = vec2(48.0, 22.0);
 /// The RL Color Wheels' Threshold column.
 const THRESHOLD_WIDTH: f32 = 66.0;
 
-/// The wheels' parameters (a color and a master Y), names and neutral
-/// values: the Color Wheels, then the RL Color Wheels.
-const WHEELS: [(&str, &str, &str, f64); 8] = [
-    ("lift", "liftY", "Lift", 0.0),
-    ("gamma", "gammaY", "Gamma", 1.0),
-    ("gain", "gainY", "Gain", 1.0),
-    ("offset", "offsetY", "Offset", 0.0),
-    ("shadows", "shadowsY", "Shadows", 0.0),
-    ("midtones", "midtonesY", "Midtones", 0.0),
-    ("highlights", "highlightsY", "Highlights", 0.0),
-    ("rlOffset", "rlOffsetY", "Offset", 0.0),
+/// The wheels' parameters' stems (each its R, G, B, Y, U and V) and
+/// names: the Color Wheels, then the RL Color Wheels.
+const WHEELS: [(&str, &str); 8] = [
+    ("lift", "Lift"),
+    ("gamma", "Gamma"),
+    ("gain", "Gain"),
+    ("offset", "Offset"),
+    ("logWheelShadows", "Shadows"),
+    ("logWheelMidtones", "Midtones"),
+    ("logWheelHighlights", "Highlights"),
+    ("logWheelOffset", "Offset"),
 ];
+
+/// Wheel `i`'s range, as the panel's: its low and high ends, and where it
+/// rests.
+fn wheel_range(i: usize) -> (f64, f64, f64) {
+    cg::WHEEL_RANGES.get(i).copied().unwrap_or(cg::RL_RANGE)
+}
 
 /// The HSL Curves, as the type menu lists them.
 const HSL_KINDS: [&str; 6] = [
@@ -280,7 +322,7 @@ struct Cx {
 fn new_fx() -> PluginFx {
     PluginFx {
         id: ID.to_string(),
-        version: [1, 0],
+        version: [2, 0],
         name: "Color Grading".to_string(),
         params: Default::default(),
     }
@@ -300,11 +342,6 @@ impl Cx {
 
     fn num(&self, name: &str) -> f64 {
         self.value(name).num(0)
-    }
-
-    fn rgb(&self, name: &str) -> [f64; 3] {
-        let v = self.value(name);
-        [v.num(0), v.num(1), v.num(2)]
     }
 
     fn text(&self, name: &str) -> String {
@@ -435,6 +472,15 @@ fn set(app: &mut BananaApp, cx: &Cx, values: &[(&str, Value)], key: egui::Id) {
     }
     let t = cx.target;
     app.modify_merged(key, move |p| t.set_chain(p, chain));
+}
+
+/// [`set`] with the parameters' names made as it runs.
+fn set_named(app: &mut BananaApp, cx: &Cx, values: &[(String, Value)], key: egui::Id) {
+    let values: Vec<(&str, Value)> = values
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect();
+    set(app, cx, &values, key);
 }
 
 /// Changes the effect in the chain (bypass, reset); nothing when it is not
@@ -1009,8 +1055,102 @@ fn label_at(ui: &egui::Ui, at: Pos2, text: &str, align: Align2) {
         .text(at, align, text, FontId::proportional(12.5), theme::text());
 }
 
+/// A number's box as VEGAS's: typed (a comma or a point) and kept to three
+/// decimals within `(lo, hi)`, the mouse wheel over it adding a hundredth
+/// a notch (Ctrl: a thousandth). Whether it changed `value`.
+fn number_box(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    value: &mut f64,
+    (lo, hi): (f64, f64),
+    short: bool,
+) -> bool {
+    let mut v = *value;
+    let field = if short {
+        short_field(&mut v)
+    } else {
+        field(&mut v)
+    };
+    let resp = ui.put(rect, field.range(lo..=hi));
+    let mut changed = resp.changed();
+    if resp.hovered() {
+        let (notches, ctrl) = ui.input(|i| crate::widgets::wheel_notches(&i.events));
+        if notches != 0.0 {
+            v += f64::from(notches) * if ctrl { 0.001 } else { 0.01 };
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            changed = true;
+        }
+    }
+    if changed {
+        *value = (v.clamp(lo, hi) * 1000.0).round() / 1000.0;
+    }
+    changed
+}
+
+/// A slider's handling, as VEGAS's sliders do it: the knob dragged (with
+/// Ctrl a thirty-second as fast), a click beside it a tenth that way, a
+/// double-click the default, the mouse wheel a hundredth a notch (Ctrl: a
+/// thousandth). `along(p)`: how far along the slider a point is (0–1 from
+/// its low end); `on_knob(p)`: whether the knob is there. Whether `value`
+/// changed.
+fn slide(
+    ui: &egui::Ui,
+    resp: &egui::Response,
+    value: &mut f64,
+    (lo, hi): (f64, f64),
+    default: f64,
+    along: impl Fn(Pos2) -> f64,
+    on_knob: impl Fn(Pos2) -> bool,
+) -> bool {
+    let span = (hi - lo).max(1e-12);
+    let before = *value;
+    // The drag's value, not held within the ends: the knob comes back
+    // with the pointer.
+    let id = resp.id.with("slide");
+    if resp.drag_started() {
+        let grabbed = ui.input(|i| i.pointer.press_origin()).is_some_and(&on_knob);
+        ui.data_mut(|d| d.insert_temp(id, grabbed.then_some(*value)));
+    }
+    if resp.dragged()
+        && let Some(Some(mut v)) = ui.data(|d| d.get_temp::<Option<f64>>(id))
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let moved = along(p) - along(p - resp.drag_delta());
+        let k = if ui.input(|i| i.modifiers.ctrl) {
+            1.0 / 32.0
+        } else {
+            1.0
+        };
+        v += moved * span * k;
+        ui.data_mut(|d| d.insert_temp(id, Some(v)));
+        *value = v;
+    }
+    if resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+        && !on_knob(p)
+    {
+        *value += if lo + along(p) * span > *value {
+            0.1
+        } else {
+            -0.1
+        };
+    }
+    if resp.double_clicked() {
+        *value = default;
+    }
+    if resp.hovered() {
+        let (notches, ctrl) = ui.input(|i| crate::widgets::wheel_notches(&i.events));
+        if notches != 0.0 {
+            *value += f64::from(notches) * if ctrl { 0.001 } else { 0.01 };
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
+    }
+    *value = value.clamp(lo, hi);
+    *value != before
+}
+
 /// A slider across `rect` as VEGAS's: a groove — or a band through
-/// `colors` — and a light knob; a double-click puts it at `default`.
+/// `colors` — and a light knob, handled as [`slide`] says.
 fn h_slider(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -1023,21 +1163,25 @@ fn h_slider(
     let mut resp = ui.interact(rect, id, Sense::click_and_drag());
     let track = rect.shrink2(vec2(5.0, 0.0));
     let span = (hi - lo).max(1e-12);
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        *value = lo + f64::from(((p.x - track.left()) / track.width()).clamp(0.0, 1.0)) * span;
-        resp.mark_changed();
-    }
-    if resp.double_clicked() {
-        *value = default;
-        resp.mark_changed();
-    }
     let y = rect.center().y;
+    let knob = |v: f64| {
+        let x = track.left() + ((v - lo) / span).clamp(0.0, 1.0) as f32 * track.width();
+        Rect::from_center_size(pos2(x, y), vec2(9.0, 15.0))
+    };
+    let at = knob(*value);
+    if slide(
+        ui,
+        &resp,
+        value,
+        (lo, hi),
+        default,
+        |p| f64::from((p.x - track.left()) / track.width()),
+        |p| at.expand(2.0).contains(p),
+    ) {
+        resp.mark_changed();
+    }
     band(ui.painter(), track.x_range(), y, colors);
-    let x = track.left() + ((*value - lo) / span).clamp(0.0, 1.0) as f32 * track.width();
-    let knob = Rect::from_center_size(pos2(x, y), vec2(9.0, 15.0));
-    crate::widgets::paint_knob(ui.painter(), knob, resp.hovered() || resp.dragged());
+    crate::widgets::paint_knob(ui.painter(), knob(*value), resp.hovered() || resp.dragged());
     resp
 }
 
@@ -1094,18 +1238,28 @@ fn slider_row(
         cx.default_of(name).num(0),
         colors,
     );
-    let mut typed = v;
-    let typed_now = ui
-        .put(bx, short_field(&mut typed).range(min..=max))
-        .changed();
-    let value = if typed_now { typed } else { v };
-    if (value - cx.num(name)).abs() > 1e-12 {
-        set(app, cx, &[(name, Value::Num(vec![value]))], id);
+    number_box(ui, bx, &mut v, (min, max), true);
+    if (v - cx.num(name)).abs() > 1e-12 {
+        set(app, cx, &[(name, Value::Num(vec![v]))], id);
+    }
+}
+
+/// Which of two knobs (`knobs`: their places) the pointer at `p` takes:
+/// the one under it, else the nearer (`near`: how far each is).
+fn which_knob(p: Pos2, knobs: [Rect; 2], near: impl Fn(Rect) -> f32) -> usize {
+    let on = knobs.map(|k| k.expand(2.0).contains(p));
+    match on {
+        [true, _] => 0,
+        [false, true] => 1,
+        _ => usize::from(near(knobs[1]) < near(knobs[0])),
     }
 }
 
 /// Levels' Input or Output row: the low end's box, a black-to-white band
-/// with both ends' knobs (the nearer one dragged), the high end's box.
+/// with both ends' knobs, the high end's box. Each end is handled as
+/// VEGAS's sliders handle theirs ([`slide`]: the knob under the pointer,
+/// or beside them the nearer, takes the drag, the click and the mouse
+/// wheel); a double-click puts both at their defaults.
 #[allow(clippy::too_many_arguments)]
 fn range_row(
     ui: &mut egui::Ui,
@@ -1127,29 +1281,43 @@ fn range_row(
     let (min, max) = cx.range(lo_p);
     let span = (max - min).max(1e-12);
     let (lo0, hi0) = (cx.num(lo_p), cx.num(hi_p));
-    let (mut lo, mut hi) = (lo0, hi0);
+    let mut pair = [lo0, hi0];
+    let defaults = [cx.default_of(lo_p).num(0), cx.default_of(hi_p).num(0)];
     let id = egui::Id::new(("cg-range", lo_p));
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     let track = rect.shrink2(vec2(5.0, 0.0));
     let x_of = |v: f64| track.left() + ((v - min) / span).clamp(0.0, 1.0) as f32 * track.width();
-    let v_of =
-        |x: f32| min + f64::from(((x - track.left()) / track.width()).clamp(0.0, 1.0)) * span;
-    if resp.drag_started()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        // The nearer knob follows the drag.
-        let high = (p.x - x_of(hi)).abs() < (p.x - x_of(lo)).abs();
-        ui.data_mut(|d| d.insert_temp(id, high));
-    }
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        let v = v_of(p.x);
-        if ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
-            hi = v.max(lo);
-        } else {
-            lo = v.min(hi);
-        }
+    let knob = |v: f64| Rect::from_center_size(pos2(x_of(v), y), vec2(9.0, 15.0));
+    // The end the pointer took, kept while it drags.
+    let end = id.with("end");
+    let k = if resp.dragged() && !resp.drag_started() {
+        ui.data(|d| d.get_temp::<usize>(end)).unwrap_or(0)
+    } else {
+        let at = ui.input(|i| i.pointer.press_origin().or(i.pointer.hover_pos()));
+        let k = at.map_or(0, |p| {
+            which_knob(p, [knob(pair[0]), knob(pair[1])], |r| {
+                (p.x - r.center().x).abs()
+            })
+        });
+        ui.data_mut(|d| d.insert_temp(end, k));
+        k
+    };
+    let grabbed = knob(pair[k]);
+    slide(
+        ui,
+        &resp,
+        &mut pair[k],
+        (min, max),
+        defaults[k],
+        |p| f64::from((p.x - track.left()) / track.width()),
+        |p| grabbed.expand(2.0).contains(p),
+    );
+    if resp.double_clicked() {
+        pair = defaults;
+    } else if k == 0 {
+        pair[0] = pair[0].min(pair[1]);
+    } else {
+        pair[1] = pair[1].max(pair[0]);
     }
     band(
         ui.painter(),
@@ -1157,27 +1325,12 @@ fn range_row(
         y,
         &[Color32::BLACK, Color32::WHITE],
     );
-    for v in [lo, hi] {
-        let knob = Rect::from_center_size(pos2(x_of(v), y), vec2(9.0, 15.0));
-        crate::widgets::paint_knob(ui.painter(), knob, resp.hovered() || resp.dragged());
+    for v in pair {
+        crate::widgets::paint_knob(ui.painter(), knob(v), resp.hovered() || resp.dragged());
     }
-    let (mut lo_typed, mut hi_typed) = (lo, hi);
-    if ui
-        .put(lo_box, short_field(&mut lo_typed).range(min..=max))
-        .changed()
-    {
-        lo = lo_typed;
-    }
-    if ui
-        .put(hi_box, short_field(&mut hi_typed).range(min..=max))
-        .changed()
-    {
-        hi = hi_typed;
-    }
-    if resp.double_clicked() {
-        lo = cx.default_of(lo_p).num(0);
-        hi = cx.default_of(hi_p).num(0);
-    }
+    number_box(ui, lo_box, &mut pair[0], (min, max), true);
+    number_box(ui, hi_box, &mut pair[1], (min, max), true);
+    let [lo, hi] = pair;
     if (lo - lo0).abs() > 1e-12 || (hi - hi0).abs() > 1e-12 {
         set(
             app,
@@ -1224,64 +1377,67 @@ fn lut_entries(camera: bool) -> Vec<(String, String, bool)> {
 /// row; its table in a box — its picture, its name, the arrows to the one
 /// before or after; a click lists them —; its Strength.
 fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect) {
-    let (title, prefix, camera) = [
-        (tr("Camera LUT"), "camera", true),
-        (tr("Look LUT"), "look", false),
-    ][k];
+    let (title, camera) = [(tr("Camera LUT"), true), (tr("Look LUT"), false)][k];
     let (file_p, strength_p, tetra_p, on_p) = (
-        format!("{prefix}Lut"),
-        format!("{prefix}Strength"),
-        format!("{prefix}Tetrahedral"),
-        format!("{prefix}On"),
+        cg::LUT_FILE[k],
+        cg::LUT_GAIN[k],
+        cg::LUT_INTERPOLATION[k],
+        cg::LUT_ENABLE[k],
     );
+    // A table picked: its file, and the LUT on (as VEGAS's list does).
+    let pick = |file: String| {
+        let on = if file.is_empty() { 0.0 } else { 1.0 };
+        [(file_p, Value::Text(file)), (on_p, Value::Num(vec![on]))]
+    };
     let (mut bar, mut body) = column(ui, rect, title, false);
     if crate::widgets::icon_button(&mut bar, Icon::Folder, tr("Browse")).clicked()
         && let Some(path) = rfd::FileDialog::new()
             .add_filter(tr("Cube LUT"), &["cube"])
             .pick_file()
     {
-        let key = egui::Id::new(("cg-lut-file", prefix));
-        set(
-            app,
-            cx,
-            &[(&file_p, Value::Text(path.to_string_lossy().into_owned()))],
-            key,
-        );
+        let key = egui::Id::new(("cg-lut-file", k));
+        set(app, cx, &pick(path.to_string_lossy().into_owned()), key);
     }
     if reset_button(&mut bar) {
-        let key = egui::Id::new(("cg-lut-reset", prefix));
-        set(app, cx, &[(&file_p, Value::Text(String::new()))], key);
+        let key = egui::Id::new(("cg-lut-reset", k));
+        let values: Vec<(&str, Value)> = [file_p, on_p, tetra_p, strength_p]
+            .into_iter()
+            .map(|n| (n, cx.default_of(n)))
+            .collect();
+        set(app, cx, &values, key);
     }
-    let on = cx.num(&on_p) != 0.0;
+    // Lit while a table is picked and left off.
+    let on = cx.num(on_p) != 0.0;
+    let bypassed = !on && !cx.text(file_p).is_empty();
     if crate::widgets::icon_toggle(
         &mut bar,
         Icon::BypassFx,
-        !on,
+        bypassed,
         tr("LUT Selection: apply or remove the LUT"),
     )
     .clicked()
     {
-        let key = egui::Id::new(("cg-lut-on", prefix));
+        let key = egui::Id::new(("cg-lut-on", k));
         set(
             app,
             cx,
-            &[(&on_p, Value::Num(vec![if on { 0.0 } else { 1.0 }]))],
+            &[(on_p, Value::Num(vec![if on { 0.0 } else { 1.0 }]))],
             key,
         );
     }
-    let tetra = cx.num(&tetra_p) != 0.0;
+    let tetra = cx.num(tetra_p) != 0.0;
     if crate::widgets::icon_toggle(&mut bar, Icon::Grid, tetra, tr("Tetrahedral Interpolation"))
         .clicked()
     {
-        let key = egui::Id::new(("cg-lut-tetra", prefix));
+        let key = egui::Id::new(("cg-lut-tetra", k));
         set(
             app,
             cx,
-            &[(&tetra_p, Value::Num(vec![if tetra { 0.0 } else { 1.0 }]))],
+            &[(tetra_p, Value::Num(vec![if tetra { 0.0 } else { 1.0 }]))],
             key,
         );
     }
-    let file = cx.text(&file_p);
+    let file = cx.text(file_p);
     let entries = lut_entries(camera);
     let at = entries
         .iter()
@@ -1342,8 +1498,8 @@ fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: R
         (boxr.right() - 30.0 - thumb.right() - 12.0).max(10.0),
     );
     // The list, and the arrows to the entry before or after.
-    let pick = Rect::from_min_max(boxr.min, pos2(boxr.right() - 26.0, boxr.bottom()));
-    let list = body.interact(pick, egui::Id::new(("cg-lut-box", prefix)), Sense::click());
+    let list_rect = Rect::from_min_max(boxr.min, pos2(boxr.right() - 26.0, boxr.bottom()));
+    let list = body.interact(list_rect, egui::Id::new(("cg-lut-box", k)), Sense::click());
     let mut chosen: Option<String> = None;
     egui::Popup::menu(&list).show(|ui| {
         for (name, f, enabled) in &entries {
@@ -1367,11 +1523,7 @@ fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: R
         (false, pos2(boxr.right() - 14.0, boxr.bottom() - 15.0)),
     ] {
         let r = Rect::from_center_size(center, vec2(20.0, 22.0));
-        let b = body.interact(
-            r,
-            egui::Id::new(("cg-lut-step", prefix, up)),
-            Sense::click(),
-        );
+        let b = body.interact(r, egui::Id::new(("cg-lut-step", k, up)), Sense::click());
         let c = if b.hovered() {
             theme::text_strong()
         } else {
@@ -1401,8 +1553,8 @@ fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: R
     if let Some(f) = chosen
         && f != file
     {
-        let key = egui::Id::new(("cg-lut-pick", prefix));
-        set(app, cx, &[(&file_p, Value::Text(f))], key);
+        let key = egui::Id::new(("cg-lut-pick", k));
+        set(app, cx, &pick(f), key);
     }
     let row = Rect::from_min_max(
         pos2(rect.left(), boxr.bottom() + 3.0),
@@ -1414,145 +1566,200 @@ fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: R
         app,
         cx,
         row,
-        &strength_p,
+        strength_p,
         tr("Strength:"),
         label_w,
         &[],
     );
 }
 
+/// The color a wheel's offsets from where it rests show: their hue, as
+/// bright as it goes (none: a light grey).
+fn offset_color(o: [f64; 3]) -> Color32 {
+    let m = (o[0] + o[1] + o[2]) / 3.0;
+    let c = o.map(|v| v - m);
+    let s = c.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if s < 1e-9 {
+        return Color32::from_gray(200);
+    }
+    let [r, g, b] = c.map(|v| ((0.5 + 0.5 * v / s).clamp(0.0, 1.0) * 255.0).round() as u8);
+    Color32::from_rgb(r, g, b)
+}
+
+/// Wheel `stem`'s color `rgb` and point `dot`, as its parameters hold
+/// them.
+fn wheel_settings(stem: &str, rgb: [f64; 3], dot: [f64; 2]) -> Vec<(String, Value)> {
+    let mut v: Vec<(String, Value)> = (0..3)
+        .map(|k| {
+            (
+                cg::wheel_param(stem, cg::PARTS[k]),
+                Value::Num(vec![rgb[k]]),
+            )
+        })
+        .collect();
+    v.push((cg::wheel_param(stem, "U"), Value::Num(vec![dot[0]])));
+    v.push((cg::wheel_param(stem, "V"), Value::Num(vec![dot[1]])));
+    v
+}
+
 /// A wheel's column, as VEGAS's: its title, its picker (Lift's black
 /// point, Gain's white point) and Reset; the wheel, beside it R, G and B
-/// over the Y slider and Y. Or, shown as sliders, R, G, B and Y side by
-/// side.
+/// over the Y slider and Y — the boxes left out when the column is small,
+/// as VEGAS's are. Or, shown as sliders, R, G, B and Y side by side. The
+/// wheel's point gives its color as VEGAS's does
+/// (`color_grading::wheel_values`); a color typed puts the point about
+/// where it gives it.
 fn wheel_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, i: usize, rect: Rect) {
-    let (rgb, y, name, neutral) = WHEELS[i];
+    let (stem, name) = WHEELS[i];
+    let range = wheel_range(i);
+    let (min, max, rest) = range;
+    let param = |part: &str| cg::wheel_param(stem, part);
     let (mut bar, mut body) = column(ui, rect, tr(name), true);
     let picker = match i {
         0 => Some((Picker::BlackPoint, tr("Specify a Black Point"))),
         2 => Some((Picker::WhitePoint, tr("Specify a White Point"))),
         _ => None,
     };
+    let key = egui::Id::new(("cg-wheel", i));
     if reset_button(&mut bar) {
-        let key = egui::Id::new(("cg-wheel-reset", i));
-        set(
-            app,
-            cx,
-            &[(rgb, cx.default_of(rgb)), (y, cx.default_of(y))],
-            key,
-        );
+        // The color and Y at their defaults, the point in the middle.
+        let all: Vec<(String, Value)> = cg::PARTS
+            .iter()
+            .map(|p| (param(p), cx.default_of(&param(p))))
+            .collect();
+        set_named(app, cx, &all, key.with("reset"));
     }
     if let Some((picker, tip)) = picker {
         picker_button(&mut bar, app, cx, picker, tip);
     }
-    let values = cx.rgb(rgb);
-    let master = cx.num(y);
-    let (min, max) = cx.range(rgb);
-    let key = egui::Id::new(("cg-wheel", i));
+    let rgb: [f64; 3] = std::array::from_fn(|k| cx.num(&param(cg::PARTS[k])));
+    let master = cx.num(&param("Y"));
+    let dot = [cx.num(&param("U")), cx.num(&param("V"))];
+    // A color typed or slid: the point about where it gives it.
+    let typed = |rgb: [f64; 3]| wheel_settings(stem, rgb, cg::wheel_point(rgb, range, i == 1));
     let inner = body.max_rect();
     if app.color_panel.sliders[i] {
-        body.add_space(6.0);
-        body.horizontal(|ui| {
-            ui.add_space(12.0);
-            let mut v = [values[0], values[1], values[2], master];
-            let mut changed = false;
-            let high = (inner.height() - 60.0).max(40.0);
-            for (k, label) in [tr("Red"), tr("Green"), tr("Blue"), "Y"]
-                .into_iter()
-                .enumerate()
-            {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().slider_width = high;
-                    let r = ui.add(
-                        egui::Slider::new(&mut v[k], min..=max)
-                            .vertical()
-                            .show_value(false),
-                    );
-                    if r.double_clicked() {
-                        v[k] = neutral;
-                    }
-                    changed |= r.changed() || r.double_clicked();
-                    changed |= ui
-                        .add_sized(BOX, field(&mut v[k]).range(min..=max))
-                        .changed();
-                    ui.label(RichText::new(label).size(11.0));
-                });
+        // R, G, B and Y side by side, each its slider over its box.
+        let w = inner.width() / 4.0;
+        let mut v = [rgb[0], rgb[1], rgb[2], master];
+        let mut changed = [false; 4];
+        for (k, label) in [tr("Red"), tr("Green"), tr("Blue"), "Y"]
+            .into_iter()
+            .enumerate()
+        {
+            let x = inner.left() + w * (k as f32 + 0.5);
+            let label_y = inner.bottom() - 10.0;
+            let bx = Rect::from_center_size(pos2(x, label_y - 16.0 - BOX.y / 2.0), BOX);
+            let slider = Rect::from_min_max(
+                pos2(x - 10.0, inner.top() + 8.0),
+                pos2(x + 10.0, bx.top() - 8.0),
+            );
+            if slider.height() > 24.0 {
+                let id = key.with(("slider", k));
+                changed[k] |=
+                    y_slider(&mut body, slider, id, &mut v[k], (min, max), rest).changed();
             }
-            if changed {
-                set(
-                    app,
-                    cx,
-                    &[
-                        (rgb, Value::Num(vec![v[0], v[1], v[2]])),
-                        (y, Value::Num(vec![v[3]])),
-                    ],
-                    key,
-                );
-            }
-        });
+            changed[k] |= number_box(&mut body, bx, &mut v[k], (min, max), false);
+            label_at(&body, pos2(x, label_y), label, Align2::CENTER_CENTER);
+        }
+        if changed[..3].contains(&true) {
+            set_named(app, cx, &typed([v[0], v[1], v[2]]), key);
+        }
+        if changed[3] {
+            set(
+                app,
+                cx,
+                &[(&param("Y"), Value::Num(vec![v[3]]))],
+                key.with("y"),
+            );
+        }
         return;
     }
-    // R, G and B down the right, Y at the bottom, its slider between.
-    let fx = inner.right() - 4.0 - BOX.x;
-    let label_x = fx - 22.0;
-    let mut v = values;
-    let mut typed = false;
-    for (k, label) in ["R:", "G:", "B:"].into_iter().enumerate() {
-        let r = Rect::from_min_size(pos2(fx, inner.top() + 3.0 + k as f32 * 28.0), BOX);
+    // The boxes go when the column is too small for them and a wheel, as
+    // VEGAS's do.
+    let boxes = rect.width() >= 190.0 && rect.height() >= 150.0;
+    let mut m = master;
+    let mut y_changed = false;
+    let room_right = if boxes {
+        // R, G and B down the right, Y at the bottom, its slider between.
+        let fx = inner.right() - 4.0 - BOX.x;
+        let label_x = fx - 22.0;
+        let mut v = rgb;
+        let mut typed_now = false;
+        for (k, label) in ["R:", "G:", "B:"].into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(fx, inner.top() + 3.0 + k as f32 * 28.0), BOX);
+            label_at(
+                &body,
+                pos2(label_x, r.center().y),
+                label,
+                Align2::LEFT_CENTER,
+            );
+            typed_now |= number_box(&mut body, r, &mut v[k], (min, max), false);
+        }
+        if typed_now {
+            set_named(app, cx, &typed(v), key);
+        }
+        let y_box = Rect::from_min_size(pos2(fx, inner.bottom() - 8.0 - BOX.y), BOX);
         label_at(
             &body,
-            pos2(label_x, r.center().y),
-            label,
+            pos2(label_x, y_box.center().y),
+            "Y:",
             Align2::LEFT_CENTER,
         );
-        typed |= body.put(r, field(&mut v[k]).range(min..=max)).changed();
-    }
-    if typed {
-        set(app, cx, &[(rgb, Value::Num(v.to_vec()))], key);
-    }
-    let y_box = Rect::from_min_size(pos2(fx, inner.bottom() - 8.0 - BOX.y), BOX);
-    label_at(
-        &body,
-        pos2(label_x, y_box.center().y),
-        "Y:",
-        Align2::LEFT_CENTER,
-    );
-    let mut m = master;
-    let mut changed = body.put(y_box, field(&mut m).range(min..=max)).changed();
-    let slider = Rect::from_min_max(
-        pos2(
-            fx + BOX.x / 2.0 - 10.0,
-            inner.top() + 3.0 + 2.0 * 28.0 + BOX.y + 14.0,
-        ),
-        pos2(fx + BOX.x / 2.0 + 10.0, y_box.top() - 6.0),
-    );
-    if slider.height() > 24.0 {
-        changed |= y_slider(
-            &mut body,
-            slider,
+        y_changed |= number_box(&mut body, y_box, &mut m, (min, max), false);
+        let slider = Rect::from_min_max(
+            pos2(
+                fx + BOX.x / 2.0 - 10.0,
+                inner.top() + 3.0 + 2.0 * 28.0 + BOX.y + 14.0,
+            ),
+            pos2(fx + BOX.x / 2.0 + 10.0, y_box.top() - 6.0),
+        );
+        if slider.height() > 24.0 {
+            let id = key.with("y");
+            y_changed |= y_slider(&mut body, slider, id, &mut m, (min, max), rest).changed();
+        }
+        label_x - 18.0
+    } else {
+        // Only the Y slider, at the right.
+        let slider = Rect::from_min_max(
+            pos2(inner.right() - 24.0, inner.top() + 8.0),
+            pos2(inner.right() - 4.0, inner.bottom() - 8.0),
+        );
+        if slider.height() > 24.0 {
+            let id = key.with("y");
+            y_changed |= y_slider(&mut body, slider, id, &mut m, (min, max), rest).changed();
+        }
+        slider.left() - 6.0
+    };
+    if y_changed && (m - master).abs() > 1e-12 {
+        set(
+            app,
+            cx,
+            &[(&param("Y"), Value::Num(vec![m]))],
             key.with("y"),
-            &mut m,
-            (min, max),
-            neutral,
-        )
-        .changed();
-    }
-    if changed && (m - master).abs() > 1e-12 {
-        set(app, cx, &[(y, Value::Num(vec![m]))], key.with("y"));
+        );
     }
     // The wheel, as big as the room left of the numbers lets it be.
-    let room = Rect::from_min_max(inner.min, pos2(label_x - 18.0, inner.max.y));
+    let room = Rect::from_min_max(inner.min, pos2(room_right, inner.max.y));
     let d = (room.width() - 18.0).min(room.height() - 22.0).max(60.0);
     let wheel = Rect::from_center_size(room.center(), vec2(d, d));
-    let mut o = values.map(|v| (v - neutral) as f32);
-    if body
-        .put(wheel, |ui: &mut egui::Ui| {
-            crate::widgets::grading_wheel(ui, &mut o, d)
-        })
-        .changed()
-    {
-        let v = o.map(|x| f64::from(x) + neutral);
-        set(app, cx, &[(rgb, Value::Num(v.to_vec()))], key);
+    let color_at =
+        |p: [f64; 2]| offset_color(cg::wheel_values(p[0], p[1], range).map(|v| v - rest));
+    let mut change = None;
+    body.put(wheel, |ui: &mut egui::Ui| {
+        let (resp, c) = crate::widgets::grading_wheel(ui, d, dot, &color_at);
+        change = c;
+        resp
+    });
+    match change {
+        Some(crate::widgets::WheelChange::Moved(p)) => {
+            let v = cg::wheel_values(p[0], p[1], range);
+            set_named(app, cx, &wheel_settings(stem, v, p), key);
+        }
+        Some(crate::widgets::WheelChange::Reset) => {
+            set_named(app, cx, &wheel_settings(stem, [rest; 3], [0.0; 2]), key);
+        }
+        None => {}
     }
     if let Some((picker, _)) = picker {
         // Over the wheel's corner, kept off the numbers.
@@ -1567,8 +1774,8 @@ fn wheel_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, i: usize, rect:
     }
 }
 
-/// A wheel's Y slider, as VEGAS's: lit from the bottom up to its knob, a
-/// mark where it is neutral; a double-click puts it there.
+/// A vertical slider as VEGAS's wheels' Y: lit from the bottom up to its
+/// knob, a mark where it rests; handled as [`slide`] says.
 fn y_slider(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -1581,17 +1788,20 @@ fn y_slider(
     let track = rect.shrink2(vec2(0.0, 5.0));
     let span = (hi - lo).max(1e-12);
     let y_of = |v: f64| track.bottom() - ((v - lo) / span).clamp(0.0, 1.0) as f32 * track.height();
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        *value = lo + f64::from(((track.bottom() - p.y) / track.height()).clamp(0.0, 1.0)) * span;
-        resp.mark_changed();
-    }
-    if resp.double_clicked() {
-        *value = neutral;
-        resp.mark_changed();
-    }
     let x = rect.center().x;
+    let knob = |v: f64| Rect::from_center_size(pos2(x, y_of(v)), vec2(14.0, 9.0));
+    let grabbed = knob(*value);
+    if slide(
+        ui,
+        &resp,
+        value,
+        (lo, hi),
+        neutral,
+        |p| f64::from((track.bottom() - p.y) / track.height()),
+        |p| grabbed.expand(2.0).contains(p),
+    ) {
+        resp.mark_changed();
+    }
     let at = y_of(*value);
     let painter = ui.painter();
     painter.line_segment(
@@ -1607,7 +1817,7 @@ fn y_slider(
         [pos2(x - 7.0, n), pos2(x + 7.0, n)],
         Stroke::new(1.0, theme::text_dim()),
     );
-    let knob = Rect::from_center_size(pos2(x, at), vec2(14.0, 9.0));
+    let knob = knob(*value);
     painter.rect_filled(
         knob,
         2.0,
@@ -1634,25 +1844,26 @@ fn threshold_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, rect: Rect)
     let small = vec2(40.0, BOX.y);
     let hi_box = Rect::from_min_size(pos2(rect.left() + 12.0, inner.top() + 3.0), small);
     let lo_box = Rect::from_min_size(pos2(rect.left() + 12.0, inner.bottom() - 57.0), small);
-    let (lo0, hi0) = (cx.num("lowerThreshold"), cx.num("upperThreshold"));
-    let (mut lo, mut hi) = (lo0, hi0);
-    body.put(hi_box, short_field(&mut hi).range(0.0..=1.0));
-    body.put(lo_box, short_field(&mut lo).range(0.0..=1.0));
+    let names = [cg::LOW_THRESHOLD, cg::HIGH_THRESHOLD];
+    let before = names.map(|n| cx.num(n));
+    let mut pair = before;
+    number_box(&mut body, hi_box, &mut pair[1], (0.0, 1.0), true);
+    number_box(&mut body, lo_box, &mut pair[0], (0.0, 1.0), true);
     let slider = Rect::from_min_max(
         pos2(rect.left() + 12.0, hi_box.bottom() + 8.0),
         pos2(rect.left() + 52.0, lo_box.top() - 8.0),
     );
     if slider.height() > 30.0 {
-        thresholds(&mut body, slider, &mut lo, &mut hi);
+        let defaults = names.map(|n| cx.default_of(n).num(0));
+        thresholds(&mut body, slider, &mut pair, defaults);
     }
-    if (lo - lo0).abs() > 1e-12 || (hi - hi0).abs() > 1e-12 {
-        let lo = lo.min(hi);
+    if pair != before {
         set(
             app,
             cx,
             &[
-                ("lowerThreshold", Value::Num(vec![lo])),
-                ("upperThreshold", Value::Num(vec![hi])),
+                (names[0], Value::Num(vec![pair[0]])),
+                (names[1], Value::Num(vec![pair[1]])),
             ],
             egui::Id::new("cg-thresholds"),
         );
@@ -1672,30 +1883,47 @@ fn threshold_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, rect: Rect)
     }
 }
 
-/// The two thresholds on one vertical slider, as VEGAS's: the upper one's
-/// knob on the left of the line, the lower one's on its right; each
-/// dragged.
-fn thresholds(ui: &mut egui::Ui, rect: Rect, lo: &mut f64, hi: &mut f64) -> bool {
-    let resp = ui.interact(
-        rect,
-        egui::Id::new("cg-threshold-slider"),
-        Sense::click_and_drag(),
-    );
+/// The two thresholds (`pair`: the lower, the upper) on one vertical
+/// slider, as VEGAS's: the upper one's knob on the left of the line, the
+/// lower one's on its right; each handled as [`slide`] says (the knob
+/// under the pointer, or the nearer, takes it), a double-click putting
+/// both at `defaults`.
+fn thresholds(ui: &mut egui::Ui, rect: Rect, pair: &mut [f64; 2], defaults: [f64; 2]) -> bool {
+    let id = egui::Id::new("cg-threshold-slider");
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
     let track = rect.shrink2(vec2(0.0, 6.0));
-    let y_of = |v: f64| track.bottom() - v as f32 * track.height();
+    let y_of = |v: f64| track.bottom() - v.clamp(0.0, 1.0) as f32 * track.height();
     let x = rect.center().x;
-    let mut changed = false;
-    if resp.dragged()
-        && let Some(p) = resp.interact_pointer_pos()
-    {
-        let v = f64::from(((track.bottom() - p.y) / track.height()).clamp(0.0, 1.0));
-        // The nearer knob follows.
-        if (v - *lo).abs() <= (v - *hi).abs() {
-            *lo = v.min(*hi);
-        } else {
-            *hi = v.max(*lo);
-        }
-        changed = true;
+    let knob = |k: usize, v: f64| {
+        let dx = if k == 1 { -7.0 } else { 7.0 };
+        Rect::from_center_size(pos2(x + dx, y_of(v)), vec2(14.0, 9.0))
+    };
+    let before = *pair;
+    let end = id.with("end");
+    let k = if resp.dragged() && !resp.drag_started() {
+        ui.data(|d| d.get_temp::<usize>(end)).unwrap_or(0)
+    } else {
+        let at = ui.input(|i| i.pointer.press_origin().or(i.pointer.hover_pos()));
+        let k = at.map_or(0, |p| {
+            which_knob(p, [knob(0, pair[0]), knob(1, pair[1])], |r| {
+                (p.y - r.center().y).abs()
+            })
+        });
+        ui.data_mut(|d| d.insert_temp(end, k));
+        k
+    };
+    let grabbed = knob(k, pair[k]);
+    slide(
+        ui,
+        &resp,
+        &mut pair[k],
+        (0.0, 1.0),
+        defaults[k],
+        |p| f64::from((track.bottom() - p.y) / track.height()),
+        |p| grabbed.expand(2.0).contains(p),
+    );
+    if resp.double_clicked() {
+        *pair = defaults;
     }
     let painter = ui.painter();
     painter.line_segment(
@@ -1703,11 +1931,11 @@ fn thresholds(ui: &mut egui::Ui, rect: Rect, lo: &mut f64, hi: &mut f64) -> bool
         Stroke::new(1.5, theme::text_dim()),
     );
     painter.line_segment(
-        [pos2(x, y_of(*hi)), pos2(x, y_of(*lo))],
+        [pos2(x, y_of(pair[1])), pos2(x, y_of(pair[0]))],
         Stroke::new(2.0, theme::knob()),
     );
-    for (v, dx) in [(*hi, -7.0), (*lo, 7.0)] {
-        let knob = Rect::from_center_size(pos2(x + dx, y_of(v)), vec2(14.0, 9.0));
+    for (k, v) in pair.iter().enumerate() {
+        let knob = knob(k, *v);
         painter.rect_filled(knob, 2.0, theme::knob());
         painter.hline(
             knob.x_range().shrink(3.0),
@@ -1718,7 +1946,7 @@ fn thresholds(ui: &mut egui::Ui, rect: Rect, lo: &mut f64, hi: &mut f64) -> bool
     resp.on_hover_text(tr(
         "The lower and upper thresholds of the shadows, midtones and highlights",
     ));
-    changed
+    *pair != before
 }
 
 /// A Utilities block's height: its title and its rows.
@@ -1809,7 +2037,7 @@ fn utility(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect
                 row(0, 36.0),
                 input,
                 w,
-                ("inputBlack", "inputWhite"),
+                ("inMinAdjust", "inMaxAdjust"),
             );
             range_row(
                 &mut body,
@@ -1818,16 +2046,16 @@ fn utility(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect
                 row(1, 36.0),
                 output,
                 w,
-                ("outputMin", "outputMax"),
+                ("outMinAdjust", "outMaxAdjust"),
             );
         }
         1 => {
             let rows = [
-                ("brightness", tr("Brightness:")),
-                ("contrast", tr("Contrast:")),
-                ("contrastCenter", tr("Contrast Center:")),
-                ("saturation", tr("Saturation:")),
-                ("logExposure", tr("Log. Exposure:")),
+                ("brightnessAdjust", tr("Brightness:")),
+                ("contrastAdjust", tr("Contrast:")),
+                ("contrastCtrAdjust", tr("Contrast Center:")),
+                ("saturationAdjust", tr("Saturation:")),
+                ("exposureLnAdjust", tr("Log. Exposure:")),
             ];
             let labels: Vec<&str> = rows.iter().map(|r| r.1).collect();
             let w = labels_end(&body, &labels, 128.0);
@@ -1845,12 +2073,12 @@ fn utility(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect
                 app,
                 cx,
                 row(0, 28.0),
-                "temperature",
+                "temperatureAdjust",
                 t,
                 w,
                 &temperature,
             );
-            slider_row(&mut body, app, cx, row(1, 28.0), "tint", n, w, &tint);
+            slider_row(&mut body, app, cx, row(1, 28.0), "tintAdjust", n, w, &tint);
             let mut note = body.new_child(
                 UiBuilder::new()
                     .max_rect(row(2, 28.0).shrink2(vec2(20.0, 2.0)))
@@ -1870,14 +2098,14 @@ fn utility(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect
             ];
             let (h, sat, lum) = (tr("Hue:"), tr("Sat:"), tr("Luminance:"));
             let w = labels_end(&body, &[h, sat, lum], 112.0);
-            slider_row(&mut body, app, cx, row(0, 28.0), "hue", h, w, &hues);
+            slider_row(&mut body, app, cx, row(0, 28.0), "hueAdjust", h, w, &hues);
             let grey_red = [Color32::from_gray(128), rgb(220, 40, 40)];
             slider_row(
                 &mut body,
                 app,
                 cx,
                 row(1, 28.0),
-                "hslSaturation",
+                "satAdjust",
                 sat,
                 w,
                 &grey_red,
@@ -1888,7 +2116,7 @@ fn utility(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: Rect
                 app,
                 cx,
                 row(2, 28.0),
-                "luminance",
+                "valAdjust",
                 lum,
                 w,
                 &black_white,
@@ -1908,25 +2136,25 @@ fn curves_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect
 
 /// The Color Curves column: Reset and Select Curves on its title row;
 /// Brightness, Red, Green and Blue in one graph, or side by side when the
-/// column is wide (`grading_curves.rs`).
+/// column is wide (`grading_curves.rs`). Each curve is kept as its text,
+/// as VEGAS's is.
 fn color_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, rect: Rect) {
     let (mut bar, mut body) = column(ui, rect, tr("Color Curves"), false);
-    let Some(info) = cx.info("curves").cloned() else {
-        return;
-    };
     let id = egui::Id::new("cg-curves");
     if reset_button(&mut bar) {
-        set(app, cx, &[("curves", cx.default_of("curves"))], id);
+        let values: Vec<(&str, Value)> = COLOR_CURVES
+            .iter()
+            .map(|n| (*n, cx.default_of(n)))
+            .collect();
+        set(app, cx, &values, id);
     }
-    let mut curves = match cx.value("curves") {
-        Value::Curves(c) => c,
-        _ => Vec::new(),
-    };
-    curves.resize(info.curves.max(1) as usize, Vec::new());
-    let labels: Vec<String> = info
-        .dimension_labels
+    let curves: Vec<Vec<CurvePoint>> = COLOR_CURVES
         .iter()
-        .map(|l| tr(l).to_string())
+        .map(|n| cg::curve_points(&cx.text(n), false))
+        .collect();
+    let labels: Vec<String> = [tr("Brightness"), tr("Red"), tr("Green"), tr("Blue")]
+        .into_iter()
+        .map(str::to_string)
         .collect();
     let mut graph = body.new_child(
         UiBuilder::new()
@@ -1937,8 +2165,52 @@ fn color_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, rect: Rect) {
     let out = crate::grading_curves::editor(&mut graph, &mut view, id, &curves, &labels, &mut bar);
     app.color_panel.curves = view;
     if let Some(c) = out {
-        set(app, cx, &[("curves", Value::Curves(c))], id);
+        let values: Vec<(&str, Value)> = COLOR_CURVES
+            .iter()
+            .zip(c.iter().zip(&curves))
+            .filter(|(_, (new, old))| new != old)
+            .map(|(n, (new, _))| (*n, curve_value(cx, n, new, false)))
+            .collect();
+        if !values.is_empty() {
+            set(app, cx, &values, id);
+        }
     }
+}
+
+/// A curve's value from its points: its text as VEGAS's panel writes it
+/// (`hue`: a hue curve's, round the turn), every point given handles; no
+/// points, the untouched text.
+fn curve_value(cx: &Cx, name: &str, points: &[CurvePoint], hue: bool) -> Value {
+    if points.is_empty() {
+        return cx.default_of(name);
+    }
+    let points = cg::flat_handles(points);
+    Value::Text(if hue {
+        cg::hue_curve_text(&points)
+    } else {
+        cg::color_curve_text(&points)
+    })
+}
+
+/// An HSL curve's point as the editor has it — 0 where the curve changes
+/// nothing, −1 to 1 — from the effect's (0.5 there, 0 to 1).
+fn to_editor(mut p: CurvePoint) -> CurvePoint {
+    p.y = 2.0 * p.y - 1.0;
+    if let Some(h) = &mut p.handles {
+        h.before[1] *= 2.0;
+        h.after[1] *= 2.0;
+    }
+    p
+}
+
+/// The effect's point of the editor's.
+fn from_editor(mut p: CurvePoint) -> CurvePoint {
+    p.y = (p.y + 1.0) / 2.0;
+    if let Some(h) = &mut p.handles {
+        h.before[1] /= 2.0;
+        h.after[1] /= 2.0;
+    }
+    p
 }
 
 /// The HSL Curves: the type picked, its spectrum, its points (a
@@ -1959,15 +2231,14 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
             .layout(Layout::left_to_right(Align::Center)),
     );
     let ui = &mut body;
-    let mut all = match cx.value("hslCurves") {
-        Value::Curves(c) => c,
-        _ => Vec::new(),
-    };
-    all.resize(HSL_KINDS.len(), Vec::new());
     let kind = app.color_panel.hsl.kind.min(HSL_KINDS.len() - 1);
-    let mut curve = all[kind].clone();
-    let mut changed = false;
+    let name = cg::CURVES[4 + kind];
     let hue_axis = kind < 3;
+    let mut curve: Vec<CurvePoint> = cg::curve_points(&cx.text(name), hue_axis)
+        .into_iter()
+        .map(to_editor)
+        .collect();
+    let mut changed = false;
     let selecting = app
         .color_panel
         .picking
@@ -2032,15 +2303,18 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
                 Color32::from_rgb(r, g, b),
             );
             if resp.on_hover_text(name).clicked() {
-                let x = h as f64;
-                let y = hsl_at(&curve, x, hue_axis);
-                curve.push(bv_core::curve::CurvePoint {
-                    x,
-                    y,
-                    handles: None,
-                });
+                // As VEGAS's: the color and its two neighbours, where the
+                // curve changes nothing, their handles level.
+                let x = f64::from(h);
+                for d in [0.0, 1.0 / 6.0, -1.0 / 6.0] {
+                    let at = (x + d).rem_euclid(1.0);
+                    if !curve.iter().any(|p| distance(p.x, at, true) < 1e-3) {
+                        curve.push(CurvePoint::new(at, 0.0));
+                    }
+                }
                 curve.sort_by(|a, b| a.x.total_cmp(&b.x));
-                view.picked = curve.iter().position(|p| (p.x - x).abs() < 1e-9);
+                level_new(&mut curve, true);
+                view.picked = curve.iter().position(|p| distance(p.x, x, true) < 1e-3);
                 changed = true;
             }
         }
@@ -2056,15 +2330,15 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
     if let Some(i) = view.picked.filter(|&i| i < curve.len()) {
         head.add_space(6.0);
         let mut x = curve[i].x;
-        let mut y = curve[i].y;
+        let mut y = (curve[i].y + 1.0) / 2.0;
         changed |= head
             .add_sized(BOX, field(&mut x).speed(0.002).range(0.0..=1.0))
             .changed();
         changed |= head
-            .add_sized(BOX, field(&mut y).speed(0.002).range(-1.0..=1.0))
+            .add_sized(BOX, field(&mut y).speed(0.002).range(0.0..=1.0))
             .changed();
         curve[i].x = x;
-        curve[i].y = y;
+        curve[i].y = 2.0 * y - 1.0;
     }
     let width = (ui.available_width() - 8.0).max(160.0);
     let height = (ui.available_height() - if hue_axis { 20.0 } else { 6.0 }).max(80.0);
@@ -2286,19 +2560,14 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
     {
         match near(&curve, p) {
             Some(i) => {
-                curve.remove(i);
-                view.picked = None;
+                crate::grading_curves::flatten(&mut curve, i, hue_axis);
+                view.picked = Some(i);
             }
             None => {
-                let (x, _) = from_screen(p);
-                let y = hsl_at(&curve, x, hue_axis);
-                curve.push(bv_core::curve::CurvePoint {
-                    x,
-                    y,
-                    handles: None,
-                });
-                curve.sort_by(|a, b| a.x.total_cmp(&b.x));
-                view.picked = curve.iter().position(|q| (q.x - x).abs() < 1e-9);
+                let (x, y) = from_screen(p);
+                let (added, i) = crate::grading_curves::add_dot(&curve, [x, y], hue_axis);
+                curve = added;
+                view.picked = Some(i);
             }
         }
         changed = true;
@@ -2386,9 +2655,9 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
                 changed = true;
                 ui.close();
             }
-            // Its tangents worked out again: a gradual start and end.
+            // The curve's tangents worked out again: smooth.
             if crate::menus::item(ui, tr("Smooth curves")) {
-                curve[i].handles = None;
+                crate::grading_curves::smooth(&mut curve, hue_axis);
                 changed = true;
                 ui.close();
             }
@@ -2409,7 +2678,7 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
             ui.separator();
             if ui.button(tr("Reset")).clicked() {
                 curve[i].y = 0.0;
-                curve[i].handles = None;
+                crate::grading_curves::flatten(&mut curve, i, hue_axis);
                 changed = true;
                 ui.close();
             }
@@ -2443,12 +2712,9 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
                 app.color_panel.hue_picker = None;
                 if let Some(x) = hue_of(c).filter(|_| hue_axis) {
                     let y = hsl_at(&curve, x, true);
-                    curve.push(bv_core::curve::CurvePoint {
-                        x,
-                        y,
-                        handles: None,
-                    });
+                    curve.push(CurvePoint::new(x, y));
                     curve.sort_by(|a, b| a.x.total_cmp(&b.x));
+                    level_new(&mut curve, true);
                     app.color_panel.hsl.picked = curve.iter().position(|p| (p.x - x).abs() < 1e-9);
                     changed = true;
                 }
@@ -2456,13 +2722,9 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
         }
     }
     if changed {
-        all[kind] = curve;
-        set(
-            app,
-            cx,
-            &[("hslCurves", Value::Curves(all))],
-            egui::Id::new("cg-hsl"),
-        );
+        let points: Vec<CurvePoint> = curve.into_iter().map(from_editor).collect();
+        let value = curve_value(cx, name, &points, hue_axis);
+        set(app, cx, &[(name, value)], egui::Id::new("cg-hsl"));
     }
     if toggle_selector {
         if selecting {
@@ -2697,15 +2959,13 @@ fn apply_pick(app: &mut BananaApp, cx: &Cx, picker: Picker, colors: &[[f32; 3]],
         return;
     }
     if let Picker::Selector(n) = picker {
-        let before: Vec<f64> = match cx.value("hslCurves") {
-            Value::Curves(c) => c
-                .get(n)
-                .map_or_else(Vec::new, |c| c.iter().map(|p| p.x).collect()),
-            _ => Vec::new(),
-        };
-        if let Some((_, Value::Curves(c))) = new.iter().find(|(name, _)| name == "hslCurves")
-            && let Some(curve) = c.get(n)
-        {
+        let name = cg::CURVES[4 + n.min(5)];
+        let before: Vec<f64> = cg::curve_points(&cx.text(name), n < 3)
+            .iter()
+            .map(|p| p.x)
+            .collect();
+        if let Some((_, Value::Text(t))) = new.iter().find(|(k, _)| k == name) {
+            let curve = cg::curve_points(t, n < 3);
             let added: Vec<usize> = (0..curve.len())
                 .filter(|&i| !before.iter().any(|x| (x - curve[i].x).abs() < 1e-9))
                 .collect();
@@ -2760,7 +3020,7 @@ pub(crate) fn scope_limits(app: &BananaApp) -> Option<[f64; 2]> {
         return None;
     }
     let cx = context(app)?;
-    Some([cx.num("lowerThreshold"), cx.num("upperThreshold")])
+    Some([cx.num(cg::LOW_THRESHOLD), cx.num(cg::HIGH_THRESHOLD)])
 }
 
 /// Opens the panel at `level` (the event's, the track's, the media's or
@@ -2806,37 +3066,34 @@ pub(crate) fn grade_for_review(app: &mut BananaApp) {
     let Some(cx) = context(app) else {
         return;
     };
-    let p = |x: f64, y: f64| bv_core::curve::CurvePoint {
-        x,
-        y,
-        handles: None,
-    };
-    let straight = vec![p(0.0, 0.0), p(1.0, 1.0)];
-    let mut hsl = vec![Vec::new(); 6];
-    hsl[1] = vec![p(0.0, -0.4), p(0.33, 0.3), p(0.66, 0.0)];
+    let mut values: Vec<(String, Value)> = Vec::new();
+    for (i, rgb) in [
+        (0, [0.06, 0.02, -0.03]),
+        (2, [1.08, 1.0, 0.94]),
+        (4, [-0.02, 0.0, 0.05]),
+    ] {
+        let (stem, _) = WHEELS[i];
+        let dot = cg::wheel_point(rgb, wheel_range(i), false);
+        values.extend(wheel_settings(stem, rgb, dot));
+    }
+    let red = cg::color_curve_text(&cg::flat_handles(&[
+        CurvePoint::new(0.0, 0.0),
+        CurvePoint::new(0.5, 0.58),
+        CurvePoint::new(1.0, 1.0),
+    ]));
+    let hue_sat = cg::hue_curve_text(&cg::flat_handles(&[
+        CurvePoint::new(0.0, 0.3),
+        CurvePoint::new(0.33, 0.65),
+        CurvePoint::new(0.66, 0.5),
+    ]));
+    values.extend([
+        ("gammaY".to_string(), Value::Num(vec![1.1])),
+        ("contrastAdjust".to_string(), Value::Num(vec![0.15])),
+        ("curveR".to_string(), Value::Text(red)),
+        ("curveHvS".to_string(), Value::Text(hue_sat)),
+    ]);
     app.color_panel.hsl.kind = 1;
-    set(
-        app,
-        &cx,
-        &[
-            ("lift", Value::Num(vec![0.06, 0.02, -0.03])),
-            ("gain", Value::Num(vec![1.08, 1.0, 0.94])),
-            ("gammaY", Value::Num(vec![1.1])),
-            ("shadows", Value::Num(vec![-0.02, 0.0, 0.05])),
-            ("contrast", Value::Num(vec![0.15])),
-            (
-                "curves",
-                Value::Curves(vec![
-                    straight.clone(),
-                    vec![p(0.0, 0.0), p(0.5, 0.58), p(1.0, 1.0)],
-                    straight.clone(),
-                    straight,
-                ]),
-            ),
-            ("hslCurves", Value::Curves(hsl)),
-        ],
-        egui::Id::new("cg-review"),
-    );
+    set_named(app, &cx, &values, egui::Id::new("cg-review"));
 }
 
 /// A color's hue (a turn's 0–1); greys have none.
@@ -2855,6 +3112,16 @@ fn hue_of([r, g, b, _]: [u8; 4]) -> Option<f64> {
         (r - g) / d + 4.0
     };
     Some(h / 6.0)
+}
+
+/// The points of `c` without handles given level ones, as VEGAS's new
+/// points have (`wrap`: a hue curve's).
+fn level_new(c: &mut [CurvePoint], wrap: bool) {
+    for i in 0..c.len() {
+        if c[i].handles.is_none() {
+            crate::grading_curves::flatten(c, i, wrap);
+        }
+    }
 }
 
 /// An HSL curve at `x`: a hue curve wraps round red (its points a turn
@@ -2900,7 +3167,7 @@ mod tests {
             return;
         };
         assert!(cx.index.is_none());
-        assert_eq!(cx.num("gain"), 1.0);
+        assert_eq!(cx.num("gainR"), 1.0);
         set(
             &mut app,
             &cx,
@@ -2977,11 +3244,11 @@ mod tests {
         assert!(cx.index.is_some() && cx.effect_key().is_some());
         assert!(app.ofx.watch_held);
         apply_pick(&mut app, &cx, Picker::BlackPoint, &[[0.1, 0.1, 0.1]], false);
-        let lift = context(&app).unwrap().rgb("lift");
-        assert!(
-            lift.iter().all(|l| (l + 0.1 / 0.9).abs() < 1e-4),
-            "{lift:?}"
-        );
+        // VEGAS's: each channel between Lift's ends, the color turned over.
+        let cx = context(&app).unwrap();
+        let lift = ["liftR", "liftG", "liftB"].map(|n| cx.num(n));
+        assert!(lift.iter().all(|l| (l - 0.8).abs() < 1e-9), "{lift:?}");
+        assert!(cx.num("liftU") != 0.0, "the point follows the color");
         end_frame(&mut app);
         assert!(app.color_panel.picking.is_none() && !app.ofx.watch_held);
         app.color_panel.level = Level::VideoOutput;

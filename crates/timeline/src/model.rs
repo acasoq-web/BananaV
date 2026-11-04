@@ -2,6 +2,7 @@ use bv_core::{ChannelLayout, FrameRate, SampleRate, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
 use crate::fx::{Effect, FadeCurve, PluginFx, Transform, TransformKey, Transition};
+use crate::pancrop::{PanCrop, PanCropKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -585,11 +586,15 @@ pub struct Clip {
     /// default: the Pan/Crop first.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub pan_crop_at: usize,
-    #[serde(default)]
-    pub transform: Transform,
-    /// Quadros-chave do enquadramento (vazio = `transform` fixo).
-    #[serde(default)]
-    pub transform_keys: Vec<TransformKey>,
+    /// Its Pan/Crop: which part of its media goes to the frame, over time.
+    #[serde(default, skip_serializing_if = "PanCrop::is_unset")]
+    pub pan_crop: PanCrop,
+    /// The framing a project saved before the Pan/Crop's box had
+    /// (`Project::from_json` brings it in).
+    #[serde(default, rename = "transform", skip_serializing)]
+    pub(crate) old_framing: Option<Transform>,
+    #[serde(default, rename = "transform_keys", skip_serializing)]
+    pub(crate) old_framing_keys: Vec<TransformKey>,
     /// Its Pan/Crop masks (the Pan/Crop window's Mask row): shapes on its
     /// media that cut what shows of it, or keep its effects inside them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -734,8 +739,9 @@ impl Clip {
             transition_bypass: false,
             effects: Vec::new(),
             pan_crop_at: 0,
-            transform: Transform::default(),
-            transform_keys: Vec::new(),
+            pan_crop: PanCrop::default(),
+            old_framing: None,
+            old_framing_keys: Vec::new(),
             mask: None,
             muted: false,
             locked: false,
@@ -905,9 +911,10 @@ impl Clip {
         }
     }
 
-    /// Enquadramento no instante `t` da timeline (com quadros-chave).
-    pub fn transform_at(&self, t: Tick) -> Transform {
-        crate::fx::transform_at(&self.transform_keys, &self.transform, t - self.start)
+    /// Its Pan/Crop's box at `t` on the timeline, in a media of `media`
+    /// pixels `aspect` wide.
+    pub fn box_at(&self, t: Tick, media: [f64; 2], aspect: f64) -> PanCropKey {
+        self.pan_crop.at_time(t, self.start, media, aspect)
     }
 
     /// How many times higher its sound plays: its pitch change, and its
@@ -2620,7 +2627,48 @@ impl Project {
         p.upgrade_notes();
         p.upgrade_plugin_fx();
         p.upgrade_fade_outs();
+        p.upgrade_pan_crops();
         Ok(p)
+    }
+
+    /// Events saved before the Pan/Crop's box: the box each framing shows.
+    fn upgrade_pan_crops(&mut self) {
+        let Project {
+            tracks,
+            media,
+            settings,
+            ..
+        } = self;
+        for c in tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+            let framing = c.old_framing.take();
+            let keys = std::mem::take(&mut c.old_framing_keys);
+            let Some(info) = media.iter().find(|m| m.id == c.media) else {
+                continue;
+            };
+            let mut place = crate::pancrop::place_in(settings, info, true, true);
+            let framing = framing.unwrap_or_default();
+            if keys.is_empty() && framing == Transform::default() {
+                continue;
+            }
+            place.keep_aspect = keys.first().map_or(&framing, |k| &k.value).keeps_aspect();
+            place.fill = keys.first().map_or(&framing, |k| &k.value).fill_frame;
+            let key = |k: &TransformKey| PanCropKey {
+                at: k.at,
+                curve: k.curve,
+                smoothness: f64::from(k.smoothness / 100.0),
+                ..crate::pancrop::key_from_transform(&k.value, &place)
+            };
+            c.pan_crop = PanCrop {
+                size: [place.media[0] as u32, place.media[1] as u32],
+                keep_aspect: place.keep_aspect,
+                fill: place.fill,
+                keys: if keys.is_empty() {
+                    vec![crate::pancrop::key_from_transform(&framing, &place)]
+                } else {
+                    keys.iter().map(key).collect()
+                },
+            };
+        }
     }
 
     /// Projects saved before format 2 named a fade-out by its fade-in

@@ -398,8 +398,7 @@ impl ClipWindows {
                             c.pan_crop_at = src.pan_crop_at;
                         }
                         if o.framing && kind == TrackKind::Video {
-                            c.transform = src.transform;
-                            c.transform_keys = src.transform_keys.clone();
+                            c.pan_crop = src.pan_crop.clone();
                         }
                         if o.fades {
                             c.fade_in = src.fade_in.min(c.duration);

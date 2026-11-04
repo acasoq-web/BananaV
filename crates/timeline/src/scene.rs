@@ -9,7 +9,7 @@
 
 use bv_core::{FrameRate, ImageRgbaF32, Tick};
 
-use crate::fx::{Effect, FadeCurve, PluginFx, Transform, Transition};
+use crate::fx::{Effect, FadeCurve, PluginFx, Transition};
 use crate::model::{Clip, ClipId, MediaId, MediaInfo, Project, RenderQuality, Track, TrackId};
 
 /// What an effect belongs to.
@@ -94,13 +94,13 @@ pub struct FxSource<'a> {
 /// first in the event's chain): the media's own effects (the chain's
 /// first `framed_at`) work on its picture, `media_size` big, their sizes
 /// scaled by `media_fx_scale`; then the event's Pan/Crop places it in the
-/// frame, its pixels `par` times as wide as the frame's, at `quality`.
+/// frame as `place` says, at `quality`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Framing {
     pub framed_at: usize,
     pub media_size: (u32, u32),
     pub media_fx_scale: f32,
-    pub par: f32,
+    pub place: crate::pancrop::PlaceIn,
     pub quality: RenderQuality,
 }
 
@@ -442,7 +442,10 @@ pub struct MediaLayer<'a> {
     /// The size the picture shows at: a reader may give a reduced picture
     /// as long as it covers this.
     pub min_size: (u32, u32),
-    pub transform: Transform,
+    /// Where its Pan/Crop puts it on the frame drawn, and what that depends
+    /// on besides the box.
+    pub placement: crate::pancrop::Placement,
+    pub place: crate::pancrop::PlaceIn,
     pub quality: RenderQuality,
     /// The media's effects, then the event's (enabled video ones).
     pub effects: Vec<SceneFx<'a>>,
@@ -496,7 +499,10 @@ impl MediaLayer<'_> {
         static KEPT: Mutex<Kept> = Mutex::new(Vec::new());
         let mask = self.clip.mask.as_ref().filter(|k| k.active())?;
         let (mw, mh) = self.info.video.map_or((w, h), |v| (v.width, v.height));
-        let key = mask.fingerprint(self.local, [w, h, mw, mh]);
+        // The frame's time cut down to the box's unit, as the box's.
+        let t = crate::pancrop::units_floor(self.clip.start + self.local)
+            - crate::pancrop::units_near(self.clip.start);
+        let key = mask.fingerprint(t, [w, h, mw, mh]);
         let found = KEPT.lock().ok().and_then(|kept| {
             kept.iter()
                 .find(|(k, _)| *k == key)
@@ -506,7 +512,7 @@ impl MediaLayer<'_> {
             return found;
         }
         let scale = [w as f64 / mw.max(1) as f64, h as f64 / mh.max(1) as f64];
-        let keep = mask.coverage(self.local, w as usize, h as usize, scale, mw.min(mh) as f64);
+        let keep = mask.coverage(t, w as usize, h as usize, scale, self.place.media_aspect);
         let picture = Arc::new(bv_core::ImageRgbaF32 {
             width: w,
             height: h,
@@ -1006,30 +1012,27 @@ fn event_layer<'a>(
 ) -> EventLayer<'a> {
     let source = project.media(clip.media).and_then(|info| {
         let time = media_time(clip, info, t)?;
-        let mut transform = clip.transform_at(t);
         let par = info.video.map_or(1.0, |v| v.pixel_aspect.ratio())
             / project.settings.pixel_aspect.ratio();
-        // Adjust source media to better match project or render settings:
-        // the picture enlarged to fill the frame (as a Pan/Crop would).
-        let s = &project.settings;
-        if s.adjust_source
-            && let Some(v) = info.video
-        {
-            transform.scale *= adjust_factor(v.width, v.height, par, s.width, s.height);
-        }
+        let place = crate::pancrop::place_in(
+            &project.settings,
+            info,
+            clip.pan_crop.keep_aspect,
+            clip.pan_crop.fill,
+        );
+        let placement = place.at(clip, t, [f64::from(width), f64::from(height)]);
         // The size the media shows at, in its own pixels: the reader may
         // give less.
-        let min_size = info.video.map_or((u32::MAX, u32::MAX), |v| {
-            let fit = fit_rect_par(v.width, v.height, par, width, height);
-            let s = transform.scale.max(0.05);
-            ((fit.w / par * s).ceil() as u32, (fit.h * s).ceil() as u32)
-        });
+        let min_size = info
+            .video
+            .map_or((u32::MAX, u32::MAX), |_| placement.size_needed());
         Some(MediaLayer {
             info,
             clip,
             time,
             min_size,
-            transform,
+            placement,
+            place,
             par,
             quality: project.settings.render_quality,
             effects: chain(info, clip),
@@ -1681,15 +1684,17 @@ mod tests {
         info.video.as_mut().unwrap().height = 486;
         let m = p.add_media(info);
         p.insert_media(m, Tick::ZERO, Some(v), None).unwrap();
+        // How many of the frame's pixels a line of the media takes.
         let scale = |p: &Project| {
             event_layer(p, &p.tracks[0].clips[0], Tick::ZERO, 720, 480)
                 .source
-                .map(|m| m.transform.scale)
+                .map(|m| 1.0 / m.placement.media_per_pixel().1)
         };
         assert!(p.settings.adjust_source, "on for new projects");
-        assert!((scale(&p).unwrap() - 486.0 / 480.0).abs() < 1e-4);
+        let fitted = 480.0 / 486.0;
+        assert!((scale(&p).unwrap() - fitted * 486.0 / 480.0).abs() < 2e-3);
         p.settings.adjust_source = false;
-        assert!((scale(&p).unwrap() - 1.0).abs() < 1e-6);
+        assert!((scale(&p).unwrap() - fitted).abs() < 1e-4);
     }
 
     #[test]

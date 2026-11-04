@@ -237,6 +237,7 @@ fn file_menu(ui: &mut Ui, app: &mut BananaApp) {
         cmd(ui, app, Cmd::ImportFcpxml);
         cmd(ui, app, Cmd::ImportEdl);
         cmd(ui, app, Cmd::ImportOtio);
+        cmd(ui, app, Cmd::ImportVeg);
         cmd(ui, app, Cmd::ImportDvdCamcorder);
         cmd(ui, app, Cmd::ImportBwf);
         cmd(ui, app, Cmd::ImportClosedCaptioning);
@@ -249,6 +250,7 @@ fn file_menu(ui: &mut Ui, app: &mut BananaApp) {
         cmd(ui, app, Cmd::ExportFcpxml);
         cmd(ui, app, Cmd::ExportEdl);
         cmd(ui, app, Cmd::ExportOtio);
+        cmd(ui, app, Cmd::ExportVeg);
     });
     if item(ui, tr("Screen Capture…")) {
         app.open_screen_capture();

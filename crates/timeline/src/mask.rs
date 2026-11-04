@@ -18,19 +18,22 @@ use crate::fx::KeyCurve;
 /// tangents' ends from it, toward the anchor before and the one after.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MaskAnchor {
-    pub at: [f32; 2],
+    pub at: [f64; 2],
     #[serde(default)]
-    pub before: [f32; 2],
+    pub before: [f64; 2],
     #[serde(default)]
-    pub after: [f32; 2],
+    pub after: [f64; 2],
     /// Its tangents turn apart (Split Tangents); else they stay in line.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split: bool,
+    /// In line, they are also as long as each other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub even: bool,
 }
 
 impl MaskAnchor {
     /// A corner: no tangents.
-    pub fn corner(at: [f32; 2]) -> MaskAnchor {
+    pub fn corner(at: [f64; 2]) -> MaskAnchor {
         MaskAnchor {
             at,
             ..MaskAnchor::default()
@@ -104,24 +107,31 @@ pub struct MaskPath {
     pub anti_alias: bool,
     /// How much of what it masks goes (0–1).
     #[serde(default = "one")]
-    pub opacity: f32,
+    pub opacity: f64,
     #[serde(default)]
     pub feather: MaskFeather,
     /// How far its edge softens: a percentage of the media's shorter side.
     #[serde(default)]
-    pub feather_pct: f32,
+    pub feather_pct: f64,
+    /// Whether it closes; an open path masks nothing.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub closed: bool,
+}
+
+fn is_yes(v: &bool) -> bool {
+    *v
 }
 
 fn yes() -> bool {
     true
 }
 
-fn one() -> f32 {
+fn one() -> f64 {
     1.0
 }
 
 /// The kappa that makes four cubic Béziers a circle.
-const KAPPA: f32 = 0.552_284_8;
+const KAPPA: f64 = 0.552_284_749_830_793_6;
 
 impl MaskPath {
     /// A path of `anchors`, positive, anti-aliased, opaque, not feathered.
@@ -133,11 +143,12 @@ impl MaskPath {
             opacity: 1.0,
             feather: MaskFeather::None,
             feather_pct: 0.0,
+            closed: true,
         }
     }
 
     /// A rectangle from corner `a` to corner `b`.
-    pub fn rectangle(a: [f32; 2], b: [f32; 2]) -> MaskPath {
+    pub fn rectangle(a: [f64; 2], b: [f64; 2]) -> MaskPath {
         let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
         let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
         MaskPath::new(
@@ -149,16 +160,17 @@ impl MaskPath {
 
     /// A rectangle from `a` to `b` with its corners rounded by `r` (a
     /// part, 0–½, of its shorter side).
-    pub fn rounded(a: [f32; 2], b: [f32; 2], r: f32) -> MaskPath {
+    pub fn rounded(a: [f64; 2], b: [f64; 2], r: f64) -> MaskPath {
         let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
         let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
         let r = r.clamp(0.0, 0.5) * (x1 - x0).min(y1 - y0);
         let k = r * KAPPA;
-        let side = |at: [f32; 2], before: [f32; 2], after: [f32; 2]| MaskAnchor {
+        let side = |at: [f64; 2], before: [f64; 2], after: [f64; 2]| MaskAnchor {
             at,
             before,
             after,
             split: true,
+            even: false,
         };
         MaskPath::new(vec![
             side([x0 + r, y0], [-k, 0.0], [0.0, 0.0]),
@@ -173,15 +185,16 @@ impl MaskPath {
     }
 
     /// An oval filling the box from `a` to `b`.
-    pub fn oval(a: [f32; 2], b: [f32; 2]) -> MaskPath {
+    pub fn oval(a: [f64; 2], b: [f64; 2]) -> MaskPath {
         let c = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
         let (rx, ry) = ((b[0] - a[0]).abs() / 2.0, (b[1] - a[1]).abs() / 2.0);
         let (kx, ky) = (rx * KAPPA, ry * KAPPA);
-        let smooth = |at: [f32; 2], t: [f32; 2]| MaskAnchor {
+        let smooth = |at: [f64; 2], t: [f64; 2]| MaskAnchor {
             at,
             before: [-t[0], -t[1]],
             after: t,
             split: false,
+            even: true,
         };
         MaskPath::new(vec![
             smooth([c[0], c[1] - ry], [kx, 0.0]),
@@ -193,7 +206,7 @@ impl MaskPath {
 
     /// The upper half of the oval filling the box from `a` to `b` (its
     /// flat side the box's middle line).
-    pub fn half_oval(a: [f32; 2], b: [f32; 2]) -> MaskPath {
+    pub fn half_oval(a: [f64; 2], b: [f64; 2]) -> MaskPath {
         let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
         let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
         let (rx, ry) = ((x1 - x0) / 2.0, y1 - y0);
@@ -205,24 +218,27 @@ impl MaskPath {
                 before: [0.0, 0.0],
                 after: [0.0, -ky],
                 split: true,
+                even: false,
             },
             MaskAnchor {
                 at: [cx, y0],
                 before: [-kx, 0.0],
                 after: [kx, 0.0],
                 split: false,
+                even: true,
             },
             MaskAnchor {
                 at: [x1, y1],
                 before: [0.0, -ky],
                 after: [0.0, 0.0],
                 split: true,
+                even: false,
             },
         ])
     }
 
     /// Its anchors' bounding box (`None` without anchors).
-    pub fn bounds(&self) -> Option<([f32; 2], [f32; 2])> {
+    pub fn bounds(&self) -> Option<([f64; 2], [f64; 2])> {
         bounds(&self.anchors)
     }
 }
@@ -259,7 +275,7 @@ pub fn offset_polygon(poly: &[[f64; 2]], d: f64) -> Vec<[f64; 2]> {
 }
 
 /// `anchors`' bounding box.
-pub fn bounds(anchors: &[MaskAnchor]) -> Option<([f32; 2], [f32; 2])> {
+pub fn bounds(anchors: &[MaskAnchor]) -> Option<([f64; 2], [f64; 2])> {
     let first = anchors.first()?.at;
     Some(anchors.iter().fold((first, first), |(lo, hi), a| {
         (
@@ -278,6 +294,144 @@ pub struct MaskKey {
     pub shapes: Vec<Vec<MaskAnchor>>,
     #[serde(default)]
     pub curve: KeyCurve,
+    /// Each path's settings here, in the paths' order, where they have their
+    /// own (none: the path's all along).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looks: Vec<MaskLook>,
+}
+
+/// A path's settings at a keyframe.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaskLook {
+    pub mode: MaskMode,
+    pub anti_alias: bool,
+    pub opacity: f64,
+    pub feather: MaskFeather,
+    pub feather_pct: f64,
+}
+
+impl MaskLook {
+    fn of(p: &MaskPath) -> MaskLook {
+        MaskLook {
+            mode: p.mode,
+            anti_alias: p.anti_alias,
+            opacity: p.opacity,
+            feather: p.feather,
+            feather_pct: p.feather_pct,
+        }
+    }
+
+    fn on(&self, p: &MaskPath) -> MaskPath {
+        MaskPath {
+            mode: self.mode,
+            anti_alias: self.anti_alias,
+            opacity: self.opacity,
+            feather: self.feather,
+            feather_pct: self.feather_pct,
+            ..p.clone()
+        }
+    }
+}
+
+/// An angle a little under a half turn each way: the short way round.
+fn short_way(d: f64) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    if d > PI {
+        d - TAU
+    } else if d < -PI {
+        d + TAU
+    } else {
+        d
+    }
+}
+
+fn lerp(a: f64, b: f64, u: f64) -> f64 {
+    (b - a) * u + a
+}
+
+fn lerp2(a: [f64; 2], b: [f64; 2], u: f64) -> [f64; 2] {
+    [lerp(a[0], b[0], u), lerp(a[1], b[1], u)]
+}
+
+/// A tangent as its direction back to the anchor and its length.
+fn polar(t: [f64; 2]) -> (f64, f64) {
+    ((-t[1]).atan2(-t[0]), t[0].hypot(t[1]))
+}
+
+/// An anchor between two keyframes, `u` of the way: its point straight, its
+/// tangents turning and growing the short way round when they have lengths.
+fn anchor_between(a: &MaskAnchor, b: &MaskAnchor, u: f64) -> MaskAnchor {
+    if u <= 0.0 {
+        return *a;
+    }
+    if u >= 1.0 {
+        return *b;
+    }
+    let at = lerp2(a.at, b.at, u);
+    let bare = |k: &MaskAnchor| {
+        k.before[0].abs() < 1e-9
+            && k.before[1].abs() < 1e-9
+            && k.after[0].abs() < 1e-9
+            && k.after[1].abs() < 1e-9
+    };
+    let (split, even) = match (bare(a), bare(b)) {
+        (true, true) => {
+            return MaskAnchor {
+                at,
+                before: [0.0; 2],
+                after: [0.0; 2],
+                split: false,
+                even: false,
+            };
+        }
+        (true, false) | (false, true) => {
+            let k = if bare(a) { b } else { a };
+            return MaskAnchor {
+                at,
+                before: lerp2(a.before, b.before, u),
+                after: lerp2(a.after, b.after, u),
+                split: k.split,
+                even: k.even,
+            };
+        }
+        _ => (a.split || b.split, a.even && b.even && !a.split && !b.split),
+    };
+    let (t1, l1) = polar(a.before);
+    let (t2, l2) = polar(b.before);
+    let mut way = None;
+    let before = if l1 < 1e-9 || l2 < 1e-9 || (t1 - t2).abs() < 0.001 {
+        lerp2(a.before, b.before, u)
+    } else {
+        let th = short_way(t2 - t1) * u + t1;
+        let l = lerp(l1, l2, u);
+        let (s, c) = th.sin_cos();
+        way = Some((c, s));
+        [-l * c, -l * s]
+    };
+    let (t3, l3) = polar(a.after);
+    let (t4, l4) = polar(b.after);
+    let after = if l3 < 1e-9 || l4 < 1e-9 || (t3 - t4).abs() < 0.001 {
+        lerp2(a.after, b.after, u)
+    } else if even {
+        [-before[0], -before[1]]
+    } else {
+        let (c, s) = match way {
+            Some((c, s)) if !split => (-c, -s),
+            _ => {
+                let (s, c) = (short_way(t4 - t3) * u + t3).sin_cos();
+                (c, s)
+            }
+        };
+        let l = lerp(l3, l4, u);
+        [-l * c, -l * s]
+    };
+    MaskAnchor {
+        at,
+        before,
+        after,
+        split,
+        even,
+    }
 }
 
 /// An event's masks: the Pan/Crop window's Mask row.
@@ -307,52 +461,96 @@ impl PanCropMask {
                 .any(|p| p.mode != MaskMode::Disabled && p.anchors.len() >= 2)
     }
 
-    /// The paths' shapes at `local` (from the event's start): their own
-    /// without keyframes, else from the keyframes — anchor by anchor as
-    /// far as the curve goes where both keyframes have as many, else the
-    /// one before's.
-    pub fn shapes_at(&self, local: Tick) -> Vec<Vec<MaskAnchor>> {
-        let own = || self.paths.iter().map(|p| p.anchors.clone()).collect();
-        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
-            return own();
+    /// The paths as they are `t` (in the box's unit of time) after the
+    /// event's start: their own without keyframes, else as far between the
+    /// keyframes as the curve says.
+    pub fn paths_at_units(&self, t: i64) -> Vec<MaskPath> {
+        let when = |k: &MaskKey| crate::pancrop::units_near(k.at);
+        let Some(first) = self.keys.first() else {
+            return self.paths.clone();
         };
-        let fit = |s: &[Vec<MaskAnchor>]| {
-            let mut v = s.to_vec();
-            v.resize_with(self.paths.len(), Vec::new);
-            v.truncate(self.paths.len());
-            v
+        let held = |k: &MaskKey| -> Vec<MaskPath> {
+            self.paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let mut p = k.looks.get(i).map_or_else(|| p.clone(), |l| l.on(p));
+                    if let Some(s) = k.shapes.get(i) {
+                        p.anchors.clone_from(s);
+                    } else {
+                        p.anchors.clear();
+                    }
+                    p
+                })
+                .collect()
         };
-        if local <= first.at {
-            return fit(&first.shapes);
+        let i = self.keys.partition_point(|k| when(k) <= t);
+        if i == 0 {
+            return held(first);
         }
-        if local >= last.at {
-            return fit(&last.shapes);
+        let a = &self.keys[i - 1];
+        if when(a) == t || i == self.keys.len() {
+            return held(a);
         }
-        let i = self.keys.partition_point(|k| k.at <= local);
-        let (a, b) = (&self.keys[i - 1], &self.keys[i]);
-        let span = (b.at - a.at).0.max(1) as f32;
-        let f = a.curve.eval((local - a.at).0 as f32 / span);
-        let mix = |x: f32, y: f32| x + (y - x) * f;
-        let mix2 = |x: [f32; 2], y: [f32; 2]| [mix(x[0], y[0]), mix(x[1], y[1])];
-        let shapes = a
-            .shapes
-            .iter()
-            .enumerate()
-            .map(|(p, sa)| match b.shapes.get(p) {
-                Some(sb) if sb.len() == sa.len() && a.curve != KeyCurve::Hold => sa
-                    .iter()
-                    .zip(sb)
-                    .map(|(x, y)| MaskAnchor {
-                        at: mix2(x.at, y.at),
-                        before: mix2(x.before, y.before),
-                        after: mix2(x.after, y.after),
-                        split: x.split,
-                    })
-                    .collect(),
-                _ => sa.clone(),
+        let b = &self.keys[i];
+        let span = (when(b) - when(a)) as f64;
+        let u = if span > 0.0 {
+            crate::pancrop::ease(a.curve, (t - when(a)) as f64 / span)
+        } else {
+            0.0
+        };
+        let (from, to) = (held(a), held(b));
+        from.into_iter()
+            .zip(to)
+            .map(|(mut p, q)| {
+                if p.anchors.is_empty() || q.anchors.is_empty() {
+                    return p;
+                }
+                p.opacity = lerp(p.opacity, q.opacity, u).clamp(0.0, 1.0);
+                p.feather_pct = lerp(p.feather_pct, q.feather_pct, u);
+                if p.anchors.len() == q.anchors.len() {
+                    p.anchors = p
+                        .anchors
+                        .iter()
+                        .zip(&q.anchors)
+                        .map(|(x, y)| anchor_between(x, y, u))
+                        .collect();
+                }
+                p
             })
-            .collect::<Vec<_>>();
-        fit(&shapes)
+            .collect()
+    }
+
+    /// The paths' shapes at `local` (from the event's start).
+    pub fn shapes_at(&self, local: Tick) -> Vec<Vec<MaskAnchor>> {
+        self.paths_at_units(crate::pancrop::units_floor(local))
+            .into_iter()
+            .map(|p| p.anchors)
+            .collect()
+    }
+
+    /// Path `i`'s settings at `local` become `path`'s: all along, without
+    /// keyframes that have their own; else at the keyframe there, made when
+    /// there is none.
+    pub fn set_look_at(&mut self, local: Tick, i: usize, path: &MaskPath) {
+        if self.keys.iter().all(|k| k.looks.is_empty()) {
+            if let Some(p) = self.paths.get_mut(i) {
+                *p = MaskLook::of(path).on(p);
+            }
+            return;
+        }
+        if !self.keys.iter().any(|k| k.at == local) {
+            self.add_key(local);
+        }
+        let own: Vec<MaskLook> = self.paths.iter().map(MaskLook::of).collect();
+        if let Some(k) = self.keys.iter_mut().find(|k| k.at == local) {
+            if k.looks.len() < own.len() {
+                k.looks.extend_from_slice(&own[k.looks.len()..]);
+            }
+            if let Some(l) = k.looks.get_mut(i) {
+                *l = MaskLook::of(path);
+            }
+        }
     }
 
     /// The paths' shapes at `local` become `shapes`: their own without
@@ -381,6 +579,7 @@ impl PanCropMask {
                         at: local,
                         shapes,
                         curve,
+                        looks: Vec::new(),
                     },
                 );
             }
@@ -396,6 +595,7 @@ impl PanCropMask {
                 at: Tick::ZERO,
                 shapes: shapes.clone(),
                 curve: KeyCurve::Smooth,
+                looks: Vec::new(),
             });
         }
         self.set_shapes_at(local, shapes);
@@ -423,14 +623,14 @@ impl PanCropMask {
 
     /// Path `i`'s shape at `local` through `map` (a move, a scale, a flip:
     /// any affine map of the media's pixels), its tangents with it.
-    pub fn map_path_at(&mut self, local: Tick, i: usize, map: impl Fn([f32; 2]) -> [f32; 2]) {
+    pub fn map_path_at(&mut self, local: Tick, i: usize, map: impl Fn([f64; 2]) -> [f64; 2]) {
         let mut shapes = self.shapes_at(local);
         let Some(shape) = shapes.get_mut(i) else {
             return;
         };
         for a in shape.iter_mut() {
             let at = map(a.at);
-            let end = |t: [f32; 2]| {
+            let end = |t: [f64; 2]| {
                 let p = map([a.at[0] + t[0], a.at[1] + t[1]]);
                 [p[0] - at[0], p[1] - at[1]]
             };
@@ -439,6 +639,7 @@ impl PanCropMask {
                 before: end(a.before),
                 after: end(a.after),
                 split: a.split,
+                even: a.even,
             };
         }
         self.set_shapes_at(local, shapes);
@@ -479,7 +680,7 @@ impl PanCropMask {
     /// An anchor put on path `path`'s segment from its anchor `index` to the
     /// next, `t` (0–1) of the way along it, the curve kept as it was — in
     /// its shape at every keyframe too, as far along.
-    pub fn split_segment(&mut self, path: usize, index: usize, t: f32) {
+    pub fn split_segment(&mut self, path: usize, index: usize, t: f64) {
         let Some(p) = self.paths.get_mut(path) else {
             return;
         };
@@ -514,7 +715,7 @@ impl PanCropMask {
 
     /// A copy of path `i` (its shape at every keyframe too), moved by
     /// `offset`, added last; its index.
-    pub fn duplicate_path(&mut self, i: usize, offset: [f32; 2]) -> Option<usize> {
+    pub fn duplicate_path(&mut self, i: usize, offset: [f64; 2]) -> Option<usize> {
         let mut path = self.paths.get(i)?.clone();
         let shift = |s: &[MaskAnchor]| -> Vec<MaskAnchor> {
             s.iter()
@@ -566,6 +767,7 @@ impl PanCropMask {
             at: Tick::ZERO,
             shapes: m.paths.iter().map(|p| p.anchors.clone()).collect(),
             curve: KeyCurve::Smooth,
+            looks: Vec::new(),
         };
         let mut out = a.clone();
         if out.keys.is_empty() {
@@ -601,9 +803,15 @@ impl PanCropMask {
 
     /// A new path, its shape the same at every keyframe.
     pub fn add_path(&mut self, path: MaskPath) {
+        let look = MaskLook::of(&path);
+        let paths = self.paths.len();
         for k in &mut self.keys {
-            k.shapes.resize_with(self.paths.len(), Vec::new);
+            k.shapes.resize_with(paths, Vec::new);
             k.shapes.push(path.anchors.clone());
+            if !k.looks.is_empty() {
+                k.looks.resize(paths, look);
+                k.looks.push(look);
+            }
         }
         self.paths.push(path);
     }
@@ -617,6 +825,9 @@ impl PanCropMask {
         for k in &mut self.keys {
             if i < k.shapes.len() {
                 k.shapes.remove(i);
+            }
+            if i < k.looks.len() {
+                k.looks.remove(i);
             }
         }
     }
@@ -636,6 +847,12 @@ impl PanCropMask {
                 .rev()
                 .find(|k| k.at <= delta)
                 .map_or(KeyCurve::Smooth, |k| k.curve),
+            looks: self
+                .keys
+                .iter()
+                .rev()
+                .find(|k| k.at <= delta)
+                .map_or_else(Vec::new, |k| k.looks.clone()),
         };
         let mut keys: Vec<MaskKey> = self
             .keys
@@ -659,30 +876,34 @@ impl PanCropMask {
         if !self.keys.is_empty() {
             let shapes = self.shapes_at(cut);
             self.keys.retain(|k| k.at < cut);
+            let looks = self.keys.last().map_or_else(Vec::new, |k| k.looks.clone());
             self.keys.push(MaskKey {
                 at: cut,
                 shapes,
                 curve: KeyCurve::Linear,
+                looks,
             });
         }
         right
     }
 
-    /// What [`PanCropMask::coverage`] at `local` depends on, with `sizes`
-    /// (the picture's and the media's): equal for equal coverages.
-    pub fn fingerprint(&self, local: Tick, sizes: [u32; 4]) -> u64 {
+    /// What [`PanCropMask::coverage`] `t` (in the box's unit of time) after
+    /// the event's start depends on, with `sizes` (the picture's and the
+    /// media's): equal for equal coverages.
+    pub fn fingerprint(&self, t: i64, sizes: [u32; 4]) -> u64 {
         use std::hash::{Hash, Hasher};
         use std::mem::discriminant;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         sizes.hash(&mut h);
-        for (path, anchors) in self.paths.iter().zip(self.shapes_at(local)) {
+        for path in self.paths_at_units(t) {
             discriminant(&path.mode).hash(&mut h);
             discriminant(&path.feather).hash(&mut h);
             path.anti_alias.hash(&mut h);
+            path.closed.hash(&mut h);
             path.opacity.to_bits().hash(&mut h);
             path.feather_pct.to_bits().hash(&mut h);
-            anchors.len().hash(&mut h);
-            for a in anchors {
+            path.anchors.len().hash(&mut h);
+            for a in &path.anchors {
                 for v in a.at.iter().chain(&a.before).chain(&a.after) {
                     v.to_bits().hash(&mut h);
                 }
@@ -691,95 +912,47 @@ impl PanCropMask {
         h.finish()
     }
 
-    /// How much of each pixel of a `w` × `h` picture of the media the
-    /// masks keep at `local` (0–1, rows from the top): the media's pixels
-    /// times `scale` are the picture's, `short` the media's shorter side
-    /// (what the feather counts from). Positive paths add what is inside
-    /// them (starting from nothing, or from everything when there are
-    /// none), negative ones take it away, each as far as its opacity says.
-    pub fn coverage(
-        &self,
-        local: Tick,
-        w: usize,
-        h: usize,
-        scale: [f64; 2],
-        short: f64,
-    ) -> Vec<f32> {
-        let shapes = self.shapes_at(local);
-        let used: Vec<(&MaskPath, &Vec<MaskAnchor>)> = self
-            .paths
-            .iter()
-            .zip(&shapes)
-            .filter(|(p, s)| p.mode != MaskMode::Disabled && s.len() >= 2)
-            .collect();
-        let base = if used.iter().any(|(p, _)| p.mode == MaskMode::Positive) {
-            0.0
-        } else {
-            1.0
-        };
-        let mut keep = vec![base; w * h];
-        let px = (scale[0] + scale[1]) / 2.0;
-        for (path, anchors) in used {
-            let outline: Vec<[f64; 2]> = polygon(anchors)
-                .into_iter()
-                .map(|p| [p[0] * scale[0] - 0.5, p[1] * scale[1] - 0.5])
-                .collect();
-            let feather = match path.feather {
-                MaskFeather::None => 0.0,
-                _ => path.feather_pct.max(0.0) as f64 / 100.0 * short * px,
-            };
-            let opacity = path.opacity.clamp(0.0, 1.0);
-            shape_coverage(
-                &outline,
-                w,
-                h,
-                feather,
-                path.feather,
-                path.anti_alias,
-                |i, c| {
-                    let c = c * opacity;
-                    keep[i] = match path.mode {
-                        MaskMode::Positive => keep[i] + c - keep[i] * c,
-                        _ => keep[i] * (1.0 - c),
-                    };
-                },
-            );
-        }
-        keep
+    /// How much of each pixel of a `w` × `h` picture of the media the masks
+    /// keep `t` (in the box's unit of time) after the event's start (0–1, rows
+    /// from the top), in 8-bit steps: the media's pixels times `scale`
+    /// are the picture's, `aspect` wide. The first path starts from nothing,
+    /// or from everything when it is negative; each adds what is inside it or
+    /// takes it away, as far as its opacity says.
+    pub fn coverage(&self, t: i64, w: usize, h: usize, scale: [f64; 2], aspect: f64) -> Vec<f32> {
+        crate::mask_raster::alpha(&self.paths_at_units(t), w, h, scale, aspect)
+            .into_iter()
+            .map(|v| f32::from(v) / 255.0)
+            .collect()
     }
 }
 
 /// The point `t` (0–1) of the way along the segment of `anchors` from its
 /// anchor `i` to the next.
-pub fn segment_point(anchors: &[MaskAnchor], i: usize, t: f32) -> [f32; 2] {
+pub fn segment_point(anchors: &[MaskAnchor], i: usize, t: f64) -> [f64; 2] {
     let n = anchors.len();
     let (a, b) = (anchors[i % n], anchors[(i + 1) % n]);
     let p = [
-        [a.at[0] as f64, a.at[1] as f64],
-        [(a.at[0] + a.after[0]) as f64, (a.at[1] + a.after[1]) as f64],
-        [
-            (b.at[0] + b.before[0]) as f64,
-            (b.at[1] + b.before[1]) as f64,
-        ],
-        [b.at[0] as f64, b.at[1] as f64],
+        a.at,
+        [a.at[0] + a.after[0], a.at[1] + a.after[1]],
+        [b.at[0] + b.before[0], b.at[1] + b.before[1]],
+        b.at,
     ];
-    let q = bezier(&p, t as f64);
-    [q[0] as f32, q[1] as f32]
+    bezier(&p, t)
 }
 
 /// Splits the segment of `anchors` from anchor `i` to the next at `t`
 /// (de Casteljau's): the new anchor's tangents and its neighbors' make the
 /// same curve; a straight segment stays straight, the anchor a corner.
-fn split_in(anchors: &mut Vec<MaskAnchor>, i: usize, t: f32) {
+fn split_in(anchors: &mut Vec<MaskAnchor>, i: usize, t: f64) {
     let n = anchors.len();
     if n < 2 || i >= n {
         return;
     }
     let j = (i + 1) % n;
     let (a, b) = (anchors[i], anchors[j]);
-    let lerp = |p: [f32; 2], q: [f32; 2]| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
-    let add = |p: [f32; 2], d: [f32; 2]| [p[0] + d[0], p[1] + d[1]];
-    let sub = |p: [f32; 2], q: [f32; 2]| [p[0] - q[0], p[1] - q[1]];
+    let lerp = |p: [f64; 2], q: [f64; 2]| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    let add = |p: [f64; 2], d: [f64; 2]| [p[0] + d[0], p[1] + d[1]];
+    let sub = |p: [f64; 2], q: [f64; 2]| [p[0] - q[0], p[1] - q[1]];
     let (p0, p1, p2, p3) = (a.at, add(a.at, a.after), add(b.at, b.before), b.at);
     let (q0, q1, q2) = (lerp(p0, p1), lerp(p1, p2), lerp(p2, p3));
     let (r0, r1) = (lerp(q0, q1), lerp(q1, q2));
@@ -792,6 +965,7 @@ fn split_in(anchors: &mut Vec<MaskAnchor>, i: usize, t: f32) {
             before: sub(r0, s),
             after: sub(r1, s),
             split: false,
+            even: false,
         }
     };
     anchors[i].after = sub(q0, p0);
@@ -805,17 +979,13 @@ fn split_in(anchors: &mut Vec<MaskAnchor>, i: usize, t: f32) {
 pub fn polygon(anchors: &[MaskAnchor]) -> Vec<[f64; 2]> {
     let n = anchors.len();
     let mut out = Vec::with_capacity(n * 24);
-    let f = |p: [f32; 2]| [p[0] as f64, p[1] as f64];
     for i in 0..n {
         let (a, b) = (anchors[i], anchors[(i + 1) % n]);
         let p = [
-            f(a.at),
-            [(a.at[0] + a.after[0]) as f64, (a.at[1] + a.after[1]) as f64],
-            [
-                (b.at[0] + b.before[0]) as f64,
-                (b.at[1] + b.before[1]) as f64,
-            ],
-            f(b.at),
+            a.at,
+            [a.at[0] + a.after[0], a.at[1] + a.after[1]],
+            [b.at[0] + b.before[0], b.at[1] + b.before[1]],
+            b.at,
         ];
         let straight = a.after == [0.0; 2] && b.before == [0.0; 2];
         let steps = if straight { 1 } else { 24 };
@@ -834,215 +1004,6 @@ fn bezier(p: &[[f64; 2]; 4], t: f64) -> [f64; 2] {
         a * p[0][0] + b * p[1][0] + c * p[2][0] + d * p[3][0],
         a * p[0][1] + b * p[1][1] + c * p[2][1] + d * p[3][1],
     ]
-}
-
-/// One shape's coverage of a `w` × `h` picture (its outline in the
-/// picture's pixels, their middles at whole numbers), handed pixel by
-/// pixel to `put` (index, 0–1) where it is not 0: inside 1, outside 0, its
-/// edge softened over `feather` pixels the way `style` says, or with
-/// `anti_alias` each edge pixel as much as the shape covers it (four rows
-/// of samples, the spans' overlaps across). Only the shape's bounding box
-/// (and its feather) is worked out.
-fn shape_coverage(
-    outline: &[[f64; 2]],
-    w: usize,
-    h: usize,
-    feather: f64,
-    style: MaskFeather,
-    anti_alias: bool,
-    mut put: impl FnMut(usize, f32),
-) {
-    if outline.len() < 3 || w == 0 || h == 0 {
-        return;
-    }
-    let soft = if feather >= 1.0 { feather } else { 0.0 };
-    let reach = soft + 3.0;
-    let (lo, hi) = outline.iter().fold(
-        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
-        |(lo, hi), p| {
-            (
-                [lo[0].min(p[0]), lo[1].min(p[1])],
-                [hi[0].max(p[0]), hi[1].max(p[1])],
-            )
-        },
-    );
-    let x0 = (lo[0] - reach).floor().clamp(0.0, w as f64) as usize;
-    let y0 = (lo[1] - reach).floor().clamp(0.0, h as f64) as usize;
-    let x1 = (hi[0] + reach).ceil().clamp(0.0, w as f64) as usize;
-    let y1 = (hi[1] + reach).ceil().clamp(0.0, h as f64) as usize;
-    if x1 <= x0 || y1 <= y0 {
-        return;
-    }
-    let (bw, bh) = (x1 - x0, y1 - y0);
-    let at = |x: usize, y: usize| (y + y0) * w + x + x0;
-    // Where the outline's edges cross the line `fy` (even-odd pairs, the
-    // box's x).
-    let crossings = |fy: f64, xs: &mut Vec<f64>| {
-        xs.clear();
-        for i in 0..outline.len() {
-            let (a, b) = (outline[i], outline[(i + 1) % outline.len()]);
-            if (a[1] <= fy) != (b[1] <= fy) {
-                let t = (fy - a[1]) / (b[1] - a[1]);
-                xs.push(a[0] + t * (b[0] - a[0]) - x0 as f64);
-            }
-        }
-        xs.sort_by(|a, b| a.total_cmp(b));
-    };
-    let mut xs = Vec::new();
-    if soft <= 0.0 && anti_alias {
-        let mut row = vec![0.0f64; bw];
-        for y in 0..bh {
-            row.fill(0.0);
-            for sub in [-0.375, -0.125, 0.125, 0.375] {
-                crossings((y + y0) as f64 + sub, &mut xs);
-                for pair in xs.chunks(2) {
-                    if let [xa, xb] = pair {
-                        let from = (xa + 0.5).floor().max(0.0) as usize;
-                        let to = ((xb + 0.5).ceil().max(0.0) as usize).min(bw);
-                        for (x, v) in row.iter_mut().enumerate().take(to).skip(from) {
-                            let px = x as f64;
-                            let o = (xb.min(px + 0.5) - xa.max(px - 0.5)).max(0.0);
-                            *v += o / 4.0;
-                        }
-                    }
-                }
-            }
-            for (x, v) in row.iter().enumerate() {
-                if *v > 0.0 {
-                    put(at(x, y), v.min(1.0) as f32);
-                }
-            }
-        }
-        return;
-    }
-    // Each row's middle: inside or not (rows on the processor's threads).
-    let mut inside = vec![false; bw * bh];
-    bv_color::par_rows(&mut inside, bw, |y, row| {
-        let mut xs = Vec::new();
-        crossings((y + y0) as f64, &mut xs);
-        for pair in xs.chunks(2) {
-            if let [xa, xb] = pair {
-                let from = xa.ceil().max(0.0) as usize;
-                let to = (xb.floor() + 1.0).clamp(0.0, bw as f64) as usize;
-                for v in &mut row[from.min(bw)..to.max(from.min(bw))] {
-                    *v = true;
-                }
-            }
-        }
-    });
-    if soft <= 0.0 {
-        for y in 0..bh {
-            for x in 0..bw {
-                if inside[y * bw + x] {
-                    put(at(x, y), 1.0);
-                }
-            }
-        }
-        return;
-    }
-    // Feathered: by the signed distance to the edge (inside positive), in
-    // pixels.
-    let outside_d = distance(&inside, bw, bh, true, reach);
-    let inside_d = distance(&inside, bw, bh, false, reach);
-    let mut soft_cover = vec![0.0f32; bw * bh];
-    bv_color::par_rows(&mut soft_cover, bw, |y, row| {
-        for (x, out) in row.iter_mut().enumerate() {
-            let i = y * bw + x;
-            let d = if inside[i] {
-                inside_d[i] - 0.5
-            } else {
-                0.5 - outside_d[i]
-            };
-            *out = match style {
-                MaskFeather::In => smooth(0.0, soft, d),
-                MaskFeather::Out => smooth(-soft, 0.0, d),
-                MaskFeather::Both | MaskFeather::None => smooth(-soft / 2.0, soft / 2.0, d),
-            } as f32;
-        }
-    });
-    for (i, &c) in soft_cover.iter().enumerate() {
-        if c > 0.0 {
-            put(at(i % bw, i / bw), c);
-        }
-    }
-}
-
-fn smooth(e0: f64, e1: f64, x: f64) -> f64 {
-    let t = ((x - e0) / (e1 - e0).max(1e-9)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Each pixel's distance (pixels, up to `reach`) to the nearest pixel of
-/// the other side: to an inside one from outside (`from_outside`), else to
-/// an outside one (the box's edges count as outside). Felzenszwalb and
-/// Huttenlocher's exact transform, a column then a row at a time.
-fn distance(inside: &[bool], w: usize, h: usize, from_outside: bool, reach: f64) -> Vec<f64> {
-    if w == 0 || h == 0 {
-        return Vec::new();
-    }
-    let far = reach * reach + 1.0;
-    // Down each column first, the columns kept as rows (the picture
-    // turned), then along each row: rows on the processor's threads.
-    let mut columns = vec![0.0f64; w * h];
-    bv_color::par_rows(&mut columns, h, |x, out| {
-        let line: Vec<f64> = (0..h)
-            .map(|y| {
-                if inside[y * w + x] == from_outside {
-                    0.0
-                } else {
-                    far
-                }
-            })
-            .collect();
-        transform_1d(&line, out);
-    });
-    let mut f = vec![0.0f64; w * h];
-    bv_color::par_rows(&mut f, w, |y, out| {
-        let line: Vec<f64> = (0..w).map(|x| columns[x * h + y]).collect();
-        transform_1d(&line, out);
-        for v in out.iter_mut() {
-            *v = v.sqrt().min(reach);
-        }
-    });
-    f
-}
-
-/// The squared distance transform of a sampled function: the lower
-/// envelope of the parabolas rooted at each sample.
-fn transform_1d(f: &[f64], d: &mut [f64]) {
-    let n = f.len();
-    if n == 0 {
-        return;
-    }
-    let mut v = vec![0usize; n];
-    let mut z = vec![0.0f64; n + 1];
-    let mut k = 0usize;
-    z[0] = f64::NEG_INFINITY;
-    z[1] = f64::INFINITY;
-    for q in 1..n {
-        let s = loop {
-            let p = v[k];
-            let s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2 * (q - p)) as f64;
-            // z[0] is minus infinity: k never goes below 0.
-            if s <= z[k] {
-                k -= 1;
-            } else {
-                break s;
-            }
-        };
-        k += 1;
-        v[k] = q;
-        z[k] = s;
-        z[k + 1] = f64::INFINITY;
-    }
-    k = 0;
-    for (q, out) in d.iter_mut().enumerate() {
-        while z[k + 1] < q as f64 {
-            k += 1;
-        }
-        let dq = q as f64 - v[k] as f64;
-        *out = dq * dq + f[v[k]];
-    }
 }
 
 #[cfg(test)]
@@ -1086,30 +1047,31 @@ mod tests {
         };
         m.add_path(MaskPath::rectangle([10.25, 10.0], [30.0, 20.0]));
         assert!(m.active());
-        let c = m.coverage(Tick::ZERO, 40, 30, [1.0, 1.0], 30.0);
+        let c = m.coverage(0, 40, 30, [1.0, 1.0], 1.0);
         let at = |c: &[f32], x: usize, y: usize| c[y * 40 + x];
         assert!(at(&c, 20, 15) > 0.99 && at(&c, 2, 2) < 0.01);
         // Anti-aliased: the edge pixel as much as it is covered.
-        assert!((at(&c, 10, 15) - 0.75).abs() < 1e-3, "{}", at(&c, 10, 15));
+        assert!((at(&c, 10, 15) - 0.75).abs() < 3e-3, "{}", at(&c, 10, 15));
         assert!(at(&c, 9, 15) < 1e-6);
         m.paths[0].mode = MaskMode::Negative;
-        let c = m.coverage(Tick::ZERO, 40, 30, [1.0, 1.0], 30.0);
+        let c = m.coverage(0, 40, 30, [1.0, 1.0], 1.0);
         assert!(at(&c, 20, 15) < 0.01 && at(&c, 2, 2) > 0.99);
         // Half opacity: half of it goes.
         m.paths[0].opacity = 0.5;
-        let c = m.coverage(Tick::ZERO, 40, 30, [1.0, 1.0], 30.0);
-        assert!((at(&c, 20, 15) - 0.5).abs() < 1e-3);
+        let c = m.coverage(0, 40, 30, [1.0, 1.0], 1.0);
+        assert!((at(&c, 20, 15) - 0.5).abs() < 3e-3);
         let mut o = PanCropMask {
             enabled: true,
             ..PanCropMask::default()
         };
         o.add_path(MaskPath::oval([0.0, 0.0], [40.0, 30.0]));
-        let c = o.coverage(Tick::ZERO, 40, 30, [1.0, 1.0], 30.0);
+        let c = o.coverage(0, 40, 30, [1.0, 1.0], 1.0);
         assert!(at(&c, 20, 15) > 0.99 && at(&c, 1, 1) < 0.01);
         // At half the picture's size, the same shape.
-        let c = o.coverage(Tick::ZERO, 20, 15, [0.5, 0.5], 30.0);
+        let c = o.coverage(0, 20, 15, [0.5, 0.5], 1.0);
         assert!(c[7 * 20 + 10] > 0.99 && c[0] < 0.01);
-        // Feathered out by a tenth of 100 pixels: 10 pixels outside.
+        // Feathered out by a tenth of 100 pixels: softening outside it, the
+        // middle whole.
         let mut f = PanCropMask {
             enabled: true,
             ..PanCropMask::default()
@@ -1118,11 +1080,11 @@ mod tests {
         r.feather = MaskFeather::Out;
         r.feather_pct = 10.0;
         f.add_path(r);
-        let c = f.coverage(Tick::ZERO, 100, 100, [1.0, 1.0], 100.0);
+        let c = f.coverage(0, 100, 100, [1.0, 1.0], 1.0);
         let row = |x: usize| c[50 * 100 + x];
         assert!(row(50) > 0.99 && row(45) > 0.99, "inside whole");
         assert!(row(35) > 0.05 && row(35) < 0.95, "softening outside");
-        assert!(row(25) < 0.01, "nothing past the feather");
+        assert!(row(10) < 0.01, "nothing far past the feather");
         // Disabled or off: nothing masked.
         f.paths[0].mode = MaskMode::Disabled;
         assert!(!f.active());
@@ -1130,6 +1092,70 @@ mod tests {
         g.paths[0].mode = MaskMode::Positive;
         g.enabled = false;
         assert!(!g.active());
+    }
+
+    /// A keyframe's own settings: its opacity and feather go from one to the
+    /// next, its other settings hold.
+    #[test]
+    fn a_keyframes_settings_go_with_it() {
+        let mut m = PanCropMask {
+            enabled: true,
+            ..PanCropMask::default()
+        };
+        m.add_path(MaskPath::rectangle([0.0, 0.0], [10.0, 10.0]));
+        m.add_key(Tick::ZERO);
+        m.set_key_curve(Tick::ZERO, KeyCurve::Linear);
+        m.add_key(s(2));
+        m.keys[1].looks = vec![MaskLook {
+            mode: MaskMode::Negative,
+            anti_alias: true,
+            opacity: 0.5,
+            feather: MaskFeather::Both,
+            feather_pct: 20.0,
+        }];
+        let at = |t: Tick| m.paths_at_units(crate::pancrop::units_floor(t)).remove(0);
+        let mid = at(s(1));
+        assert!((mid.opacity - 0.75).abs() < 1e-9);
+        assert!((mid.feather_pct - 10.0).abs() < 1e-9);
+        assert_eq!(mid.mode, MaskMode::Positive);
+        let end = at(s(2));
+        assert_eq!(end.mode, MaskMode::Negative);
+        assert_eq!(end.opacity, 0.5);
+    }
+
+    /// Tangents between keyframes turn the short way round, keeping their
+    /// lengths' mean, not straight through the anchor.
+    #[test]
+    fn tangents_turn_between_keyframes() {
+        let a = MaskAnchor {
+            at: [0.0, 0.0],
+            before: [-10.0, 0.0],
+            after: [10.0, 0.0],
+            split: false,
+            even: false,
+        };
+        let b = MaskAnchor {
+            at: [4.0, 0.0],
+            before: [0.0, -10.0],
+            after: [0.0, 10.0],
+            split: false,
+            even: false,
+        };
+        let m = anchor_between(&a, &b, 0.5);
+        assert_eq!(m.at, [2.0, 0.0]);
+        let k = 10.0 * std::f64::consts::FRAC_1_SQRT_2;
+        assert!(
+            (m.before[0] + k).abs() < 1e-9 && (m.before[1] + k).abs() < 1e-9,
+            "{m:?}"
+        );
+        // In line with it.
+        assert!(
+            (m.after[0] - k).abs() < 1e-9 && (m.after[1] - k).abs() < 1e-9,
+            "{m:?}"
+        );
+        // No tangents on either: none.
+        let c = MaskAnchor::corner([0.0, 0.0]);
+        assert_eq!(anchor_between(&c, &c, 0.5).after, [0.0; 2]);
     }
 
     /// An event's masks through edits: a cut gives each half the shapes
@@ -1274,12 +1300,14 @@ mod tests {
             before: [0.0, 0.0],
             after: [0.0, 40.0],
             split: false,
+            even: false,
         };
         let b = MaskAnchor {
             at: [100.0, 0.0],
             before: [0.0, 40.0],
             after: [0.0, -10.0],
             split: false,
+            even: false,
         };
         let c = MaskAnchor::corner([50.0, -60.0]);
         let mut m = PanCropMask {
@@ -1287,14 +1315,14 @@ mod tests {
             paths: vec![MaskPath::new(vec![a, b, c])],
             ..PanCropMask::default()
         };
-        let curve: Vec<[f32; 2]> = (0..=10)
-            .map(|k| segment_point(&m.paths[0].anchors, 0, k as f32 / 10.0))
+        let curve: Vec<[f64; 2]> = (0..=10)
+            .map(|k| segment_point(&m.paths[0].anchors, 0, f64::from(k) / 10.0))
             .collect();
         m.split_segment(0, 0, 0.3);
         let s = &m.paths[0].anchors;
         assert_eq!(s.len(), 4);
         for (k, got) in curve.iter().enumerate() {
-            let t = k as f32 / 10.0;
+            let t = k as f64 / 10.0;
             let want = if t <= 0.3 {
                 segment_point(s, 0, t / 0.3)
             } else {

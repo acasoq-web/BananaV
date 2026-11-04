@@ -16,7 +16,8 @@ use std::collections::BTreeSet;
 
 use bv_core::{FrameRate, Tick, timecode};
 use bv_timeline::mask::MaskKey;
-use bv_timeline::{Clip, KeyCurve, TransformKey};
+use bv_timeline::pancrop::PanCropKey;
+use bv_timeline::{Clip, KeyCurve};
 
 use crate::egui::{
     self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui,
@@ -68,7 +69,7 @@ trait Timed: Clone {
     fn set_curve(&mut self, curve: KeyCurve);
 }
 
-impl Timed for TransformKey {
+impl Timed for PanCropKey {
     fn at(&self) -> Tick {
         self.at
     }
@@ -96,7 +97,7 @@ impl Timed for MaskKey {
 /// event's start).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Keys {
-    pub position: Vec<TransformKey>,
+    pub position: Vec<PanCropKey>,
     pub mask: Vec<MaskKey>,
 }
 
@@ -104,7 +105,7 @@ pub(crate) struct Keys {
 /// first one taken, its value.
 #[derive(Clone, Debug)]
 pub(crate) enum Copied {
-    Position(TransformKey),
+    Position(PanCropKey),
     Mask(MaskKey),
 }
 
@@ -121,17 +122,21 @@ impl Keys {
     /// The event's keyframes. A row without any whose value is set (the
     /// framing; masks that have paths) shows that value as one at the
     /// start, VEGAS's first keyframe: it is made when edited.
-    pub(crate) fn of(clip: &Clip, curve: KeyCurve) -> Keys {
-        let position = if clip.transform_keys.is_empty() {
-            vec![TransformKey::new(Tick::ZERO, clip.transform, curve)]
+    pub(crate) fn of(clip: &Clip, media: [f64; 2], curve: KeyCurve) -> Keys {
+        let position = if clip.pan_crop.keys.is_empty() {
+            vec![PanCropKey {
+                curve,
+                ..PanCropKey::whole(media)
+            }]
         } else {
-            clip.transform_keys.clone()
+            clip.pan_crop.keys.clone()
         };
         let mask = match &clip.mask {
             Some(m) if m.keys.is_empty() && !m.paths.is_empty() => vec![MaskKey {
                 at: Tick::ZERO,
                 shapes: m.paths.iter().map(|p| p.anchors.clone()).collect(),
                 curve: KeyCurve::Smooth,
+                looks: Vec::new(),
             }],
             Some(m) => m.keys.clone(),
             None => Vec::new(),
@@ -254,7 +259,7 @@ impl Keys {
             match c {
                 Copied::Position(k) => {
                     keys.position.retain(|x| x.at != t);
-                    keys.position.push(TransformKey { at: t, ..*k });
+                    keys.position.push(PanCropKey { at: t, ..*k });
                 }
                 Copied::Mask(k) => {
                     keys.mask.retain(|x| x.at != t);
@@ -371,6 +376,9 @@ impl Default for KeyStrip {
 /// What the controller shows and edits this frame.
 pub(crate) struct StripCtx<'a> {
     pub clip: &'a Clip,
+    /// Its media's size, and how wide its pixels are.
+    pub media: [f64; 2],
+    pub aspect: f64,
     pub rate: FrameRate,
     /// The needle, from the event's start.
     pub pos: Tick,
@@ -453,7 +461,7 @@ impl KeyStrip {
         let rate = cx.rate;
         let dur = clip.duration.max(Tick(1));
         let last = (clip.duration - rate.frame_duration()).max(Tick::ZERO);
-        let keys = Keys::of(clip, cx.curve);
+        let keys = Keys::of(clip, cx.media, cx.curve);
         // Keyframes picked that are gone (undone, say) are no longer.
         let all = keys.all();
         self.picked.retain(|k| all.contains(k));
@@ -1042,7 +1050,7 @@ impl KeyStrip {
             can_make && !has,
             tr("Create Keyframe at Cursor"),
         ) {
-            answer.keys = Some((made_at(&keys, clip, row, pos), None));
+            answer.keys = Some((made_at(&keys, clip, (cx.media, cx.aspect), row, pos), None));
         }
         if button(
             &mut bar,
@@ -1101,7 +1109,7 @@ impl KeyStrip {
         match a {
             MenuAction::Copy | MenuAction::CopyKeys | MenuAction::Cut | MenuAction::CutKeys => {
                 self.clipboard = if picked.is_empty() && matches!(a, MenuAction::CopyKeys) {
-                    value_at(keys, cx.clip, cx.row, cx.pos)
+                    value_at(keys, cx.clip, (cx.media, cx.aspect), cx.row, cx.pos)
                 } else {
                     keys.copied(&picked)
                 };
@@ -1300,7 +1308,13 @@ enum MenuAction {
 
 /// `row`'s value at `pos` as one keyframe copied (Ctrl+C with nothing
 /// picked: the framing or the masks' shapes there).
-fn value_at(keys: &Keys, clip: &Clip, row: KeyRow, pos: Tick) -> Vec<(Tick, Copied)> {
+fn value_at(
+    keys: &Keys,
+    clip: &Clip,
+    (media, aspect): ([f64; 2], f64),
+    row: KeyRow,
+    pos: Tick,
+) -> Vec<(Tick, Copied)> {
     let curve = |times: Vec<(Tick, KeyCurve)>| {
         times
             .into_iter()
@@ -1311,11 +1325,11 @@ fn value_at(keys: &Keys, clip: &Clip, row: KeyRow, pos: Tick) -> Vec<(Tick, Copi
     match row {
         KeyRow::Position => vec![(
             Tick::ZERO,
-            Copied::Position(TransformKey::new(
-                Tick::ZERO,
-                clip.transform_at(clip.start + pos),
-                curve(keys.times(row)),
-            )),
+            Copied::Position(PanCropKey {
+                at: Tick::ZERO,
+                curve: curve(keys.times(row)),
+                ..clip.box_at(clip.start + pos, media, aspect)
+            }),
         )],
         KeyRow::Mask => clip
             .mask
@@ -1327,6 +1341,7 @@ fn value_at(keys: &Keys, clip: &Clip, row: KeyRow, pos: Tick) -> Vec<(Tick, Copi
                         at: Tick::ZERO,
                         shapes: m.shapes_at(pos),
                         curve: curve(keys.times(row)),
+                        looks: Vec::new(),
                     }),
                 )]
             })
@@ -1336,29 +1351,23 @@ fn value_at(keys: &Keys, clip: &Clip, row: KeyRow, pos: Tick) -> Vec<(Tick, Copi
 
 /// The rows with a keyframe made in `row` at `pos`, holding its value
 /// there (the curve of the one before).
-fn made_at(keys: &Keys, clip: &Clip, row: KeyRow, pos: Tick) -> Keys {
-    let made = value_at(keys, clip, row, pos);
+fn made_at(keys: &Keys, clip: &Clip, media: ([f64; 2], f64), row: KeyRow, pos: Tick) -> Keys {
+    let made = value_at(keys, clip, media, row, pos);
     keys.pasted(&made, pos, clip.duration).0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bv_timeline::Transform;
 
     fn keys(times: &[i64]) -> Keys {
         Keys {
             position: times
                 .iter()
-                .map(|&t| {
-                    TransformKey::new(
-                        Tick(t),
-                        Transform {
-                            x: t as f32,
-                            ..Transform::default()
-                        },
-                        KeyCurve::Linear,
-                    )
+                .map(|&t| PanCropKey {
+                    at: Tick(t),
+                    center: [t as f64, 0.0],
+                    ..PanCropKey::whole([640.0, 360.0])
                 })
                 .collect(),
             mask: Vec::new(),
@@ -1382,7 +1391,7 @@ mod tests {
         assert_eq!(times(&moved), [20, 30]);
         assert_eq!(went, pick(&[20, 30]));
         // The one at 20 was the first's: x 0 now.
-        assert_eq!(moved.position[0].value.x, 0.0);
+        assert_eq!(moved.position[0].center[0], 0.0);
         let (copied, _) = k.moved(&pick(&[10]), Tick(5), true);
         assert_eq!(times(&copied), [0, 10, 15, 20, 30]);
     }

@@ -236,9 +236,9 @@ pub fn transition_plan(
 }
 
 /// Color Grading on the card: its Camera LUT, its own steps — `steps`, as
-/// `shaders/own_pair.wgsl`'s `grade` reads them: the settings, then the
-/// Curves' and the HSL Curves' tables, `entries` long each — and its Look
-/// LUT.
+/// `shaders/own_pair.wgsl`'s `grade` reads them: the settings, a row each
+/// (`entries` rows), then its curves' tables, an entry a row — and its
+/// Look LUT.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GradePlan {
     pub camera: Option<GradeLut>,
@@ -1827,7 +1827,7 @@ pub fn plan(id: &str, values: Values<'_>, frame: [f64; 2], at: Moment) -> Option
     } else if is(color_curves::ID) {
         Some(Plan::Curves(color_curves::tables_of(values)))
     } else if is(color_grading::ID) {
-        let grade = color_grading::Settings::of(values).sampled().grade();
+        let grade = color_grading::Settings::of(values).grade();
         Some(Plan::Grade(Box::new(grade.plan())))
     } else if is(color_corrector::ID) {
         let c = color_corrector::Corrector::new(&color_corrector::Settings::of(values));

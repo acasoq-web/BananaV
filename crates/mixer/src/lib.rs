@@ -8,9 +8,23 @@ pub mod align;
 pub mod beats;
 pub mod dsp;
 pub mod fft;
+mod fx;
+
+/// `channels` (a buffer a channel, all of the sound) through `e` when it
+/// is one of the effects that change the sound's length
+/// ([`bv_timeline::EffectKind::works_offline`]): the result, its length its
+/// own.
+pub fn render_offline(
+    e: &bv_timeline::Effect,
+    rate: u32,
+    channels: Vec<Vec<f32>>,
+) -> Option<Vec<Vec<f32>>> {
+    fx::offline::render(e, rate, channels)
+}
 pub mod loudness;
 pub mod meters;
 pub mod modern_eq;
+mod prerender;
 mod stretch;
 #[cfg(not(target_family = "wasm"))]
 mod vst;
@@ -294,6 +308,11 @@ pub struct AudioPool {
     hardware: Vec<(u8, AudioBuffer)>,
     /// Plug-in delay compensation's delay lines (see [`Delays`]).
     lines: HashMap<DelayKey, DelayLine>,
+    /// The project's tempo, for the effects with tempo sync.
+    tempo: bv_timeline::Tempo,
+    /// The sounds of events whose effects change the sound's length, made
+    /// through their chains ([`prerender`]).
+    prerenders: prerender::Prerenders,
 }
 
 /// How far ahead of the frame's time each bus's and chain's input plays
@@ -327,6 +346,7 @@ impl Delays {
 /// `project`'s [`Delays`], its busses' and chains' effects' latencies
 /// asked of `pool` (where [`finish_mix`] runs them).
 pub fn delays(project: &Project, pool: &mut AudioPool) -> Delays {
+    pool.tempo = project.settings.tempo;
     let rate = project.settings.sample_rate;
     let channels = project.settings.channels.channel_count();
     let mut total = HashMap::new();
@@ -405,6 +425,14 @@ impl AudioPool {
         AudioPool::default()
     }
 
+    /// Mixes while playing: the sounds of events whose effects change the
+    /// sound's length are made on threads of their own (the last one made
+    /// plays meanwhile) instead of at once.
+    pub fn set_live(&mut self, live: bool) {
+        // The web build has no threads of its own: there, at once.
+        self.prerenders.live = live && !cfg!(target_family = "wasm");
+    }
+
     /// The reader event `owner` reads `info`'s audio stream `stream` with:
     /// its own; else one no event used in this block (the latest used: at
     /// a cut the next event goes on where the last one stopped); else a new
@@ -471,6 +499,7 @@ impl AudioPool {
         self.block += 1;
         let block = self.block;
         self.readers.retain(|s| block - s.used <= IDLE_BLOCKS);
+        self.prerenders.forget_old(block);
         if !self.stretch.is_empty() {
             let readers = &self.readers;
             self.stretch
@@ -488,6 +517,7 @@ impl AudioPool {
         self.meters.clear();
         self.stretch.clear();
         self.lines.clear();
+        self.prerenders.clear();
     }
 
     /// Adds `src` (the block from sample `at`) to `dst` `delay` samples
@@ -688,6 +718,7 @@ impl AudioPool {
             .fx
             .entry(key)
             .or_insert_with(|| (dsp::Chain::default(), i64::MIN));
+        entry.0.set_tempo(self.tempo);
         entry.0.sync(effects, rate, channels, keep);
         entry.0.latency()
     }
@@ -716,6 +747,7 @@ impl AudioPool {
         if entry.1 != s0 {
             entry.0.reset();
         }
+        entry.0.set_tempo(self.tempo);
         entry.0.sync(effects, rate, channels.len(), keep);
         let owner = match key {
             FxKey::Clip(c) => modern_eq::TapOwner::Clip(c),
@@ -791,6 +823,40 @@ fn quick_fade() -> Tick {
 }
 
 /// Primeira amostra cujo início é ≥ `t`.
+/// `src` (event `clip`'s sound from project sample `s0`) through its fades
+/// in, out and with its neighbours (and the quick fades at its edges).
+fn fade_clip(
+    project: &Project,
+    track: &bv_timeline::Track,
+    clip: &Clip,
+    rate: SampleRate,
+    s0: i64,
+    src: &mut [Vec<f32>],
+) {
+    let n = src.first().map_or(0, Vec::len);
+    let (fade_in, fade_out) = track.effective_fades(clip, project.auto_crossfade);
+    let q_len = quick_fade();
+    let quick = project.quick_fades && q_len > Tick::ZERO && (fade_in < q_len || fade_out < q_len);
+    if fade_in > Tick::ZERO || fade_out > Tick::ZERO || quick {
+        let gains: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = rate.sample_start(s0 + i as i64);
+                let q = if quick {
+                    quick_fade_gain(clip, fade_in, fade_out, t, q_len)
+                } else {
+                    1.0
+                };
+                fade_gain(clip, fade_in, fade_out, t) * q
+            })
+            .collect();
+        for ch in src.iter_mut() {
+            for (s, g) in ch.iter_mut().zip(&gains) {
+                *s *= g;
+            }
+        }
+    }
+}
+
 fn first_sample_at_or_after(rate: SampleRate, t: Tick) -> i64 {
     let s = rate.sample_at(t);
     if rate.sample_start(s) < t { s + 1 } else { s }
@@ -1011,6 +1077,7 @@ fn add_track(
     pool: &mut AudioPool,
     sums: &mut Sums,
 ) -> Option<Vec<f32>> {
+    pool.tempo = project.settings.tempo;
     let rate = project.settings.sample_rate;
     let layout = project.settings.channels;
     // FX automation: the effects as their envelopes have them now.
@@ -1089,6 +1156,34 @@ fn add_track(
                 info.effects.iter().chain(&clip.effects).collect()
             };
             let channels = info.audio.map_or(0, |a| usize::from(a.channels));
+            // Effects that change its length: it plays its sound made
+            // through its whole chain (see `prerender`), once made.
+            let made = if effects.iter().any(|e| e.enabled && e.kind.works_offline()) {
+                let block = pool.block;
+                pool.prerenders
+                    .sound(info, clip, &effects, rate, quality, pool.tempo, block)
+            } else {
+                None
+            };
+            if let Some(made) = made {
+                let from = (s0 - first_sample_at_or_after(rate, clip.start)).max(0) as usize;
+                let n = (s1 - s0) as usize;
+                let mut src: Vec<Vec<f32>> = made
+                    .iter()
+                    .map(|m| {
+                        let mut v = vec![0.0f32; n];
+                        if from < m.len() {
+                            let k = (m.len() - from).min(n);
+                            v[..k].copy_from_slice(&m[from..from + k]);
+                        }
+                        v
+                    })
+                    .collect();
+                fade_clip(project, track, clip, rate, s0, &mut src);
+                add_mapped(&mut bus, &src, (s0 - start) as usize, clip.level);
+                any = true;
+                continue;
+            }
             let late = if effects.is_empty() || channels == 0 {
                 0
             } else {
@@ -1153,28 +1248,7 @@ fn add_track(
                     &mut src,
                 );
             }
-            let (fade_in, fade_out) = track.effective_fades(clip, project.auto_crossfade);
-            let q_len = quick_fade();
-            let quick =
-                project.quick_fades && q_len > Tick::ZERO && (fade_in < q_len || fade_out < q_len);
-            if fade_in > Tick::ZERO || fade_out > Tick::ZERO || quick {
-                let gains: Vec<f32> = (0..n)
-                    .map(|i| {
-                        let t = rate.sample_start(s0 + i as i64);
-                        let q = if quick {
-                            quick_fade_gain(clip, fade_in, fade_out, t, q_len)
-                        } else {
-                            1.0
-                        };
-                        fade_gain(clip, fade_in, fade_out, t) * q
-                    })
-                    .collect();
-                for ch in &mut src {
-                    for (s, g) in ch.iter_mut().zip(&gains) {
-                        *s *= g;
-                    }
-                }
-            }
+            fade_clip(project, track, clip, rate, s0, &mut src);
             add_mapped(&mut bus, &src, (s0 - start) as usize, clip.level);
             any = true;
         }
@@ -2873,6 +2947,34 @@ mod tests {
             assert!((clip_fx.channels[0][i] - 2.0 * base.channels[0][i]).abs() < 1e-4);
             assert!((both.channels[0][i] - 4.0 * base.channels[0][i]).abs() < 1e-4);
         }
+    }
+
+    /// An event with Pitch Shift — an effect that changes the sound's
+    /// length — plays its sound made through its chain: a 500 Hz tone an
+    /// octave up comes out at 1 kHz, the event as long as it was, silent
+    /// once the shortened sound ends.
+    #[test]
+    fn length_changing_effects_play_from_the_events_made_sound() {
+        use bv_timeline::audio_fx::pitch_shift as ps;
+        let mut p = Project::new(ProjectSettings::default());
+        let a = p.tracks[1].id;
+        let m = tone(&mut p, 500.0, -6.0);
+        p.insert_media(m, Tick::ZERO, None, Some(a)).unwrap();
+        let id = p.tracks[1].clips[0].id;
+        let length = p.tracks[1].clips[0].duration;
+        let mut e = Effect::new(bv_timeline::EffectKind::PitchShift);
+        e.set_param(ps::SEMITONES, 12.0);
+        p.clip_mut(id).unwrap().effects.push(e);
+        let mut pool = AudioPool::new();
+        let buf = mix(&p, 0, 48_000, &mut pool);
+        let ch = &buf.channels[0];
+        let crossings = ch.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        assert!((995..=1005).contains(&crossings), "{crossings}");
+        // Past half its length the shortened sound has ended.
+        let late = first_sample_at_or_after(SampleRate::HZ_48000, length) * 3 / 4;
+        let quiet = mix(&p, late, 4800, &mut pool);
+        let peak = quiet.channels[0].iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak < 1e-4, "{peak}");
     }
 
     #[test]

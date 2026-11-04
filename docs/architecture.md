@@ -207,6 +207,68 @@ layers (`cargo xtask layers` enforces it):
   or a timeline dropped on the window opens as with File › Open — a
   project dropped on the timeline is nested instead (media dropped go to
   the project).
+- The graphics card is usable as soon as it opens (`accel.rs`): frames draw
+  on it while `Gpu::warm_up` compiles the kernels on a few threads of low
+  priority, each frame waiting only for the kernels it uses (`Kernels::
+  pipeline`: a cell each, the compiler outside the map's lock). The window
+  paints while playing when the project's next frame is due
+  (`until_next_picture`, 60 times a second at least), not as often as the
+  screen allows; the preview's thread wakes it only for a frame already
+  late. What the Explorer's tree shows of the disks is read on a thread of
+  its own (`TreeRoots`): no frame touches a disk.
+- An event's Pan/Crop (`bv_timeline::pancrop`): a box in its media's pixels
+  over time (`PanCropKey`: width and height, negative when mirrored, center,
+  angle, where it turns, smoothness; `Clip::pan_crop`), the file's terms, kept
+  on the model so nothing rounds it. `PanCrop::at_time` interpolates at the
+  100 ns the frame's time truncates to: size, angle, pivot and smoothness in a
+  straight line, the center's rotation undone before the line and done again
+  after, the pivot along an X-spline whose tension is the smoothness.
+  `place_in` then `place()` give a `Placement` of the frame: a turned or
+  mirrored box a parallelogram of its corners, with soft edges (coverage by
+  16 bands) and the media's edges read as the renderers' `held`/`open` do; a
+  straight one a rectangle in fixed point with hard edges, and at Best a
+  Catmull-Rom whose rectangle's end pixels land on each other
+  (`Placement::in_picture`). `bv_render::layer::place_box` and the card's
+  `place_hard`/`place_soft` draw it. Projects saved before come in through
+  `Project::upgrade_pan_crops`. Measured frame by frame against another
+  program's renders through the `.veg` reader (`bv-engine`'s
+  `pan_crop_renders`).
+- VEG projects (File › Import and File › Export › VEG Project, and File ›
+  Open of `.veg` files): `bv_timeline::veg` reads and writes the format
+  from what its files hold — Wave64's RIFF of 64 bits (`riff.rs`: chunks
+  named by GUIDs, their sizes counting their 24-byte headers, each on a
+  multiple of 8 bytes from the file's start) — into a document
+  (`read.rs`: the header's settings, the media, the tracks with their
+  events, takes, fades and curves, envelopes, the effects, transitions,
+  Pan/Crops and masks, the tracks' motions, markers, regions, command
+  markers, the CD layout, groups, the summary's texts, the mixer's busses
+  and bins; times in hundreds of nanoseconds, `ticks` and `units`) that
+  `build.rs` makes a project of once the caller found the media
+  (`Imported` counts what stayed out: generated media's events, effects
+  without a plug-in, envelopes BananaV has no place for, transitions at
+  events' ends), and back (`write.rs`, in the chunks' order and with the
+  default structures the format's own files have). An envelope's kind is
+  at its structure's byte 8; a transition's progress places count parts of
+  a million of its fade. An effect's parameters are records of their
+  value's size followed by their keyframes (`read::param_body`: the sizes
+  tell a value's and a keyframe's kind apart; keyframes in frames from the
+  effect's start, handles as absolute frames and values) or a text; the
+  file's own kind of effect, its seven transitions (`DocEffect::native`),
+  is a class, a preset's name and a plain record of its settings, which
+  `veg_ui::native_settings` reads. The audio effects' chains are their
+  plug-ins' classes, names, bypass switches and settings
+  (`read::audio_chain`), and `audio.rs` turns the 51 BananaV has into its
+  effects: DirectX records field by field (a number's byte, whole, with a
+  point or long, and how it becomes the parameter), graphs by their counts
+  and points (`graphs`), the studio effects' programs of normalized values
+  (`studio`: a bent line by where each range's middle falls), the Modern
+  Equalizer's state (`modern_eq`: its text holds its bytes as letters of
+  6 bits). `pancrop.rs` reads and writes the Pan/Crop's chunk, a RIFF of
+  32 bits inside the block. `veg_ui.rs` is the interface's side: media
+  where the project says or beside it, the video effects and transitions
+  BananaV's own of the same names or the same plug-ins installed
+  (`effect_in`, `effect_out`), and the
+  status line saying what did not come in.
 - Nested projects (VEGAS's "Nesting projects"): a project file is media
   (`bv_media`'s `nested.rs`: its length, its output's picture when it has
   video events, stereo sound when it has audio events, its markers and
@@ -387,14 +449,16 @@ layers (`cargo xtask layers` enforces it):
   `bv_timeline::mask` — closed Bézier paths in the media's pixels, each
   positive, negative or disabled with its opacity, feather and
   anti-aliasing, their shapes keyframed anchor by anchor, kept through
-  cuts, trims and joins; `PanCropMask::coverage` is the exact rasterizer,
-  its rows and distance transform on the processor's threads,
-  `bv_color::par_rows`)
+  cuts, trims and joins; `mask_raster.rs` is the rasterizer, checked
+  pixel by pixel against rendered frames: paths cut into monotone pieces, 16
+  bands a line with their coverage summed by groups, even-odd, a 4th-order
+  recursive Gaussian on 32-bit floats for the feather, each path combined
+  with those before)
   reach both renderers as `MediaLayer::mask_picture`, the masks' coverage
   at the picture's size — the last two kept by `PanCropMask::fingerprint`,
   so masks that do not change are worked out once, and kept on the card
-  too — framed as the picture is (`place_par`, the card's
-  `place`): after the event's framed effects it cuts the picture, or with
+  too — framed as the picture is (`place_box`, the card's
+  `place_hard` and `place_soft`): after the event's framed effects it cuts the picture, or with
   Apply to FX mixes the picture without them and with them (the card's
   `blend` kernel's modes 101 and 102, then Add). The Pan/Crop window's
   Mask row (`pancrop_keys::KeyRow`) gives its toolbar, properties and
@@ -845,9 +909,16 @@ layers (`cargo xtask layers` enforces it):
   Event FX is `nonrealtime_ui.rs`, on the engine's `nonrealtime.rs`: the
   media samples an event plays (between the media times of its start and
   end; not reversed or frozen) through its audio effects
-  (`bv_mixer::dsp::Chain`) into a new WAV file, in the background, which
-  joins the project as the event's new take (`Project::add_take`), the
-  effects taken off the event as asked; Auto Ducking is
+  (`bv_mixer::dsp::Chain`, their lateness taken back; the effects that
+  change the sound's length — `EffectKind::works_offline` — on all of it
+  at once through `bv_mixer::render_offline`) into a new WAV file, in the
+  background, which joins the project as the event's new take
+  (`Project::add_take`), the effects taken off the event as asked. While
+  it plays, an event whose chain has such an effect plays its sound made
+  through the whole chain the same way (`bv_mixer`'s `prerender.rs`: made
+  on a thread of its own when the pool mixes live — `AudioPool::set_live`
+  — the last one made playing meanwhile, at once when rendering), as long
+  as the event; Auto Ducking is
   `bv_timeline::ducking` — a controller track's reductions
   (`Track::ducking`: Floor Reduction while it sounds, Peak Reduction more
   as it gets louder) and listener tracks (`Track::duck_listener`); each of
@@ -1101,19 +1172,37 @@ layers (`cargo xtask layers` enforces it):
   Crop, `crop.rs` (VEGAS's: each pixel kept, times Opacity, when its
   corner is inside the window — no smoothing —, the window turned
   clockwise by Angle), Color Curves, `color_curves.rs`, Color Grading,
-  `color_grading.rs` (the Color Grading window's effect, as VEGAS's Help
-  lays the window's sections out — a Camera LUT (a `.cube` file, or
-  Apple Log's published curve to linear or to Rec. 709), the Color
-  Wheels' Lift, Gamma, Gain and Offset (a color and a master Y each), the
-  RL Color Wheels within two luma thresholds, Levels, Tone, White
-  Balance, HSL, the Curves (Brightness, Red, Green, Blue) and the HSL
-  Curves (hue ones wrapping round red), then a Look LUT, each LUT at its
-  strength; BananaV's math until the user's prints measure VEGAS's;
-  `cube` bakes a grade into a `.cube` file, `Engine::color_grading_cube`,
-  and `pick` works out what the pickers set from the colors picked,
-  `Engine::color_grading_pick`; on the card its LUTs are LUT Filter's
-  kernel or Apple Log's, `apple_log`, and its own steps the `grade` kernel
-  on a buffer of its settings and tables, `accel::GradePlan`) — the panel is `tabs/color.rs`, laid out as VEGAS 23's (the user's
+  `color_grading.rs` (the Color Grading window's effect, version 2.0:
+  VEGAS's Color Grading's own parameters — each wheel's red, green, blue
+  and Y and its point, U and V; the RL wheels and their thresholds; the
+  ten curves as VEGAS's text, `N:x:y:ix:iy:ox:oy:…`; Levels, Tone, White
+  Balance, HSL; the Camera and Look LUTs (on, file — or Apple Log's
+  published curve to linear or Rec. 709 —, interpolation, strength) —,
+  all hidden, the window edits them; its work is `grading.rs`, as VEGAS's
+  with the graphics card on: the Camera LUT, the HSL Curves one after
+  another (each keyed on what the one before made), White Balance
+  (Robertson's isotemperature lines and a cone matrix between the values
+  raised to 2.4 and back), Levels, the RL wheels' and the Color Curves'
+  tables (Bézier curves sampled with a single Newton step, as VEGAS's),
+  Lift, two CDLs (Gain, Offset and Gamma by channel, then by Y),
+  Saturation, Exposure, Brightness, Contrast, the panel's Exposure and
+  the HSL always, then the Look LUT, the color held within 0–1 between
+  the steps; `Grade::quantize` makes the steps 8-bit as VEGAS's are (cut
+  to 12 bits, then rounded) for measuring: the ignored
+  `matches_vegas_renders` compares the grade with VEGAS's own renders of
+  20 cases, `BV_GRADING_INPUT`, `BV_GRADING_RENDERS`, `BV_GRADING_LUTS`
+  (within a level in a few pixels; as BananaV renders, in floating
+  point, within one, two in the chained HSL Curves); `wheel_values` and
+  `wheel_point` turn a wheel's point into its color and back, as VEGAS's
+  panel does; `cube` bakes a grade into a `.cube` file,
+  `Engine::color_grading_cube`, and `pick` works out what the pickers set
+  from the colors picked — Lift's and Gain's channels between their ends
+  as VEGAS's eyedroppers, a white balance that leaves the color grey, the
+  Color Selector's points —, `Engine::color_grading_pick`; on the card
+  its LUTs are LUT Filter's kernel or Apple Log's, `apple_log`, holding
+  the colors within 0–1, and its own steps the `grade` kernel on a buffer
+  of its settings, a row each, and its tables, `accel::GradePlan`) — the
+  panel is `tabs/color.rs`, laid out as VEGAS 23's (the user's
   prints): its header the FX level's menu — event, track, media, video
   output; the event's, track's and media's menus and the Video Preview's
   open it there — and what it grades, Bypass Color Grading, Reset All,
@@ -1135,11 +1224,23 @@ layers (`cargo xtask layers` enforces it):
   the cursor through
   `ofx::value_now`/`set_now`, the effect added by the first change; the
   wheel is `widgets::grading_wheel`, drawn as VEGAS's (a shaded ball in a
-  ring of hues, red at the top as on the vectorscope — `wheel_screen` —,
-  its crosshair, the ball's meridian through the point and its equator);
-  the HSL Curves' editor has VEGAS's
-  tangents' handles, point menu and arrow keys (`ofx_curves`'
-  `move_handle`, `lock_handles`); the pickers — Lift's black point,
+  ring of the colors its point gives, red at the top as on the
+  vectorscope, its crosshair, the ball's meridian through the point and
+  its equator) and handled as VEGAS's (`WheelChange`: the wheel dragged
+  at a twentieth of the pointer, the point itself at a thirty-second,
+  Ctrl ten times finer; a double-click resets it, a right double-click
+  jumps; the mouse wheel moves it up and down, with Alt across, Shift out
+  and in, Shift and Alt round; the arrow keys too), its point given in
+  VEGAS's 85-pixel units; the sliders and boxes are VEGAS's (`slide`: the
+  knob dragged, a click beside it a tenth, a double-click the default,
+  the mouse wheel a hundredth, Ctrl a thousandth; `number_box`, three
+  decimals); every curve point has handles, as VEGAS's
+  (`grading_curves`' `add_dot`: a double-click adds one along its
+  neighbours' line, `flatten`: on a point makes its handles level,
+  `smooth`), the HSL Curves 0.5 where they change nothing; the HSL Curves'
+  editor has VEGAS's tangents' handles, point menu and arrow keys
+  (`ofx_curves`' `move_handle`, `lock_handles`), its swatches add a color
+  and its two neighbours; the pickers — Lift's black point,
   Gain's white point, Select Neutral Tone, the HSL Curves' Color
   Selector — wait for a click or a rectangle on the Video Preview
   (`pick_on_preview`, the color under the pointer read out) and read the
@@ -2867,8 +2968,9 @@ layers (`cargo xtask layers` enforces it):
   checks with `--cfg bv_no_ffmpeg`. `LINUX_TARGET=aarch64-unknown-linux-gnu`
   checks ARM64.
 - Packages: `gh workflow run package.yml` makes, as the run's artifacts
-  (nothing is published), zips for Windows x64 and ARM64 (the C runtime
-  inside) and AppImages for Linux x64 and ARM64, built on Ubuntu 22.04
+  (nothing is published), zips and installers for Windows x64 and ARM64 (the
+  C runtime inside; `packaging/windows/bananav.iss`, Inno Setup, the installer
+  tried out on the runner) and AppImages for Linux x64 and ARM64, built on Ubuntu 22.04
   with an FFmpeg built under the LGPL (`packaging/linux/build_ffmpeg.sh`:
   no x264 or x265 while BananaV's license is open). The icon is BananaV's
   official logo (`packaging/icons`: `bananav-icon.svg`, the rounded icon;

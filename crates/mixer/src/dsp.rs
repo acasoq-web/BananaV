@@ -5,7 +5,7 @@
 //! Cada efeito guarda estado entre blocos; a mixagem recria o estado quando
 //! a leitura pula (busca) para não "vazar" som de outro lugar.
 
-use bv_timeline::{Effect, EffectKind};
+use bv_timeline::{Effect, EffectKind, Tempo};
 
 fn db(x: f32) -> f32 {
     10f32.powf(x / 20.0)
@@ -32,8 +32,6 @@ pub(crate) enum Shape {
     Peak,
     HighPass,
     LowPass,
-    /// Constant 0 dB peak.
-    BandPass,
 }
 
 pub(crate) fn design(shape: Shape, rate: f32, freq: f32, q: f32, gain_db: f32) -> Coeffs {
@@ -89,7 +87,6 @@ pub(crate) fn design(shape: Shape, rate: f32, freq: f32, q: f32, gain_db: f32) -
             -2.0 * cos,
             1.0 - alpha,
         ),
-        Shape::BandPass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
     };
     Coeffs {
         b0: b0 / a0,
@@ -261,7 +258,8 @@ enum State {
         damp: f32,
         mix: f32,
     },
-    ModernEq(Box<crate::modern_eq::Eq>),
+    /// One of the effects that follow VEGAS's ([`crate::fx`]).
+    Own(Box<dyn crate::fx::Own>),
     #[cfg(not(target_family = "wasm"))]
     Vst(Box<crate::vst::Run>),
 }
@@ -294,6 +292,14 @@ pub struct Processor {
 
 impl Processor {
     pub fn new(e: &Effect, rate: u32, channels: usize) -> Processor {
+        if let Some(own) = crate::fx::make(e, rate, channels) {
+            return Processor {
+                kind: e.kind,
+                params: e.params.clone(),
+                vst: None,
+                state: State::Own(own),
+            };
+        }
         let r = rate as f32;
         let p = |i: usize| e.param(i);
         let state = match e.kind {
@@ -366,9 +372,6 @@ impl Processor {
                     mix: p(2),
                 }
             }
-            EffectKind::ModernEq => {
-                State::ModernEq(Box::new(crate::modern_eq::Eq::new(e, rate, channels)))
-            }
             // A plug-in that cannot load lets the sound through.
             #[cfg(not(target_family = "wasm"))]
             EffectKind::Vst => match e
@@ -400,12 +403,20 @@ impl Processor {
         self.kind == e.kind && self.params == e.params && self.vst == vst_key(e)
     }
 
-    /// How many samples late its output comes: a VST 3 plug-in's latency
-    /// (BananaV's own effects answer at once).
+    /// The project's tempo, for the effects with tempo sync.
+    pub fn keep_time(&mut self, tempo: &Tempo) {
+        if let State::Own(own) = &mut self.state {
+            own.keep_time(tempo);
+        }
+    }
+
+    /// How many samples late its output comes: a VST 3 plug-in's latency,
+    /// or that of one of BananaV's own effects working in blocks (FFTs).
     pub fn latency(&self) -> usize {
         match &self.state {
             #[cfg(not(target_family = "wasm"))]
             State::Vst(run) => run.latency(),
+            State::Own(own) => own.latency(),
             #[cfg(test)]
             State::Gain(_) => FAKE_LATENCY.with(std::cell::Cell::get),
             _ => 0,
@@ -421,8 +432,15 @@ impl Processor {
     /// Takes `e`'s values while it runs, keeping what it holds — filters'
     /// memory, envelopes, delay lines and reverb tails — so that values
     /// that change as it plays (FX automation, a slider dragged) do not
-    /// click; the Modern Equalizer starts again.
+    /// click.
     pub fn retune(&mut self, e: &Effect, rate: u32, channels: usize) {
+        if let State::Own(own) = &mut self.state
+            && self.kind == e.kind
+        {
+            own.set(&crate::fx::params_of(e));
+            self.params = e.params.clone();
+            return;
+        }
         let fresh = Processor::new(e, rate, channels);
         match (&mut self.state, fresh.state) {
             (State::Gain(g), State::Gain(n)) => *g = n,
@@ -529,6 +547,7 @@ impl Processor {
     pub fn process(&mut self, channels: &mut [Vec<f32>]) {
         let n = channels.first().map_or(0, Vec::len);
         match &mut self.state {
+            State::Own(own) => own.process(channels),
             State::Gain(g) => {
                 for ch in channels.iter_mut() {
                     for s in ch.iter_mut() {
@@ -628,7 +647,6 @@ impl Processor {
                     }
                 }
             }
-            State::ModernEq(eq) => eq.process(channels),
             #[cfg(not(target_family = "wasm"))]
             State::Vst(run) => run.process(channels),
         }
@@ -645,6 +663,8 @@ pub struct Chain {
     slots: Vec<usize>,
     rate: u32,
     channels: usize,
+    /// The project's tempo, for the effects that keep time with it.
+    tempo: Tempo,
 }
 
 impl Chain {
@@ -699,7 +719,11 @@ impl Chain {
                         p.follow(e);
                         p
                     }
-                    _ => Processor::new(e, rate, channels),
+                    _ => {
+                        let mut p = Processor::new(e, rate, channels);
+                        p.keep_time(&self.tempo);
+                        p
+                    }
                 };
                 (p, e.enabled)
             })
@@ -710,6 +734,16 @@ impl Chain {
 
     pub fn is_empty(&self) -> bool {
         self.procs.is_empty()
+    }
+
+    /// The project's tempo (the effects with tempo sync follow it).
+    pub fn set_tempo(&mut self, tempo: Tempo) {
+        if tempo != self.tempo {
+            self.tempo = tempo;
+            for (p, _) in &mut self.procs {
+                p.keep_time(&tempo);
+            }
+        }
     }
 
     /// Zera o estado (depois de uma busca).

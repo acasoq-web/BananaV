@@ -7,6 +7,7 @@ use std::sync::Arc;
 use bv_core::{ImageRgbaF32, PixelFormat, PlaneData, TransferCharacteristic, VideoFrame};
 use bv_media::{Ask, Picture, VideoPool, Want};
 use bv_timeline::fx::grade;
+use bv_timeline::pancrop::Placement;
 use bv_timeline::scene::{
     CardPicture, EventLayer, FrameScene, Framing, MediaLayer, PluginCall, Plugins, TrackContent,
     fit_rect_par,
@@ -933,7 +934,7 @@ impl Compositor {
             framed_at: 0,
             media_size: (img.w, img.h),
             media_fx_scale: 1.0,
-            par: 1.0,
+            place: m.place,
             quality: m.quality,
         };
         for (k, e) in m.effects.iter().enumerate() {
@@ -1103,7 +1104,6 @@ impl Compositor {
             self.mix(enc, &next, &img, k);
             src = img;
         }
-        let tf = &m.transform;
         // The media's effects work on its own picture, on pixels that
         // show; then the event's Pan/Crop frames it, and the event's
         // effects work on the framed picture (VEGAS's default: Pan/Crop
@@ -1112,10 +1112,9 @@ impl Compositor {
         let (src, media_fx_scale) = if framed_at == 0 {
             (src, 1.0)
         } else {
-            let mut src = self.reduce_for_display(enc, scene, &src, tf.scale, m.par);
-            let (pw, ph) = scene.project_size;
-            let fit = fit_rect_par(src.w, src.h, m.par, pw, ph);
-            let fx_scale = src.h as f32 / (fit.h * tf.scale.max(1e-4));
+            let mut src = self.reduce_for_display(enc, &src, &m.placement);
+            let per_line = m.placement.picture_per_pixel(src.w, src.h).1;
+            let fx_scale = (per_line as f32 * scene.scale).max(1e-4);
             for (k, e) in m.effects[..framed_at].iter().enumerate() {
                 match scene.media_call(m, k, fx_scale, None) {
                     Some(call) => self.plugin(enc, scene, &call, &mut src),
@@ -1125,7 +1124,13 @@ impl Compositor {
             }
             (src, fx_scale)
         };
-        let mut img = self.place(enc, &src, (scene.width, scene.height), tf, m.quality, m.par);
+        let mut img = self.place_box(
+            enc,
+            &src,
+            (scene.width, scene.height),
+            &m.placement,
+            m.quality,
+        );
         // Reduce Interlace Flicker: on the framed picture, before the
         // event's effects.
         if m.clip.reduce_flicker {
@@ -1144,7 +1149,8 @@ impl Compositor {
         // kept on the card while they do not change.
         let mask = m.mask_picture(src.w, src.h).map(|c| {
             let up = self.upload(Some(owner.rotate_left(17) ^ 0x6d61_736b), &c);
-            self.place(enc, &up, (scene.width, scene.height), tf, m.quality, m.par)
+            let hard = m.placement.hard();
+            self.place_box(enc, &up, (scene.width, scene.height), &hard, m.quality)
         });
         let unaffected = match &mask {
             Some(_) if m.clip.mask.as_ref().is_some_and(|k| k.apply_to_fx) => {
@@ -1156,7 +1162,7 @@ impl Compositor {
             framed_at,
             media_size: (src.w, src.h),
             media_fx_scale,
-            par: m.par,
+            place: m.place,
             quality: m.quality,
         };
         // The event's picture before its effects, kept for those that
@@ -1364,18 +1370,12 @@ impl Compositor {
     fn reduce_for_display(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
-        scene: &FrameScene<'_>,
         src: &Img,
-        scale: f32,
-        par: f32,
+        place: &Placement,
     ) -> Img {
-        let fit = fit_rect_par(src.w, src.h, par, scene.width, scene.height);
         let mut img = src.clone();
         let mut halved = false;
-        while img.w as f32 >= fit.w * scale * 2.0
-            && img.h as f32 >= fit.h * scale * 2.0
-            && img.w > 1
-        {
+        while place.reduces(img.w, img.h) && img.w > 1 {
             img = self.half(enc, &img);
             halved = true;
         }
@@ -1394,6 +1394,69 @@ impl Compositor {
             &[&src.buf, &out.buf],
             Grid::Pixels(w, h),
         );
+        out
+    }
+
+    /// `src`, a picture of the media, where a Pan/Crop places it on a `w` ×
+    /// `h` frame (as `bv_render::place_box`).
+    fn place_box(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        src: &Img,
+        (w, h): (u32, u32),
+        place: &Placement,
+        quality: RenderQuality,
+    ) -> Img {
+        let out = self.image(w, h);
+        if place.empty {
+            return self.transparent(enc, w, h);
+        }
+        // Large reductions go through 2 × 2 averages first (Good and Best).
+        let mut s = src.clone();
+        if matches!(quality, RenderQuality::Good | RenderQuality::Best) {
+            while place.reduces(s.w, s.h) && s.w > 1 {
+                s = self.half(enc, &s);
+            }
+        }
+        let (m, _) = place.in_picture([f64::from(s.w), f64::from(s.h)]);
+        let (kx, ky) = (
+            f64::from(s.w) / place.media[0],
+            f64::from(s.h) / place.media[1],
+        );
+        let lines = place.crop_lines();
+        let limits = [lines[0] * kx, lines[1] * ky, lines[2] * kx, lines[3] * ky];
+        let b = place.to_box.unwrap_or_default();
+        let mut p = Params::sized(w, h).with_f(&[
+            m[0] as f32,
+            m[1] as f32,
+            m[2] as f32,
+            m[3] as f32,
+            m[4] as f32,
+            m[5] as f32,
+            b[0] as f32,
+            b[1] as f32,
+            b[2] as f32,
+            b[3] as f32,
+            b[4] as f32,
+            b[5] as f32,
+            limits[0] as f32,
+            limits[1] as f32,
+            limits[2] as f32,
+            limits[3] as f32,
+        ]);
+        (p.sw, p.sh) = (s.w, s.h);
+        p.i = place.pixels((w, h));
+        p.j[0] = match quality {
+            RenderQuality::Draft => 0,
+            RenderQuality::Preview | RenderQuality::Good => 1,
+            RenderQuality::Best => 2,
+        };
+        let k = if place.to_box.is_some() {
+            K::PlaceSoft
+        } else {
+            K::PlaceHard
+        };
+        self.kernel(enc, k, p, &[&s.buf, &out.buf], Grid::Pixels(w, h));
         out
     }
 
@@ -1671,20 +1734,9 @@ impl Compositor {
                     Grid::Pixels(w, h),
                 );
             }
-            // Audio effects do not touch the picture; plug-ins' go through
-            // `plugin`.
-            EffectKind::Gain
-            | EffectKind::Eq3
-            | EffectKind::HighPass
-            | EffectKind::LowPass
-            | EffectKind::Compressor
-            | EffectKind::Limiter
-            | EffectKind::NoiseGate
-            | EffectKind::Delay
-            | EffectKind::Reverb
-            | EffectKind::ModernEq
-            | EffectKind::Vst
-            | EffectKind::Plugin => {}
+            // Audio effects do not touch the picture (all of them); plug-ins'
+            // go through `plugin`.
+            _ => {}
         }
     }
 

@@ -7,7 +7,6 @@ use std::collections::HashMap;
 
 use bv_core::{Tick, TimeRange};
 
-use crate::fx::Transform;
 use crate::model::{
     ChannelMap, Clip, ClipId, GroupId, MediaId, MediaInfo, MediaSource, NewEvents, Project,
     TRACK_PALETTE, Track, TrackId, TrackKind,
@@ -744,68 +743,113 @@ impl Project {
         self.trim_end(id, start + duration)
     }
 
-    /// Define o enquadramento no instante `t` da timeline. Sem quadros-chave,
-    /// no início do clipe, muda o valor fixo; em outro instante, cria a
-    /// animação (um quadro-chave no início com o valor atual e outro em `t`).
-    /// Com quadros-chave, cria ou atualiza o de `t`.
-    pub fn set_clip_transform_at(&mut self, id: ClipId, t: Tick, value: Transform) -> Result<()> {
-        self.set_clip_transform_at_as(id, t, value, (crate::fx::KeyCurve::Smooth, 0.0))
+    /// What event `id`'s Pan/Crop lands on (`None`: no such event, or its
+    /// media is gone).
+    pub fn clip_place_in(&self, id: ClipId) -> Option<crate::pancrop::PlaceIn> {
+        let c = self.clip(id)?;
+        let info = self.media(c.media)?;
+        Some(crate::pancrop::place_in(
+            &self.settings,
+            info,
+            c.pan_crop.keep_aspect,
+            c.pan_crop.fill,
+        ))
     }
 
-    /// [`Self::set_clip_transform_at`], new keyframes as the editor's
-    /// settings say (Options › Preferences › External Control & Automation:
-    /// "New video motion keyframes", "Pan/Crop default smoothness"): the
-    /// curve of the first ones (later ones take the curve of the keyframe
-    /// before them) and their smoothness.
-    pub fn set_clip_transform_at_as(
+    /// The box of event `id`'s Pan/Crop at `t` on the timeline.
+    pub fn clip_box_at(&self, id: ClipId, t: Tick) -> Option<crate::pancrop::PanCropKey> {
+        let place = self.clip_place_in(id)?;
+        let c = self.clip(id)?;
+        Some(c.box_at(t, place.media, place.media_aspect))
+    }
+
+    /// Event `id`'s Pan/Crop box at `t` on the timeline becomes `value`,
+    /// as [`crate::pancrop::PanCrop::set_at`] says; new keyframes as the
+    /// editor's settings say (Options › Preferences › External Control &
+    /// Automation: "New video motion keyframes", "Pan/Crop default
+    /// smoothness"): the curve of the first ones (later ones take the curve
+    /// of the keyframe before them) and their smoothness, 0–100.
+    pub fn set_clip_box_at(
         &mut self,
         id: ClipId,
         t: Tick,
-        value: Transform,
+        value: crate::pancrop::PanCropKey,
         (curve, smoothness): (crate::fx::KeyCurve, f32),
     ) -> Result<()> {
         let rate = self.settings.frame_rate;
+        let place = self.clip_place_in(id).ok_or(EditError::UnknownClip(id))?;
         let c = self.clip_mut(id).ok_or(EditError::UnknownClip(id))?;
         let offset = (rate.snap_nearest(t) - c.start).clamp(Tick::ZERO, c.duration);
-        let key =
-            |at: Tick, value: Transform, curve: crate::fx::KeyCurve| crate::fx::TransformKey {
-                at,
-                value,
-                curve,
-                smoothness,
-            };
-        if c.transform_keys.is_empty() {
-            if offset == Tick::ZERO {
-                c.transform = value;
-                return Ok(());
-            }
-            c.transform_keys.push(key(Tick::ZERO, c.transform, curve));
-        }
-        match c.transform_keys.iter_mut().find(|k| k.at == offset) {
-            Some(k) => k.value = value,
-            None => {
-                let before = c
-                    .transform_keys
-                    .iter()
-                    .rev()
-                    .find(|k| k.at < offset)
-                    .map_or(curve, |k| k.curve);
-                c.transform_keys.push(key(offset, value, before));
-                c.transform_keys.sort_by_key(|k| k.at);
-            }
-        }
-        c.transform = c.transform_keys[0].value;
+        c.pan_crop.set_at(
+            offset,
+            value,
+            place.media,
+            (curve, f64::from(smoothness / 100.0)),
+        );
         Ok(())
     }
 
-    /// Remove o quadro-chave em `offset` (a partir do início do clipe).
-    pub fn remove_transform_key(&mut self, id: ClipId, offset: Tick) -> Result<()> {
+    /// Event `id` framed by `tf` (where a fitted picture goes, how much
+    /// zoomed and turned) all along.
+    pub fn set_clip_framing(&mut self, id: ClipId, tf: &crate::fx::Transform) -> Result<()> {
+        let place = self.clip_place_in(id).ok_or(EditError::UnknownClip(id))?;
+        let key = crate::pancrop::key_from_transform(tf, &place);
         let c = self.clip_mut(id).ok_or(EditError::UnknownClip(id))?;
-        c.transform_keys.retain(|k| k.at != offset);
-        if c.transform_keys.len() == 1 {
-            c.transform = c.transform_keys[0].value;
-            c.transform_keys.clear();
-        }
+        c.pan_crop = crate::pancrop::PanCrop::holding(
+            key,
+            place.media,
+            c.pan_crop.keep_aspect,
+            c.pan_crop.fill,
+        );
+        Ok(())
+    }
+
+    /// Event `id` framed by `keys` (what [`Self::set_clip_framing`] takes,
+    /// over time).
+    pub fn set_clip_framing_keys(
+        &mut self,
+        id: ClipId,
+        keys: &[crate::fx::TransformKey],
+    ) -> Result<()> {
+        let place = self.clip_place_in(id).ok_or(EditError::UnknownClip(id))?;
+        let c = self.clip_mut(id).ok_or(EditError::UnknownClip(id))?;
+        c.pan_crop.ensure_size(place.media);
+        c.pan_crop.keys = keys
+            .iter()
+            .map(|k| crate::pancrop::PanCropKey {
+                at: k.at,
+                curve: k.curve,
+                smoothness: f64::from(k.smoothness / 100.0),
+                ..crate::pancrop::key_from_transform(&k.value, &place)
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Event `id`'s box at `t` on the timeline becomes the one `tf` shows.
+    pub fn set_clip_transform_at(
+        &mut self,
+        id: ClipId,
+        t: Tick,
+        tf: crate::fx::Transform,
+    ) -> Result<()> {
+        let place = self.clip_place_in(id).ok_or(EditError::UnknownClip(id))?;
+        let key = crate::pancrop::key_from_transform(&tf, &place);
+        self.set_clip_box_at(id, t, key, (crate::fx::KeyCurve::Smooth, 0.0))
+    }
+
+    /// Event `id`'s box at `t` as the closest framing: where a fitted
+    /// picture goes, how much zoomed and turned.
+    pub fn clip_transform_at(&self, id: ClipId, t: Tick) -> Option<crate::fx::Transform> {
+        let place = self.clip_place_in(id)?;
+        let key = self.clip_box_at(id, t)?;
+        Some(crate::pancrop::transform_from_key(&key, &place))
+    }
+
+    /// Event `id`'s Pan/Crop keyframe at `offset` (from its start) gone.
+    pub fn remove_clip_box_key(&mut self, id: ClipId, offset: Tick) -> Result<()> {
+        let c = self.clip_mut(id).ok_or(EditError::UnknownClip(id))?;
+        c.pan_crop.remove_key(offset);
         Ok(())
     }
 
@@ -1029,21 +1073,10 @@ impl Project {
                     curve: crate::fx::KeyCurve::Linear,
                 });
             }
-            right.transform_keys.clear();
-            if !left.transform_keys.is_empty() {
-                // A metade da direita começa no valor do corte; a da
-                // esquerda termina nele.
-                let mut tmp = left.clone();
-                rebase_keys(&mut tmp, cut);
-                right.transform_keys = tmp.transform_keys;
-                let at_cut = left.transform_at(at);
-                left.transform_keys.retain(|k| k.at < cut);
-                left.transform_keys.push(crate::fx::TransformKey::new(
-                    cut,
-                    at_cut,
-                    crate::fx::KeyCurve::Linear,
-                ));
-            }
+            // A metade da direita começa no valor do corte; a da esquerda
+            // termina nele.
+            let size = left.pan_crop.own_size();
+            right.pan_crop = left.pan_crop.split_at(cut, size, 1.0);
             // Its masks' shapes too: the right half's start with those at
             // the cut.
             if let Some(m) = &mut left.mask {
@@ -1155,27 +1188,8 @@ pub(crate) fn rebase_keys(c: &mut Clip, delta: Tick) {
     if let Some(m) = &mut c.mask {
         m.rebase(delta);
     }
-    if c.transform_keys.is_empty() {
-        return;
-    }
-    let before = c.transform_keys.iter().rev().find(|k| k.at <= delta);
-    let first = crate::fx::TransformKey {
-        at: Tick::ZERO,
-        value: c.transform_at(c.start + delta),
-        curve: before.map_or(crate::fx::KeyCurve::Smooth, |k| k.curve),
-        smoothness: before.map_or(0.0, |k| k.smoothness),
-    };
-    let mut keys: Vec<_> = c
-        .transform_keys
-        .iter()
-        .filter(|k| k.at > delta)
-        .map(|k| crate::fx::TransformKey {
-            at: k.at - delta,
-            ..*k
-        })
-        .collect();
-    keys.insert(0, first);
-    c.transform_keys = keys;
+    let size = c.pan_crop.own_size();
+    c.pan_crop.rebase(delta, size, 1.0);
 }
 
 /// The event's own envelopes when its start moves `delta` later in it
@@ -1762,31 +1776,28 @@ mod tests {
     #[test]
     fn quadros_chave_do_enquadramento() {
         let (mut p, _, _, cv, _) = setup();
-        let zoom = Transform {
+        let zoom = crate::fx::Transform {
             scale: 2.0,
-            ..Transform::default()
+            ..crate::fx::Transform::default()
         };
         p.set_clip_transform_at(cv, s(4), zoom).unwrap();
-        let c = p.clip(cv).unwrap().clone();
-        assert_eq!(c.transform_keys.len(), 2);
-        assert_eq!(c.transform_at(Tick::ZERO).scale, 1.0);
-        assert!((c.transform_at(s(4)).scale - 2.0).abs() < 1e-3);
-        assert!((c.transform_at(s(9)).scale - 2.0).abs() < 1e-3);
-        let mid = c.transform_at(s(2)).scale;
+        let scale = |p: &Project, id: ClipId, t: Tick| p.clip_transform_at(id, t).unwrap().scale;
+        assert_eq!(p.clip(cv).unwrap().pan_crop.keys.len(), 2);
+        assert_eq!(scale(&p, cv, Tick::ZERO), 1.0);
+        assert!((scale(&p, cv, s(4)) - 2.0).abs() < 1e-3);
+        assert!((scale(&p, cv, s(9)) - 2.0).abs() < 1e-3);
+        let mid = scale(&p, cv, s(2));
         assert!(mid > 1.0 && mid < 2.0, "{mid}");
         // Dividir no meio mantém a animação contínua dos dois lados.
         let right = p.split(cv, s(2)).unwrap()[0];
-        let l = p.clip(cv).unwrap().clone();
-        let r = p.clip(right).unwrap().clone();
-        assert!((l.transform_at(s(2) - Tick(1)).scale - mid).abs() < 1e-3);
-        assert!((r.transform_at(s(2)).scale - mid).abs() < 1e-3);
-        assert!((r.transform_at(s(4)).scale - 2.0).abs() < 1e-3);
+        assert!((scale(&p, cv, s(2) - Tick(1)) - mid).abs() < 1e-3);
+        assert!((scale(&p, right, s(2)) - mid).abs() < 1e-3);
+        assert!((scale(&p, right, s(4)) - 2.0).abs() < 1e-3);
         // Aparar o início re-baseia os quadros-chave.
         p.trim_start(right, s(3)).unwrap();
-        let r = p.clip(right).unwrap();
-        assert_eq!(r.transform_keys[0].at, Tick::ZERO);
-        assert!((r.transform_at(s(4)).scale - 2.0).abs() < 1e-3);
-        p.remove_transform_key(right, s(1)).unwrap();
+        assert_eq!(p.clip(right).unwrap().pan_crop.keys[0].at, Tick::ZERO);
+        assert!((scale(&p, right, s(4)) - 2.0).abs() < 1e-3);
+        p.remove_clip_box_key(right, s(1)).unwrap();
         p.check_invariants().unwrap();
     }
 

@@ -511,6 +511,113 @@ pub(crate) mod peak_files {
         })
     }
 
+    /// Media whose other editor's peak file is passed over: Rebuild Audio
+    /// Peaks makes BananaV's own.
+    static PASSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// A DOS date and time (`time << 16 | date`, two seconds apart) as
+    /// seconds since 1970.
+    pub(crate) fn dos_seconds(v: u32) -> Option<i64> {
+        let (time, date) = (i64::from(v >> 16), i64::from(v & 0xFFFF));
+        let (year, month, day) = (1980 + (date >> 9), (date >> 5) & 0xF, date & 0x1F);
+        if !(1..=12).contains(&month) || day == 0 {
+            return None;
+        }
+        // Days since 1970 of the Gregorian date.
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+        let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+        let (h, m, sec) = (time >> 11, (time >> 5) & 0x3F, (time & 0x1F) * 2);
+        Some(days * 86_400 + h * 3600 + m * 60 + sec)
+    }
+
+    /// The peak file another editor leaves beside a media file (`tom.wav.sfk`
+    /// or `tom.sfk` for `tom.wav`), as BananaV's waveform of `per_second` peaks a
+    /// second. Its header of 64 bytes: `SFPK`, version 1, the header's
+    /// size, the media's last change in local time as DOS writes it, the
+    /// bits of each value (8 or 16), the channels, the samples each peak
+    /// covers and the media's samples per channel, then its last change
+    /// again in UTC; after it, block by block and channel by channel, the
+    /// minimum and the maximum. A file made from another version of the
+    /// media, or of other channels, is not used.
+    pub(crate) fn read_sfk(
+        media: &str,
+        rate: u32,
+        channels: usize,
+        per_second: u32,
+    ) -> Option<Waveform> {
+        if PASSED.lock().ok()?.iter().any(|m| m == media) || rate == 0 || per_second == 0 {
+            return None;
+        }
+        let data = std::fs::read(format!("{media}.sfk"))
+            .or_else(|_| std::fs::read(std::path::Path::new(media).with_extension("sfk")))
+            .ok()?;
+        let u32_at = |i: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(data.get(i..i + 4)?.try_into().ok()?))
+        };
+        let u64_at = |i: usize| -> Option<u64> {
+            Some(u64::from_le_bytes(data.get(i..i + 8)?.try_into().ok()?))
+        };
+        if data.get(..4)? != b"SFPK" || u32_at(4)? != 1 {
+            return None;
+        }
+        let changed = std::fs::metadata(media)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs() as i64;
+        if (dos_seconds(u32_at(0x24)?)? - changed).abs() > 2 {
+            return None;
+        }
+        let header = u32_at(8)? as usize;
+        let width = match u32_at(0x10)? {
+            8 => 1,
+            16 => 2,
+            _ => return None,
+        };
+        let per_peak = u64::from(u32_at(0x18)?);
+        let samples = u64_at(0x1C)?;
+        if u32_at(0x14)? as usize != channels || channels == 0 || per_peak == 0 {
+            return None;
+        }
+        let blocks = samples.div_ceil(per_peak) as usize;
+        let body = data.get(header..header.checked_add(blocks * channels * 2 * width)?)?;
+        let value = |i: usize| match width {
+            1 => f32::from(body[i] as i8) / 128.0,
+            _ => f32::from(i16::from_le_bytes([body[i], body[i + 1]])) / 32768.0,
+        };
+        let rate = u64::from(rate);
+        let per_second = u64::from(per_second);
+        let buckets = (samples * per_second).div_ceil(rate) as usize;
+        let mut peaks = vec![Vec::with_capacity(buckets); channels];
+        for k in 0..buckets as u64 {
+            let from = k * rate / per_second;
+            let to = ((k + 1) * rate / per_second).clamp(from + 1, samples.max(from + 1));
+            let (b0, b1) = (
+                (from / per_peak) as usize,
+                (to.div_ceil(per_peak) as usize).min(blocks),
+            );
+            for (c, p) in peaks.iter_mut().enumerate() {
+                let (mut lo, mut hi) = (0.0f32, 0.0f32);
+                for b in b0..b1 {
+                    let at = (b * channels + c) * 2 * width;
+                    lo = lo.min(value(at));
+                    hi = hi.max(value(at + width));
+                }
+                p.push((lo, hi));
+            }
+        }
+        Some(Waveform {
+            per_second: per_second as u32,
+            peaks,
+            repeats: false,
+        })
+    }
+
     /// Writes the peak file, unless the preferences say not to (or the
     /// folder takes no files: the waveform then lives in memory only).
     pub(crate) fn write(media: &str, stream: u16, w: &Waveform) {
@@ -553,10 +660,16 @@ pub(crate) mod peak_files {
         }
     }
 
-    /// Deletes a media file's peak files (they are made anew).
+    /// Deletes a media file's peak files (they are made anew, another
+    /// editor's beside it passed over).
     pub(crate) fn delete(media: &str) {
         for stream in 0..16 {
             let _ = std::fs::remove_file(path(media, stream));
+        }
+        if let Ok(mut passed) = PASSED.lock()
+            && !passed.iter().any(|m| m == media)
+        {
+            passed.push(media.to_string());
         }
     }
 }
@@ -568,6 +681,12 @@ fn compute_waveform(info: &MediaInfo, stream: u16) -> Option<Waveform> {
         _ => None,
     };
     if let Some(w) = file.and_then(|f| peak_files::read(f, stream)) {
+        return Some(w);
+    }
+    // The first stream's peaks another editor left beside the file.
+    if let (Some(f), Some(a), 0) = (file, info.audio.as_ref(), stream)
+        && let Some(w) = peak_files::read_sfk(f, a.sample_rate.0, a.channels.into(), PER_SECOND)
+    {
         return Some(w);
     }
     let w = compute_peaks(info, stream, PER_SECOND)?;
@@ -651,6 +770,106 @@ mod tests {
         assert!(!peak_files::path(&media, 0).exists());
         peak_files::set(true, false);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dos_stamps_read_as_seconds_since_1970() {
+        // 2026-11-03 14:53:26, as the other editor wrote it in UTC.
+        assert_eq!(peak_files::dos_seconds(0x76AD_5D63), Some(1_793_717_606));
+        // 1980-01-01 00:00:00, DOS's first day.
+        assert_eq!(peak_files::dos_seconds(0x0000_0021), Some(315_532_800));
+        assert_eq!(peak_files::dos_seconds(0), None, "no month");
+    }
+
+    #[test]
+    fn another_editors_peaks_are_read_beside_the_media() {
+        let dir = std::env::temp_dir().join(format!("bananav-sfk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("tone.wav");
+        std::fs::write(&media, [0u8; 64]).unwrap();
+        // The media changed at 2026-11-03 14:53:26 UTC.
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_717_606);
+        std::fs::File::options()
+            .write(true)
+            .open(&media)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        // One second of 48 kHz stereo, a peak every 256 samples: 188 blocks,
+        // block b reaching -10 b and 10 b + the channel.
+        let sfk = |stamp: u32, channels: u32| {
+            let mut d = Vec::new();
+            d.extend_from_slice(b"SFPK");
+            for v in [1u32, 0x40, 0x5EAD_5D63, 16, channels, 256] {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+            d.extend_from_slice(&48_000u64.to_le_bytes());
+            d.extend_from_slice(&stamp.to_le_bytes());
+            d.resize(0x40, 0);
+            for b in 0..188i16 {
+                for c in 0..channels as i16 {
+                    d.extend_from_slice(&(-10 * b).to_le_bytes());
+                    d.extend_from_slice(&(10 * b + c).to_le_bytes());
+                }
+            }
+            d
+        };
+        let path = dir.join("tone.sfk");
+        std::fs::write(&path, sfk(0x76AD_5D63, 2)).unwrap();
+        let name = media.to_string_lossy().to_string();
+        let w = peak_files::read_sfk(&name, 48_000, 2, 100).expect("read");
+        assert_eq!(
+            (w.per_second, w.peaks.len(), w.peaks[0].len()),
+            (100, 2, 100)
+        );
+        let v = |n: i16| f32::from(n) / 32768.0;
+        // The first hundredth (480 samples) spans blocks 0 and 1.
+        assert_eq!(w.peaks[0][0], (v(-10), v(10)));
+        assert_eq!(w.peaks[1][0], (v(-10), v(11)));
+        // The last ends with block 187.
+        assert_eq!(w.peaks[0][99], (v(-1870), v(1870)));
+        // Named after the whole file, as the other editor names them too.
+        std::fs::remove_file(&path).unwrap();
+        let whole = dir.join("tone.wav.sfk");
+        std::fs::write(&whole, sfk(0x76AD_5D63, 2)).unwrap();
+        assert!(peak_files::read_sfk(&name, 48_000, 2, 100).is_some());
+        std::fs::remove_file(&whole).unwrap();
+        std::fs::write(&path, sfk(0x76AD_5D63, 2)).unwrap();
+        // Another channel count, or another version of the media: not used.
+        assert!(peak_files::read_sfk(&name, 48_000, 1, 100).is_none());
+        std::fs::write(&path, sfk(0x76AD_5D73, 2)).unwrap();
+        assert!(peak_files::read_sfk(&name, 48_000, 2, 100).is_none());
+        // Rebuild Audio Peaks passes it over.
+        std::fs::write(&path, sfk(0x76AD_5D63, 2)).unwrap();
+        peak_files::delete(&name);
+        assert!(peak_files::read_sfk(&name, 48_000, 2, 100).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `BV_SFK_SAMPLE`: a folder with `tom.wav` and the `tom.sfk` another
+    /// editor made of it; their peaks agree.
+    #[test]
+    #[ignore]
+    fn another_editors_peaks_match_the_sound() {
+        let dir = std::path::PathBuf::from(std::env::var("BV_SFK_SAMPLE").expect("BV_SFK_SAMPLE"));
+        let wav = dir.join("tom.wav").to_string_lossy().to_string();
+        let info = crate::Engine::probe_file(&wav).expect("probe");
+        let a = info.audio.expect("audio");
+        let from_sfk =
+            peak_files::read_sfk(&wav, a.sample_rate.0, a.channels.into(), 100).expect("sfk");
+        let computed = compute_peaks(&info, 0, 100).expect("peaks");
+        assert_eq!(from_sfk.peaks.len(), computed.peaks.len());
+        for (s, c) in from_sfk.peaks.iter().zip(&computed.peaks) {
+            assert_eq!(s.len(), c.len());
+            for (x, y) in s.iter().zip(c) {
+                // The blocks a hundredth spans reach a little past it.
+                assert!(x.0 <= y.0 + 1e-4 && x.1 >= y.1 - 1e-4, "{x:?} {y:?}");
+                assert!(
+                    (x.0 - y.0).abs() < 0.05 && (x.1 - y.1).abs() < 0.05,
+                    "{x:?} {y:?}"
+                );
+            }
+        }
     }
 
     #[test]

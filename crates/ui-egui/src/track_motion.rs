@@ -803,10 +803,17 @@ impl TrackMotionWindow {
             painter.add(Shape::convex_polygon(corners, fill, Stroke::NONE));
         }
         let active = if halo_look.is_some() { picture } else { vp };
-        fxw::paint_f_box(&painter, &sp, &active, tf, rotation);
+        fxw::paint_f_box(
+            &painter,
+            &sp,
+            &active,
+            (tf.flip_h, tf.flip_v),
+            (active.cx, active.cy),
+            rotation,
+        );
         if halo_look.is_some() {
             // The halo's own box, dashed, its handles.
-            fxw::paint_f_box(&painter, &sp, &vp, &Transform::default(), false);
+            fxw::paint_f_box(&painter, &sp, &vp, (false, false), (vp.cx, vp.cy), false);
         }
     }
 

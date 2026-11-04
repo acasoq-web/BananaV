@@ -93,6 +93,85 @@ pub fn fft(data: &mut [Complex], inverse: bool) {
     }
 }
 
+/// A transform of one length made ready once — its twiddles and the
+/// order its input is read in — for the effects that run it on every
+/// block.
+#[derive(Clone, Debug, Default)]
+pub struct Plan {
+    twiddles: Vec<Complex>,
+    order: Vec<u32>,
+}
+
+impl Plan {
+    /// For `n` points, a power of two.
+    pub fn new(n: usize) -> Plan {
+        assert!(n.is_power_of_two(), "the FFT's length is a power of two");
+        let bits = n.trailing_zeros();
+        let order = (0..n)
+            .map(|i| {
+                if n < 2 {
+                    0
+                } else {
+                    (i.reverse_bits() >> (usize::BITS - bits)) as u32
+                }
+            })
+            .collect();
+        let twiddles = (0..n / 2)
+            .map(|k| {
+                let a = -std::f64::consts::TAU * k as f64 / n as f64;
+                Complex::new(a.cos(), a.sin())
+            })
+            .collect();
+        Plan { twiddles, order }
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// [`fft`] on `data`, as long as the plan.
+    pub fn run(&self, data: &mut [Complex], inverse: bool) {
+        let n = data.len();
+        assert_eq!(n, self.len(), "the data is as long as the plan");
+        if n < 2 {
+            return;
+        }
+        for (i, &j) in self.order.iter().enumerate() {
+            let j = j as usize;
+            if j > i {
+                data.swap(i, j);
+            }
+        }
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let step = n / len;
+            for block in data.chunks_exact_mut(len) {
+                let (a, b) = block.split_at_mut(half);
+                for (k, (u, v)) in a.iter_mut().zip(b.iter_mut()).enumerate() {
+                    let w = self.twiddles[k * step];
+                    let w = if inverse { w.conj() } else { w };
+                    let t = *v * w;
+                    *v = *u - t;
+                    *u = *u + t;
+                }
+            }
+            len <<= 1;
+        }
+        if inverse {
+            let s = 1.0 / n as f64;
+            for d in data {
+                d.re *= s;
+                d.im *= s;
+            }
+        }
+    }
+}
+
 /// The spectrum of real signal `x`, padded with zeros to `n` (a power of
 /// two).
 pub fn spectrum(x: &[f64], n: usize) -> Vec<Complex> {

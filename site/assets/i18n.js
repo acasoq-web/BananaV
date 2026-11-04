@@ -4,6 +4,35 @@
 // and a button to the language menu in index.html.
 window.BANANAV_I18N = {
   "pt-BR": {
+    // BananaV 0.2.0.
+    "BananaV 0.2.0 is out, with a Windows installer": "O BananaV 0.2.0 saiu, com instalador para Windows",
+    "audio effects, with their panels and presets": "efeitos de áudio, com seus painéis e presets",
+    "What's new in 0.2.0": "Novidades da versão 0.2.0",
+    "Audio effects, .veg projects, color correction with LUTs, and an installer that does the work for you.": "Efeitos de áudio, projetos .veg, correção de cor com LUTs e um instalador que faz tudo por você.",
+    "51 audio effects": "51 efeitos de áudio",
+    "Equalizers, compressors, reverbs, delays, modulation and restoration, each with its panel and factory presets.": "Equalizadores, compressores, reverbs, delays, modulação e restauração, cada um com seu painel e presets de fábrica.",
+    "Compatible with .veg projects": "Compatível com projetos .veg",
+    "Open .veg projects with their tracks, transitions, audio effects, volumes, Pan/Crop and keyframes, and export your work to .veg.": "Abra projetos .veg com trilhas, transições, efeitos de áudio, volumes, Panorâmica/Recorte e quadros-chave, e exporte o seu trabalho para .veg.",
+    "Color correction with LUTs": "Correção de cor com LUTs",
+    "Color Grading rebuilt: wheels, curves, HSL, white balance and levels, with Camera and Look LUTs from .cube files, and Export LUT to take your grade anywhere.": "Matização de cores refeita: rodas, curvas, HSL, balanço de branco e níveis, com LUTs de câmera e de look em arquivos .cube, e Exportar LUT para levar a sua cor para qualquer lugar.",
+    "An installer for Windows": "Instalador para Windows",
+    "Download it, open it and follow the steps: BananaV goes to your Start menu, no administrator password needed.": "Baixe, abra e siga os passos: o BananaV vai para o menu Iniciar, sem pedir senha de administrador.",
+    "Pan/Crop rebuilt": "Panorâmica/Recorte refeito",
+    "Position, rotation, smooth paths and masks redone, and compared frame by frame with reference renders.": "Posição, rotação, caminhos suaves e máscaras refeitos, e comparados quadro a quadro com renders de referência.",
+    "Smooth playback": "Reprodução lisa",
+    "The graphics card draws from the first frame: 1080p at 60 frames a second, evenly, on about one processor core.": "A placa de vídeo desenha desde o primeiro quadro: 1080p a 60 quadros por segundo, sem engasgos, usando cerca de um núcleo do processador.",
+    "51 audio effects of its own, a mixing console with busses and effects chains, VST 3 plug-ins, 5.1 surround panning, loudness meters and auto ducking.": "51 efeitos de áudio próprios, console de mixagem com barramentos e cadeias de efeitos, plug-ins VST 3, panorama surround 5.1, medidores de loudness e ducking automático.",
+    ".veg projects, OpenTimelineIO, EDL and XML timelines in and out, closed captions and subtitles, and renders to MP4, MOV, ProRes and more.": "Projetos .veg, timelines OpenTimelineIO, EDL e XML de ida e volta, legendas, e renderização para MP4, MOV, ProRes e mais.",
+    "BananaV 0.2.0 is out for Windows and Linux, and its source code is on GitHub.": "O BananaV 0.2.0 saiu para Windows e Linux, e o código-fonte está no GitHub.",
+    "Windows 10 and 11. An installer: open it and follow the steps, no administrator password needed. It is not signed yet: if Windows warns you, choose More info, then Run anyway.": "Windows 10 e 11. Um instalador: abra e siga os passos, sem pedir senha de administrador. Ele ainda não é assinado: se o Windows avisar, clique em Mais informações e depois em Executar assim mesmo.",
+    "Prefer no installation? Get the zip": "Prefere sem instalar? Baixe o zip",
+    "Download the installer": "Baixar o instalador",
+    "The installer is for Intel and AMD processors, most computers. ARM64 is for Snapdragon and other ARM ones.": "O instalador é para processadores Intel e AMD, a maioria dos computadores. ARM64 é para Snapdragon e outros ARM.",
+    "November 4, 2026": "4 de novembro de 2026",
+    "BananaV 0.2.0": "BananaV 0.2.0",
+    "51 audio effects, compatibility with .veg projects, color correction with LUTs, a rebuilt Pan/Crop and smooth playback, now with an installer for Windows.": "51 efeitos de áudio, compatibilidade com projetos .veg, correção de cor com LUTs, Panorâmica/Recorte refeito e reprodução lisa, agora com instalador para Windows.",
+    "The second test build, and the source code": "A segunda versão de teste, e o código-fonte",
+    "The first test build": "A primeira versão de teste",
     // The redesign: what's new, the numbers, the tour, support.
     "An event's effects window with Vignette and Swirl, the swirl's center as a handle on the Video Preview": "A janela de efeitos de um evento com Vinheta e Redemoinho, o centro do redemoinho como alça na pré-visualização",
     "Chain effects on any event, track or the output, and drag their handles right on the preview.": "Encadeie efeitos em qualquer evento, trilha ou na saída, e arraste as alças direto na pré-visualização.",
@@ -12,30 +41,14 @@ window.BANANAV_I18N = {
     "A strip for every track, bus and effects chain, and automation envelopes right on the timeline.": "Um canal para cada trilha, barramento e cadeia de efeitos, e envelopes de automação direto na timeline.",
     "Tour": "Tour",
     "New": "Novo",
-    "Ultra Alpha 2 is out, and the source code is public": "A Ultra Alpha 2 saiu, e o código-fonte agora é público",
     "Download for free": "Baixar grátis",
     "Windows & Linux · x64 & ARM64 · GPL v3 · No account, no watermark, no subscription": "Windows e Linux · x64 e ARM64 · GPL v3 · Sem conta, sem marca d'água, sem assinatura",
     "BananaV's main window: the effects chooser with Add Noise's presets, the Video Preview, the Master Bus and the timeline": "A janela principal do BananaV: a lista de efeitos com os presets do Adicionar ruído, a pré-visualização, o barramento mestre e a timeline",
     "BananaV in numbers": "O BananaV em números",
     "built-in effects, transitions and generators": "efeitos, transições e geradores próprios",
-    "GL transitions, and your own GLSL": "transições GL, e o seu próprio GLSL",
     "plug-in hosts for video and audio": "hosts de plug-ins para vídeo e áudio",
     "color management, 32-bit float": "gerenciamento de cor, 32 bits de ponto flutuante",
-    "What's new in Ultra Alpha 2": "Novidades da Ultra Alpha 2",
     "A big step forward": "Um grande passo à frente",
-    "More than 175 changes since the first build, and BananaV's source code is now on GitHub for everyone.": "Mais de 175 mudanças desde a primeira versão, e o código-fonte do BananaV agora está no GitHub para todos.",
-    "About a hundred effects remade": "Uns cem efeitos refeitos",
-    "New panels, presets and math, and most of them on the graphics card.": "Painéis, presets e cálculos novos, e a maioria rodando na placa de vídeo.",
-    "Tracking and stabilization": "Rastreamento e estabilização",
-    "Motion tracking, video and 360° stabilization, slow motion by optical flow.": "Rastreamento de movimento, estabilização de vídeo e 360°, câmera lenta por fluxo óptico.",
-    "3D compositing": "Composição 3D",
-    "Tracks as cards in space, with Track Motion in 3D, views and a trackball.": "Trilhas como cartões no espaço, com Movimento da trilha em 3D, vistas e trackball.",
-    "DVD and CD": "DVD e CD",
-    "DVD-Video authoring and burning, Video CDs and audio CDs, with BananaV's own encoders.": "Autoria e gravação de DVD-Video, Video CD e CD de áudio, com codificadores do próprio BananaV.",
-    "Studio audio": "Áudio de estúdio",
-    "A redesigned Mixing Console, plug-in delay compensation and VST 3 automation.": "Console de mixagem redesenhado, compensação de latência dos plug-ins e automação de VST 3.",
-    "Open source": "Código aberto",
-    "The whole code is on GitHub under the GPL: read it, build it, improve it.": "Todo o código está no GitHub, sob a GPL: leia, compile, melhore.",
     "Read everything that changed": "Veja tudo o que mudou",
     "More than a hundred video effects, transitions and generators on media, events, tracks and the output, with presets you can preview. Add OpenFX plug-ins too.": "Mais de cem efeitos de vídeo, transições e geradores em mídias, eventos, trilhas e na saída, com presets que você vê antes de usar. Use também plug-ins OpenFX.",
     "Take a tour": "Faça um tour",
@@ -71,30 +84,17 @@ window.BANANAV_I18N = {
     "It's free and always will be. If it helps you, a small donation keeps it going.": "Ele é gratuito e sempre será. Se te ajuda, uma pequena doação mantém o projeto vivo.",
     "Close": "Fechar",
 
-    // The Ultra Alpha build.
-    "Ultra Alpha 2 · the second test build, and the source code": "Ultra Alpha 2 · a segunda versão de teste, e o código-fonte",
-    "Ultra Alpha 2 is out for Windows and Linux, and BananaV's source code is on GitHub.":
-      "A Ultra Alpha 2 saiu para Windows e Linux, e o código-fonte do BananaV está no GitHub.",
     "An AppImage for any distribution since 2022: make the file executable and run it. No installation needed.":
       "Um AppImage para qualquer distribuição de 2022 em diante: torne o arquivo executável e abra. Não precisa instalar.",
     "x64 for Intel and AMD processors, ARM64 for ARM ones.": "x64 para processadores Intel e AMD, ARM64 para os ARM.",
-    "This is a very early test build.": "Esta é uma versão de teste muito inicial.",
-    "Expect missing features, bugs and crashes. Don't use it for important work, keep copies of your media and projects, and expect projects saved now not to open in later builds. Tell us what breaks on":
-      "Espere recursos faltando, bugs e travamentos. Não use em trabalhos importantes, guarde cópias das suas mídias e projetos, e saiba que projetos salvos agora podem não abrir nas próximas versões. Conte o que quebrou no",
-    "Windows 10 and 11. A zip: unpack it and run BananaV.exe. The build is not signed yet: if Windows warns you, choose More info, then Run anyway.":
-      "Windows 10 e 11. Um zip: descompacte e abra o BananaV.exe. A versão ainda não é assinada: se o Windows avisar, clique em Mais informações e depois em Executar assim mesmo.",
-    "x64 for Intel and AMD processors, ARM64 for Snapdragon and other ARM ones.":
-      "x64 para processadores Intel e AMD, ARM64 para Snapdragon e outros ARM.",
     "Build it yourself with Rust's cargo: the source code is on GitHub, under the GPL.":
       "Compile você mesmo com o cargo do Rust: o código-fonte está no GitHub, sob a GPL.",
     "Build from source": "Compilar o código",
     "November 2, 2026": "2 de novembro de 2026",
-    "Ultra Alpha 2, and the source code": "A Ultra Alpha 2, e o código-fonte",
     "The second test build brings DVD authoring, motion tracking and stabilization, 3D compositing, studio audio and about a hundred effects and transitions remade. And BananaV's source code is now public on GitHub.":
       "A segunda versão de teste traz autoria de DVD, rastreamento e estabilização de movimento, composição 3D, áudio de estúdio e uns cem efeitos e transições refeitos. E o código-fonte do BananaV agora é público no GitHub.",
     "Read what changed": "Veja o que mudou",
     "October 23, 2026": "23 de outubro de 2026",
-    "The first Ultra Alpha build": "A primeira versão Ultra Alpha",
     "The first build of BananaV is out for Windows and Linux, x64 and ARM64: a very early test build to try the editor and tell us what breaks.":
       "A primeira versão do BananaV saiu para Windows e Linux, x64 e ARM64: uma versão de teste bem inicial para experimentar o editor e contar o que quebrou.",
 
@@ -157,14 +157,10 @@ window.BANANAV_I18N = {
     "32-bit floating point compositing, ACES 1.3 color management, a color grading panel with wheels, curves and LUTs, and video scopes.":
       "Composição em ponto flutuante de 32 bits, gerenciamento de cor ACES 1.3, um painel de correção de cor com rodas, curvas e LUTs, e escopos de vídeo.",
     "Professional audio": "Áudio profissional",
-    "A mixing console with busses and effects chains, VST 3 plug-ins, 5.1 surround panning, loudness meters and auto ducking.":
-      "Um console de mixagem com barramentos e cadeias de efeitos, plug-ins VST 3, panorâmica surround 5.1, medidores de loudness e ducking automático.",
     "Fast on your graphics card": "Rápido na sua placa de vídeo",
     "Compositing on the GPU, hardware decoding, and hardware encoders when your computer has them. Proxies and prerendering for heavy projects.":
       "Composição na GPU, decodificação por hardware e codificadores por hardware quando o seu computador tem. Proxies e pré-renderização para projetos pesados.",
     "Works with others": "Conversa com outros programas",
-    "OpenTimelineIO, EDL and XML timelines in and out, closed captions and subtitles, and renders to MP4, MOV, ProRes and more.":
-      "Timelines OpenTimelineIO, EDL e XML na entrada e na saída, closed captions e legendas, e renderização para MP4, MOV, ProRes e mais.",
     "Your language": "O seu idioma",
     "The interface speaks English and Brazilian Portuguese, with more languages to come from the community.":
       "A interface fala inglês e português do Brasil, e mais idiomas virão com a comunidade.",

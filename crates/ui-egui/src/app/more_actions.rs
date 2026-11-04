@@ -906,11 +906,13 @@ impl BananaApp {
                             s.width as f32 / v.width as f32,
                             s.height as f32 / v.height as f32,
                         );
-                        if let Some(c) = p.clip_mut(id) {
-                            c.transform.scale = sx.max(sy) / sx.min(sy);
-                            c.transform.stretch = 1.0;
-                            c.transform_keys.clear();
-                        }
+                        let _ = p.set_clip_framing(
+                            id,
+                            &bv_timeline::Transform {
+                                scale: sx.max(sy) / sx.min(sy),
+                                ..bv_timeline::Transform::default()
+                            },
+                        );
                     }
                 });
             }

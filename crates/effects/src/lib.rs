@@ -126,6 +126,7 @@ mod glow;
 mod glsl;
 mod gradient_map;
 mod gradient_wipe;
+pub mod grading;
 mod hsl_adjust;
 mod invert;
 mod kerning;
@@ -233,7 +234,7 @@ static PLUGINS: [Shared; 120] = [
     // 2.0: Location counts the frame 0–1, VEGAS's way.
     plugin(crop::ID, 2, 0, crop::main),
     plugin(color_curves::ID, 1, 0, color_curves::main),
-    plugin(color_grading::ID, 1, 0, color_grading::main),
+    plugin(color_grading::ID, 2, 0, color_grading::main),
     // 1.1: Offset counts 8-bit steps, VEGAS's way.
     plugin(color_corrector::ID, 1, 1, color_corrector::main),
     plugin(cookie_cutter::ID, 1, 0, cookie_cutter::main),

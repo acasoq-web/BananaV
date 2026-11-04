@@ -193,7 +193,8 @@ pub enum Interp {
     Slow,
     #[default]
     Smooth,
-    /// The S turned around: fast at both ends, slow in the middle.
+    /// The S turned around: fast at both ends, level in the middle
+    /// (4t³ − 6t² + 3t, as VEGAS's).
     Sharp,
     /// Keeps the key's value until the next key.
     Hold,
@@ -215,9 +216,7 @@ impl Interp {
             Interp::Fast => 1.0 - (1.0 - t) * (1.0 - t),
             Interp::Slow => t * t,
             Interp::Smooth => t * t * (3.0 - 2.0 * t),
-            // The smoothstep's inverse, exact at the ends.
-            Interp::Sharp if t <= 0.0 || t >= 1.0 => t,
-            Interp::Sharp => 0.5 - ((1.0 - 2.0 * t).asin() / 3.0).sin(),
+            Interp::Sharp => t * (3.0 + t * (4.0 * t - 6.0)),
             Interp::Hold => 0.0,
             // Without handles, a straight line.
             Interp::Bezier | Interp::BezierSplit => t,

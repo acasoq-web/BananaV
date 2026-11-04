@@ -816,8 +816,10 @@ impl ClipSource for Temporal {
         );
         if let Some(f) = self.framing {
             let at = self.clip.start + local.unwrap_or(owner);
-            let tf = self.clip.transform_at(at);
-            img = bv_render::place_par(&img, frame.0, frame.1, &tf, f.quality, f.par);
+            let place = f
+                .place
+                .at(&self.clip, at, [f64::from(frame.0), f64::from(frame.1)]);
+            img = bv_render::place_box(&img, frame.0, frame.1, &place, f.quality);
             self.chain(
                 &effects,
                 &mut img,
@@ -2422,89 +2424,120 @@ pub(crate) mod tests {
                 _ => None,
             })
             .expect("a look's table");
-        let point = |x: f64, y: f64| bv_core::curve::CurvePoint::new(x, y);
+        let text = |t: &str| PluginValue::Text(t.to_string());
         let grading: Vec<(&str, Vec<(&str, PluginValue)>)> = vec![
             (
                 "color grading wheels and tone",
                 vec![
-                    ("lift", num(&[0.05, 0.0, -0.02])),
+                    ("liftR", num(&[0.05])),
+                    ("liftB", num(&[-0.02])),
                     ("liftY", num(&[0.02])),
-                    ("gamma", num(&[1.1, 1.0, 0.9])),
-                    ("gammaY", num(&[1.05])),
-                    ("gain", num(&[1.05, 1.0, 0.95])),
+                    ("gammaR", num(&[1.3])),
+                    ("gammaB", num(&[0.8])),
+                    ("gammaY", num(&[1.1])),
+                    ("gainR", num(&[1.05])),
+                    ("gainB", num(&[0.95])),
                     ("gainY", num(&[1.1])),
-                    ("offset", num(&[0.01, 0.0, 0.0])),
-                    ("brightness", num(&[0.03])),
-                    ("contrast", num(&[0.2])),
-                    ("saturation", num(&[1.3])),
-                    ("logExposure", num(&[0.5])),
-                    ("temperature", num(&[0.3])),
-                    ("tint", num(&[-0.2])),
-                    ("hue", num(&[20.0])),
-                    ("hslSaturation", num(&[1.2])),
-                    ("luminance", num(&[0.02])),
+                    ("offsetR", num(&[0.01])),
+                    ("offsetY", num(&[-0.01])),
+                    ("brightnessAdjust", num(&[0.03])),
+                    ("contrastAdjust", num(&[0.2])),
+                    ("contrastCtrAdjust", num(&[0.45])),
+                    ("saturationAdjust", num(&[1.3])),
+                    ("exposureLnAdjust", num(&[0.5])),
+                    ("exposureAdjust", num(&[0.2])),
+                    ("temperatureAdjust", num(&[1200.0])),
+                    ("tintAdjust", num(&[-20.0])),
+                    ("hueAdjust", num(&[0.05])),
+                    ("satAdjust", num(&[1.2])),
+                    ("valAdjust", num(&[0.95])),
                 ],
             ),
             (
                 "color grading rl wheels and levels",
                 vec![
-                    ("shadows", num(&[0.05, 0.0, 0.0])),
-                    ("midtones", num(&[0.0, 0.03, 0.0])),
-                    ("highlights", num(&[0.0, 0.0, 0.04])),
-                    ("rlOffsetY", num(&[0.01])),
-                    ("inputBlack", num(&[0.05])),
-                    ("inputWhite", num(&[0.9])),
-                    ("outputMin", num(&[0.02])),
-                    ("outputMax", num(&[0.95])),
+                    ("logWheelShadowsR", num(&[0.3])),
+                    ("logWheelShadowsY", num(&[-0.2])),
+                    ("logWheelMidtonesG", num(&[0.25])),
+                    ("logWheelHighlightsB", num(&[-0.4])),
+                    ("logWheelHighlightsY", num(&[0.3])),
+                    ("logWheelOffsetY", num(&[0.05])),
+                    ("logWheelLowThreshold", num(&[0.2])),
+                    ("logWheelHighThreshold", num(&[0.6])),
+                    ("inMinAdjust", num(&[0.05])),
+                    ("inMaxAdjust", num(&[0.9])),
+                    ("outMinAdjust", num(&[0.02])),
+                    ("outMaxAdjust", num(&[0.95])),
                 ],
             ),
             (
                 "color grading curves",
                 vec![
                     (
-                        "curves",
-                        PluginValue::Curves(vec![
-                            vec![point(0.0, 0.0), point(0.5, 0.6), point(1.0, 1.0)],
-                            vec![point(0.0, 0.05), point(1.0, 0.95)],
-                            vec![point(0.0, 0.0), point(1.0, 1.0)],
-                            vec![point(0.0, 0.0), point(0.3, 0.2), point(1.0, 1.0)],
-                        ]),
+                        "curveR",
+                        text("2:0.0:0.08:-0.25:-0.25:0.25:0.25:1.0:1.0:-0.25:-0.25:0.25:0.25:"),
                     ),
                     (
-                        "hslCurves",
-                        PluginValue::Curves(vec![
-                            vec![point(0.0, 0.1), point(0.5, -0.2), point(1.0, 0.1)],
-                            vec![point(0.0, 0.0), point(1.0, 0.0)],
-                            vec![point(0.0, 0.0), point(0.6, 0.2), point(1.0, 0.0)],
-                            vec![point(0.0, 0.0), point(1.0, 0.3)],
-                            vec![point(0.0, 0.0), point(1.0, 0.0)],
-                            vec![point(0.0, -0.1), point(1.0, 0.1)],
-                        ]),
+                        "curveB",
+                        text("2:0.0:0.0:-0.25:-0.25:0.25:0.25:1.0:0.85:-0.25:-0.2:0.25:0.25:"),
+                    ),
+                    (
+                        "curveY",
+                        text(
+                            "3:0.0:0.0:-0.25:-0.25:0.15:0.05:0.5:0.5:-0.15:-0.2:0.15:0.2:1.0:1.0:-0.15:-0.05:0.25:0.25:",
+                        ),
+                    ),
+                    (
+                        "curveHvH",
+                        text(
+                            "5:-0.16667:0.5:-0.125:0.0:0.08333:0.0:0.0:0.6:-0.08333:0.0:0.08333:0.0:0.16667:0.5:-0.08333:0.0:0.125:0.0:0.83333:0.5:-0.125:0.0:0.08333:0.0:1.0:0.6:-0.08333:0.0:0.08333:0.0",
+                        ),
+                    ),
+                    (
+                        "curveHvL",
+                        text(
+                            "5:-0.16667:0.5:-0.08333:0.0:0.125:0.0:0.5:0.5:-0.125:0.0:0.08333:0.0:0.66667:0.3:-0.08333:0.0:0.08333:0.0:0.83333:0.5:-0.08333:0.0:0.125:0.0:1.5:0.5:-0.125:0.0:0.08333:0.0",
+                        ),
+                    ),
+                    (
+                        "curveSvS",
+                        text(
+                            "3:0.0:0.5:0.0:0.0:0.125:0.0:0.5:0.65:-0.125:0.0:0.125:0.0:1.0:0.5:-0.125:0.0:0.0:0.0:",
+                        ),
+                    ),
+                    (
+                        "curveLvS",
+                        text(
+                            "3:0.0:0.5:0.0:0.0:0.125:0.0:0.8:0.2:-0.125:0.0:0.1:0.0:1.0:0.5:-0.1:0.0:0.0:0.0:",
+                        ),
                     ),
                 ],
             ),
             (
                 "color grading apple log",
                 vec![
+                    ("lutEnable0", num(&[1.0])),
                     (
-                        "cameraLut",
+                        "lutFilename0",
                         PluginValue::Text(bv_effects::color_grading::APPLE_LOG_TO_REC709.into()),
                     ),
-                    ("cameraStrength", num(&[0.7])),
+                    ("lutGain0", num(&[0.7])),
                 ],
             ),
             (
                 "color grading looks",
                 vec![
+                    ("lutEnable0", num(&[1.0])),
                     (
-                        "cameraLut",
+                        "lutFilename0",
                         PluginValue::Text(bv_effects::color_grading::APPLE_LOG_TO_LINEAR.into()),
                     ),
-                    ("cameraStrength", num(&[0.4])),
-                    ("lookLut", PluginValue::Text(look.clone())),
-                    ("lookStrength", num(&[0.8])),
-                    ("lookTetrahedral", num(&[0.0])),
-                    ("contrast", num(&[0.1])),
+                    ("lutGain0", num(&[0.4])),
+                    ("lutEnable1", num(&[1.0])),
+                    ("lutFilename1", PluginValue::Text(look.clone())),
+                    ("lutGain1", num(&[0.8])),
+                    ("lutInterpolation1", num(&[1.0])),
+                    ("contrastAdjust", num(&[0.1])),
                 ],
             ),
         ];
@@ -2694,8 +2727,9 @@ pub(crate) mod tests {
             smoothness: 0.0,
         };
         let num = |v: &[f64]| PluginValue::Num(v.to_vec());
-        let c = p.clip_mut(clip).unwrap();
-        c.transform_keys = vec![key(0.0, -0.4), key(2.0, 0.4)];
+        p.set_clip_framing_keys(clip, &[key(0.0, -0.4), key(2.0, 0.4)])
+            .unwrap();
+
         let mut runs = Vec::new();
         for (name, values) in [
             ("fixed", vec![("blurAmount", num(&[12.0]))]),
@@ -2778,7 +2812,8 @@ pub(crate) mod tests {
             smoothness: 0.0,
         };
         let num = |v: &[f64]| PluginValue::Num(v.to_vec());
-        p.clip_mut(clip).unwrap().transform_keys = vec![key(0.0, -0.4), key(2.0, 0.4)];
+        p.set_clip_framing_keys(clip, &[key(0.0, -0.4), key(2.0, 0.4)])
+            .unwrap();
         // Histograms of 60 frames, their levels drifting.
         let counted: Vec<(f64, [Vec<u64>; 3])> = (0..60)
             .map(|f| {
@@ -2956,7 +2991,8 @@ pub(crate) mod tests {
             curve: KeyCurve::default(),
             smoothness: 0.0,
         };
-        p.clip_mut(clip).unwrap().transform_keys = vec![key(0.0, -0.4), key(4.0, 0.4)];
+        p.set_clip_framing_keys(clip, &[key(0.0, -0.4), key(4.0, 0.4)])
+            .unwrap();
         let num = |v: &[f64]| PluginValue::Num(v.to_vec());
         // Frame 31 at half speed: the source's 15.5.
         let rate = settings.frame_rate.as_f64();

@@ -673,7 +673,8 @@ fn add_noise(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // Color Grading's Apple Log (`color_grading::apple_log`) on `img` (`w` ×
 // `h`, changed in place): the straight colors, Apple Log, decoded to
-// Rec. 709's linear light — or (j.x) its video —, mixed in by f 0.
+// Rec. 709's linear light — or (j.x) its video —, mixed in by f 0; j.y
+// holds the colors within 0–1 before and after.
 fn apple_log_linear(x: f32) -> f32 {
     let r0 = -0.05641088;
     let c = 47.28711236;
@@ -699,7 +700,10 @@ fn apple_log(@builtin(global_invocation_id) id: vec3<u32>) {
         img[o] = vec4<f32>(0.0, 0.0, 0.0, a);
         return;
     }
-    let c = px.xyz / a;
+    var c = px.xyz / a;
+    if P.j.y != 0u {
+        c = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     let l = vec3<f32>(apple_log_linear(c.x), apple_log_linear(c.y), apple_log_linear(c.z));
     var v = vec3<f32>(
         1.660491 * l.x - 0.587641 * l.y - 0.072850 * l.z,
@@ -710,7 +714,10 @@ fn apple_log(@builtin(global_invocation_id) id: vec3<u32>) {
         let k = clamp(v, vec3<f32>(0.0), vec3<f32>(1.0));
         v = vec3<f32>(bt709_encode(k.x), bt709_encode(k.y), bt709_encode(k.z));
     }
-    let res = c + (v - c) * pf(0u);
+    var res = c + (v - c) * pf(0u);
+    if P.j.y != 0u {
+        res = clamp(res, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
     img[o] = vec4<f32>(res * a, a);
 }
 

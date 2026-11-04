@@ -119,7 +119,7 @@ const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 pub struct PreviewState {
     texture: Option<TextureHandle>,
-    shown: Option<(u64, Tick, u32, u32)>,
+    pub(crate) shown: Option<(u64, Tick, u32, u32)>,
     /// Overlays (the # button), and which: the grid, the safe areas, the
     /// closed captioning channels (CC1 to CC4), one channel of the picture.
     pub(crate) overlays: bool,
@@ -283,10 +283,7 @@ fn paint_split(
         {
             let key = (f.generation, f.time, f.width, f.height);
             if app.preview.sides_shown[i] != Some(key) {
-                let image = ColorImage::from_rgba_unmultiplied(
-                    [f.width as usize, f.height as usize],
-                    &f.rgba,
-                );
+                let image = frame_image([f.width as usize, f.height as usize], &f.rgba);
                 match &mut app.preview.sides[i] {
                     Some(t) => t.set(image, TextureOptions::LINEAR),
                     None => {
@@ -1221,8 +1218,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     if let Some(f) = rendered.or(frame).filter(|_| !hold) {
         let key = (f.generation, f.time, f.width, f.height);
         if app.preview.shown != Some(key) || app.preview.repeats != view_360 {
-            let image =
-                ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
+            let image = frame_image([f.width as usize, f.height as usize], &f.rgba);
             // Draft shows the pixels as they are; the 360° View's frame
             // repeats across (its left and right edges meet).
             let options = match (quality.level == RenderQuality::Draft, view_360) {
@@ -1550,9 +1546,39 @@ fn status_ui(ui: &mut egui::Ui, app: &mut BananaApp, full: Rect, status_h: f32, 
     }
 }
 
+/// A frame as an image for the screen. Almost every frame is opaque: no
+/// color then needs working out, the pixels are copied.
+pub(crate) fn frame_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
+    let opaque = rgba
+        .as_chunks::<4>()
+        .0
+        .chunks(1024)
+        .all(|c| c.iter().fold(255u8, |a, p| a & p[3]) == 255);
+    if opaque {
+        ColorImage::from_rgba_premultiplied(size, rgba)
+    } else {
+        ColorImage::from_rgba_unmultiplied(size, rgba)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_come_out_with_their_colors() {
+        let opaque = [10, 20, 30, 255, 40, 50, 60, 255];
+        let image = frame_image([2, 1], &opaque);
+        assert_eq!(image.pixels[1], Color32::from_rgb(40, 50, 60));
+        // A pixel seen through gets its color multiplied.
+        let through = [10, 20, 30, 255, 200, 100, 50, 128];
+        let image = frame_image([2, 1], &through);
+        assert_eq!(image.pixels[0], Color32::from_rgb(10, 20, 30));
+        assert_eq!(
+            image.pixels[1],
+            Color32::from_rgba_unmultiplied(200, 100, 50, 128)
+        );
+    }
 
     #[test]
     fn the_zoom_steps_five_percent_and_comes_back_centered() {

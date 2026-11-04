@@ -13,10 +13,23 @@ mod compositor;
 mod kernels;
 mod shared;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use compositor::{Compositor, Output, Rendered, draws};
+
+/// This thread gives way to the others: the work it does can wait.
+#[allow(unsafe_code)]
+fn lower_priority() {
+    #[cfg(windows)]
+    // SAFETY: GetCurrentThread's handle always stands for this thread.
+    unsafe {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
 
 /// Why the graphics card could not do it (the processor then does).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,17 +245,40 @@ impl Gpu {
     }
 
     /// Compiles every kernel now (they are compiled the first time they
-    /// run otherwise): a first frame then shows without waiting. The first
-    /// kernel the card refuses, if any.
+    /// run otherwise), on a few threads of low priority: frames draw on
+    /// meanwhile, each waiting only for the kernels it uses, and later
+    /// ones find them ready. The first kernel the card refuses, if any.
+    /// `BV_GPU_TRACE=1` prints each one's time.
     pub fn warm_up(&self) -> Result<(), GpuError> {
-        for k in kernels::K::ALL {
-            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-            self.kernels.pipeline(&self.device, k);
-            if let Some(e) = pollster::block_on(scope.pop()) {
-                return Err(GpuError::Failed(format!("{}: {e}", k.entry())));
+        let trace = std::env::var_os("BV_GPU_TRACE").is_some();
+        let next = AtomicUsize::new(0);
+        let work = || -> Result<(), GpuError> {
+            lower_priority();
+            while let Some(&k) = kernels::K::ALL.get(next.fetch_add(1, Ordering::Relaxed)) {
+                let start = std::time::Instant::now();
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                self.kernels.pipeline(&self.device, k);
+                if let Some(e) = pollster::block_on(scope.pop()) {
+                    return Err(GpuError::Failed(format!("{}: {e}", k.entry())));
+                }
+                if trace {
+                    eprintln!("kernel {}: {} ms", k.entry(), start.elapsed().as_millis());
+                }
             }
+            Ok(())
+        };
+        let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 3).clamp(1, 4));
+        let start = std::time::Instant::now();
+        let done = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads).map(|_| s.spawn(work)).collect();
+            workers
+                .into_iter()
+                .try_for_each(|w| w.join().unwrap_or(Ok(())))
+        });
+        if trace {
+            eprintln!("every kernel in {} ms", start.elapsed().as_millis());
         }
-        Ok(())
+        done
     }
 
     /// The card in use.

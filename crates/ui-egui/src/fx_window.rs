@@ -9,7 +9,7 @@ use crate::i18n::{tr, trc};
 use bv_core::{FrameRate, Tick};
 use bv_timeline::{
     Clip, ClipId, Effect, EffectKind, KeyCurve, MediaId, MediaInfo, Project, TrackId, TrackKind,
-    Transform, TransformKey,
+    Transform,
 };
 
 use crate::app::BananaApp;
@@ -24,6 +24,7 @@ use crate::pancrop_keys::KeyRow;
 use crate::presets::{self, Presets};
 use crate::tabs::properties;
 use crate::theme;
+use bv_timeline::pancrop::{self as framing, PanCropKey, PlaceIn};
 
 /// A área de trabalho do Pan/Crop é clara e pontilhada.
 pub(crate) const WS_BG: Color32 = Color32::from_gray(236);
@@ -329,10 +330,28 @@ enum Axis {
 
 #[derive(Clone, Copy, Debug)]
 enum Drag {
-    Move { vp: Viewport, from: Pos2 },
-    Resize { vp: Viewport, sx: f32, sy: f32 },
-    Rotate { vp: Viewport, from: f32 },
-    View { offset: Vec2, from: Pos2 },
+    Move {
+        vp: Viewport,
+        from: Pos2,
+    },
+    Resize {
+        vp: Viewport,
+        sx: f32,
+        sy: f32,
+    },
+    Rotate {
+        vp: Viewport,
+        from: f32,
+    },
+    /// The small circle where the box turns: only that moves.
+    Pivot {
+        at: (f32, f32),
+        from: Pos2,
+    },
+    View {
+        offset: Vec2,
+        from: Pos2,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -351,6 +370,7 @@ enum MenuAction {
     FlipV,
     MatchOutput,
     MatchSource,
+    FitAdjustment,
 }
 
 #[derive(Debug)]
@@ -442,6 +462,17 @@ impl Space {
         )
     }
 
+    /// [`Self::screen`] of a point in the numbers masks keep.
+    pub(crate) fn screen64(&self, p: (f64, f64)) -> Pos2 {
+        self.screen((p.0 as f32, p.1 as f32))
+    }
+
+    /// [`Self::media`] in the numbers masks keep.
+    pub(crate) fn media64(&self, s: Pos2) -> (f64, f64) {
+        let (x, y) = self.media(s);
+        (f64::from(x), f64::from(y))
+    }
+
     pub(crate) fn media(&self, s: Pos2) -> (f32, f32) {
         (
             (s.x - self.center.x) / self.k + self.src.0 / 2.0,
@@ -473,6 +504,8 @@ impl PanEditor {
 enum PresetValue {
     Params(Vec<f32>),
     Pan(Transform),
+    /// A Pan/Crop's box of its own shape (a framing keeps the frame's).
+    PanBox(PanCropKey),
     /// An OFX plug-in's values.
     Plugin(crate::presets::PluginValues),
     /// A VST 3 effect's values and states.
@@ -496,10 +529,11 @@ struct PanCtx<'a> {
     info: Option<&'a MediaInfo>,
     /// Instante editado (na timeline).
     t: Tick,
-    tf: Transform,
+    /// The box there, and what its place depends on.
+    key: PanCropKey,
+    place: PlaceIn,
     vp: Viewport,
     src: (f32, f32),
-    out: (f32, f32),
 }
 
 /// What the FX window takes its size from: the chain, the node shown and
@@ -1072,6 +1106,7 @@ impl FxWindow {
         chain: &[Effect],
         presets: &mut Presets,
     ) -> f32 {
+        let mut pan_box = None;
         let (current, owner, is_default) = match self.node {
             Node::PanCrop => {
                 let FxTarget::Clip(id) = self.target else {
@@ -1080,8 +1115,14 @@ impl FxWindow {
                 let Some(c) = project.clip(id) else {
                     return 0.0;
                 };
-                let tf = c.transform_at(c.start + self.pan.pos);
-                (PresetValue::Pan(tf), PresetOwner::PanCrop, tf.is_identity())
+                let Some(place) = project.clip_place_in(id) else {
+                    return 0.0;
+                };
+                let key = c.box_at(c.start + self.pan.pos, place.media, place.media_aspect);
+                let tf = framing::transform_from_key(&key, &place);
+                let whole = key.is_whole(place.media);
+                pan_box = Some(key);
+                (PresetValue::Pan(tf), PresetOwner::PanCrop, whole)
             }
             Node::Effect(i) => match chain.get(i) {
                 // A plug-in at its defaults has no values of its own.
@@ -1107,8 +1148,19 @@ impl FxWindow {
                 None => return 0.0,
             },
         };
+        let same_box = |v: &PresetValue| match (v, &pan_box) {
+            (PresetValue::PanBox(a), Some(b)) => {
+                let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+                close(a.width, b.width)
+                    && close(a.height, b.height)
+                    && close(a.center[0], b.center[0])
+                    && close(a.center[1], b.center[1])
+                    && close(a.angle, b.angle)
+            }
+            _ => false,
+        };
         let shown = match &self.preset {
-            Some((name, v)) if *v == current => name.clone(),
+            Some((name, v)) if *v == current || same_box(v) => name.clone(),
             _ if is_default => tr("(Default)").to_string(),
             // A plug-in's preset, however it came (a Video FX tile): its
             // name.
@@ -1165,10 +1217,24 @@ impl FxWindow {
                         pick = Some((tr("(Default)").into(), default));
                     }
                     let mut items: Vec<(String, PresetValue)> = match &owner {
-                        PresetOwner::PanCrop => presets::builtin_pan_crop()
-                            .into_iter()
-                            .map(|(n, tf)| (n.to_string(), PresetValue::Pan(tf)))
-                            .collect(),
+                        PresetOwner::PanCrop => {
+                            // The shapes first: as large as fits in the media.
+                            let shapes = match self.target {
+                                FxTarget::Clip(id) => project.clip_place_in(id),
+                                _ => None,
+                            };
+                            let shapes = shapes.iter().flat_map(|place| {
+                                presets::PAN_CROP_SHAPES.iter().map(move |&(name, shape)| {
+                                    let r = shape / place.media_aspect.max(1e-6);
+                                    let key = PanCropKey::whole(place.media).matched(r);
+                                    (tr(name).to_string(), PresetValue::PanBox(key))
+                                })
+                            });
+                            let rest = presets::builtin_pan_crop()
+                                .into_iter()
+                                .map(|(n, tf)| (n.to_string(), PresetValue::Pan(tf)));
+                            shapes.chain(rest).collect()
+                        }
                         PresetOwner::Effect(k) => presets::builtin(*k)
                             .into_iter()
                             .map(|(n, pairs)| {
@@ -1309,7 +1375,19 @@ impl FxWindow {
                 {
                     let (t, tf) = (c.start + self.pan.pos, *tf);
                     let new = app.settings.prefs.new_motion_keys();
-                    app.edit(|p| p.set_clip_transform_at_as(id, t, tf, new));
+                    if let Some(place) = project.clip_place_in(id) {
+                        let key = framing::key_from_transform(&tf, &place);
+                        app.edit(|p| p.set_clip_box_at(id, t, key, new));
+                    }
+                }
+            }
+            (Node::PanCrop, PresetValue::PanBox(key)) => {
+                if let FxTarget::Clip(id) = self.target
+                    && let Some(c) = project.clip(id)
+                {
+                    let (t, key) = (c.start + self.pan.pos, *key);
+                    let new = app.settings.prefs.new_motion_keys();
+                    app.edit(|p| p.set_clip_box_at(id, t, key, new));
                 }
             }
             (Node::Effect(i), PresetValue::Params(v)) => {
@@ -1551,6 +1629,20 @@ impl FxWindow {
                             }
                         });
                         ui.add_space(6.0);
+                        if e.kind.works_offline() {
+                            // On an event (or its media) the event plays
+                            // its sound made through the whole chain; a
+                            // track's or a bus's sound cannot change length.
+                            let on_event = matches!(target, FxTarget::Clip(_) | FxTarget::Media(..));
+                            crate::tabs::hint(
+                                ui,
+                                if on_event {
+                                    tr("It changes the sound's length: the event plays its sound made through the whole chain, ready a moment after each change, and keeps its own length.")
+                                } else {
+                                    tr("It changes the sound's length, so it works in an event's chain; here the sound goes through it unchanged.")
+                                },
+                            );
+                        }
                         crate::tabs::hint(
                             ui,
                             &trf!(
@@ -1630,20 +1722,24 @@ impl FxWindow {
         }
         self.pan.pos = self.pan.pos.clamp(Tick::ZERO, last);
         let t = clip.start + self.pan.pos;
-        let tf = clip.transform_at(t);
+        let Some(place) = project.clip_place_in(id) else {
+            return;
+        };
+        let key = clip.box_at(t, place.media, place.media_aspect);
         let pc = PanCtx {
             clip,
             info,
             t,
-            tf,
-            vp: pancrop::viewport_of(&tf, src, out),
+            key,
+            place,
+            vp: Viewport::of(&key),
             src,
-            out,
         };
 
         let strip_h = crate::pancrop_keys::height();
         let body_h = (ui.available_height() - strip_h - 8.0).max(200.0);
-        let mut new_tf = None;
+        let mut new_box = None;
+        let mut new_source = None;
         // The Mask row picked: the masks' tools, properties and workspace.
         let mut new_mask = None;
         let masks = self.pan.row == KeyRow::Mask;
@@ -1678,7 +1774,7 @@ impl FxWindow {
                                         .properties(ui, clip.mask.as_ref(), self.pan.pos);
                                 self.workspace_section(ui);
                             } else {
-                                new_tf = self.properties(ui, app, &pc);
+                                (new_box, new_source) = self.properties(ui, app, &pc);
                             }
                         });
                 });
@@ -1686,18 +1782,27 @@ impl FxWindow {
                 ui.add_space(4.0 + 3.0);
             }
             let size = vec2(ui.available_width(), body_h);
-            if let Some(nt) = self.workspace(ui, app, &pc, size, &mut new_mask) {
-                new_tf = Some(nt);
+            if let Some(k) = self.workspace(ui, app, &pc, size, &mut new_mask) {
+                new_box = Some(k);
             }
         });
         app.settings.pan_crop_properties = properties;
         ui.add_space(4.0);
         self.key_strip(ui, app, clip, rate);
-        if let Some(nt) = new_tf {
+        if let Some(k) = new_box {
             let key = egui::Id::new(("pancrop", id, self.gesture));
             let new = app.settings.prefs.new_motion_keys();
             app.modify_merged(key, |p| {
-                let _ = p.set_clip_transform_at_as(id, t, nt, new);
+                let _ = p.set_clip_box_at(id, t, k, new);
+            });
+        }
+        if let Some((keep, fill)) = new_source {
+            let key = egui::Id::new(("pancrop-origem", id, self.gesture));
+            app.modify_merged(key, |p| {
+                if let Some(c) = p.clip_mut(id) {
+                    c.pan_crop.keep_aspect = keep;
+                    c.pan_crop.fill = fill;
+                }
             });
         }
         if let Some(m) = new_mask {
@@ -1796,17 +1901,17 @@ impl FxWindow {
     /// The properties beside the workspace, as VEGAS's grid lists them:
     /// the box's Position, its Rotation (the angle and where it turns),
     /// the keyframe's interpolation, the Source settings and the
-    /// Workspace. The new framing, when it changed.
+    /// Workspace. The new box and the new Source settings, when they
+    /// changed.
     fn properties(
         &mut self,
         ui: &mut egui::Ui,
         app: &mut BananaApp,
         pc: &PanCtx<'_>,
-    ) -> Option<Transform> {
+    ) -> (Option<PanCropKey>, Option<(bool, bool)>) {
         let mut vp = pc.vp;
-        let tf = pc.tf;
-        let mut pivot = tf.pivot;
-        let (mut keep, mut fill) = (tf.keeps_aspect(), tf.fill_frame);
+        let mut key = pc.key;
+        let (mut keep, mut fill) = (pc.place.keep_aspect, pc.place.fill);
         let lock = self.pan.lock_aspect;
         let src = pc.src;
         section(ui, &mut self.pan.sections[0], tr("Position"), |ui| {
@@ -1857,28 +1962,33 @@ impl FxWindow {
                         .range(-360.0..=360.0),
                 );
                 if r.changed() {
-                    vp = pancrop::turned(&vp, pivot, angle);
+                    let by = f64::from(angle).to_radians() - key.angle;
+                    key = key.turned(by);
                 }
-                let mut at = pancrop::pivot_point(&vp, pivot);
-                let was = at;
-                prop(
-                    ui,
-                    tr("X Center"),
-                    crate::fmt::drag_grouped(&mut at.0, 1).speed(1.0),
+                let (mut x, mut y) = (key.pivot[0] as f32, key.pivot[1] as f32);
+                let (rx, ry) = (
+                    prop(
+                        ui,
+                        tr("X Center"),
+                        crate::fmt::drag_grouped(&mut x, 1).speed(1.0),
+                    ),
+                    prop(
+                        ui,
+                        tr("Y Center"),
+                        crate::fmt::drag_grouped(&mut y, 1).speed(1.0),
+                    ),
                 );
-                prop(
-                    ui,
-                    tr("Y Center"),
-                    crate::fmt::drag_grouped(&mut at.1, 1).speed(1.0),
-                );
-                if at != was {
-                    pivot = pancrop::pivot_of(&vp, at);
+                if rx.changed() {
+                    key.pivot[0] = f64::from(x);
+                }
+                if ry.changed() {
+                    key.pivot[1] = f64::from(y);
                 }
             });
         });
         // The keyframe at the cursor or the one before it (the first one,
         // made when changed, before there are any).
-        let keys = &pc.clip.transform_keys;
+        let keys = &pc.clip.pan_crop.keys;
         let key_idx = keys.iter().rposition(|k| k.at <= self.pan.pos);
         let mut smooth_edit = None;
         section(
@@ -1887,7 +1997,7 @@ impl FxWindow {
             tr("Keyframe interpolation"),
             |ui| {
                 prop_grid(ui, "pc-interpolacao", |ui| {
-                    let mut s = key_idx.map_or(0.0, |i| keys[i].smoothness);
+                    let mut s = key_idx.map_or(0.0, |i| (keys[i].smoothness * 100.0) as f32);
                     let r = prop(
                         ui,
                         tr("Smoothness"),
@@ -1912,20 +2022,11 @@ impl FxWindow {
             });
         });
         self.workspace_section(ui);
-        let settings = pivot != tf.pivot || keep != tf.keeps_aspect() || fill != tf.fill_frame;
-        (vp != pc.vp || settings).then(|| {
-            let base = Transform {
-                pivot,
-                keep_aspect: if keep != tf.keeps_aspect() {
-                    Some(keep)
-                } else {
-                    tf.keep_aspect
-                },
-                fill_frame: fill,
-                ..tf
-            };
-            pancrop::transform_for(&vp, &base, pc.src, pc.out)
-        })
+        let new_box = vp.onto(&pc.vp, &key);
+        (
+            (new_box != pc.key).then_some(new_box),
+            ((keep, fill) != (pc.place.keep_aspect, pc.place.fill)).then_some((keep, fill)),
+        )
     }
 
     /// The properties' Workspace section (both rows have it), as VEGAS's:
@@ -1992,7 +2093,7 @@ impl FxWindow {
         pc: &PanCtx<'_>,
         size: Vec2,
         new_mask: &mut Option<Option<bv_timeline::mask::PanCropMask>>,
-    ) -> Option<Transform> {
+    ) -> Option<PanCropKey> {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         // The Mask row picked: the masks' tools work here, not the F's.
         let masks = self.pan.row == KeyRow::Mask;
@@ -2007,9 +2108,9 @@ impl FxWindow {
         let mut changed = false;
         // The box turns about its pivot (Rotation's X and Y Center): the
         // pointer's angle round it.
-        let pivot = pc.tf.pivot;
-        let round_pivot =
-            |v: &Viewport, p: Pos2| (p - sp.screen(pancrop::pivot_point(v, pivot))).angle();
+        let pivot = (pc.key.pivot[0] as f32, pc.key.pivot[1] as f32);
+        let round_pivot = |p: Pos2| (p - sp.screen(pivot)).angle();
+        let mut result = None;
 
         // Vista: roda do mouse e ferramenta de zoom.
         if resp.hovered()
@@ -2042,9 +2143,12 @@ impl FxWindow {
             } else if !masks && resp.drag_started_by(PointerButton::Primary) {
                 match hit(&sp, &vp, o, true) {
                     Hit::Handle(sx, sy) => Some(Drag::Resize { vp, sx, sy }),
+                    _ if (sp.screen(pivot) - o).length() <= 7.0 => {
+                        Some(Drag::Pivot { at: pivot, from: o })
+                    }
                     Hit::Rotate => Some(Drag::Rotate {
                         vp,
-                        from: round_pivot(&vp, o),
+                        from: round_pivot(o),
                     }),
                     Hit::Inside => Some(Drag::Move { vp, from: o }),
                     Hit::Outside => None,
@@ -2083,7 +2187,11 @@ impl FxWindow {
                         vp.cx = (vp.cx / gx).round() * gx;
                         vp.cy = (vp.cy / gy).round() * gy;
                     }
-                    changed = true;
+                    // The pivot goes with it.
+                    result = Some(pc.key.moved([
+                        f64::from(vp.cx) - pc.key.center[0],
+                        f64::from(vp.cy) - pc.key.center[1],
+                    ]));
                 }
                 Drag::Resize { vp: v0, sx, sy } => {
                     let l = local(&sp, &v0, p);
@@ -2095,12 +2203,24 @@ impl FxWindow {
                     changed = true;
                 }
                 Drag::Rotate { vp: v0, from } => {
-                    let mut a = v0.angle_deg + (round_pivot(&v0, p) - from).to_degrees();
+                    let mut a = v0.angle_deg + (round_pivot(p) - from).to_degrees();
+                    // Turned on from where it is, however far round it went.
+                    a += ((vp.angle_deg - a) / 360.0).round() * 360.0;
                     if shift {
                         a = (a / 15.0).round() * 15.0;
                     }
-                    vp = pancrop::turned(&v0, pivot, wrap180(a));
-                    changed = true;
+                    result = Some(pc.key.turned(f64::from(a).to_radians() - pc.key.angle));
+                }
+                Drag::Pivot { at, from } => {
+                    let (mut x, mut y) =
+                        (at.0 + (p.x - from.x) / sp.k, at.1 + (p.y - from.y) / sp.k);
+                    if self.pan.snap {
+                        x = (x / gx).round() * gx;
+                        y = (y / gy).round() * gy;
+                    }
+                    let mut k = pc.key;
+                    k.pivot = [f64::from(x), f64::from(y)];
+                    result = Some(k);
                 }
             }
         }
@@ -2137,6 +2257,7 @@ impl FxWindow {
 
         // Menu do botão direito.
         let mut action = None;
+        let adjustment = pc.info.is_some_and(MediaInfo::is_adjustment);
         let menu = if masks { None } else { Some(&resp) };
         menu.map(|resp| {
             resp.context_menu(|ui| {
@@ -2153,44 +2274,43 @@ impl FxWindow {
                 item(ui, tr("Flip Vertical"), MenuAction::FlipV);
                 item(ui, tr("Match Output Aspect"), MenuAction::MatchOutput);
                 item(ui, tr("Match Source Aspect"), MenuAction::MatchSource);
+                if adjustment {
+                    item(
+                        ui,
+                        tr("Resize Adjustment Event to Project"),
+                        MenuAction::FitAdjustment,
+                    );
+                }
             })
         });
-        let out = pc.out;
-        let mut result = None;
+        let place = &pc.place;
         match action {
-            Some(MenuAction::Reset) => result = Some(Transform::default()),
-            Some(MenuAction::Center) => {
-                vp.cx = src.0 / 2.0;
-                vp.cy = src.1 / 2.0;
-                changed = true;
-            }
-            Some(MenuAction::FlipH) => {
-                let base = Transform {
-                    flip_h: !pc.tf.flip_h,
-                    ..pc.tf
-                };
-                result = Some(pancrop::transform_for(&vp, &base, src, out));
-            }
-            Some(MenuAction::FlipV) => {
-                let base = Transform {
-                    flip_v: !pc.tf.flip_v,
-                    ..pc.tf
-                };
-                result = Some(pancrop::transform_for(&vp, &base, src, out));
-            }
-            // The box's shape the frame's or the media's, its width kept.
+            Some(MenuAction::Reset) => result = Some(PanCropKey::whole(place.media)),
+            Some(MenuAction::Center) => result = Some(pc.key.centered(place.media)),
+            Some(MenuAction::FlipH) => result = Some(pc.key.flipped_h()),
+            Some(MenuAction::FlipV) => result = Some(pc.key.flipped_v()),
+            // The shape of the frame or of the media, as large as fits.
             Some(MenuAction::MatchOutput) => {
-                vp.h = vp.w * out.1 / out.0;
-                changed = true;
+                let r = (place.frame[0] * place.frame_aspect)
+                    / (place.frame[1] * place.media_aspect.max(1e-6));
+                result = Some(pc.key.matched(r));
             }
             Some(MenuAction::MatchSource) => {
-                vp.h = vp.w * src.1 / src.0;
-                changed = true;
+                result = Some(pc.key.matched(place.media[0] / place.media[1]));
+            }
+            Some(MenuAction::FitAdjustment) => {
+                let id = pc.clip.id;
+                app.modify(|p| {
+                    let _ = p.resize_adjustment_to_project(id);
+                });
             }
             None => {}
         }
         if changed && result.is_none() {
-            result = Some(pancrop::transform_for(&vp, &pc.tf, src, out));
+            result = Some(vp.onto(&pc.vp, &pc.key));
+        }
+        if let Some(k) = &result {
+            vp = Viewport::of(k);
         }
 
         // Desenho (com o estado já atualizado).
@@ -2261,7 +2381,7 @@ impl FxWindow {
                 }
             },
         }
-        let tf = &pc.tf;
+        let [crop_left, crop_right, crop_top, crop_bottom] = pc.key.crop;
         let shade = Color32::from_black_alpha(120);
         let crop = |u0: f32, v0: f32, u1: f32, v1: f32| {
             Rect::from_min_max(
@@ -2270,24 +2390,21 @@ impl FxWindow {
             )
         };
         for (on, r) in [
-            (tf.crop_left > 0.0, crop(0.0, 0.0, tf.crop_left, 1.0)),
-            (
-                tf.crop_right > 0.0,
-                crop(1.0 - tf.crop_right, 0.0, 1.0, 1.0),
-            ),
-            (tf.crop_top > 0.0, crop(0.0, 0.0, 1.0, tf.crop_top)),
-            (
-                tf.crop_bottom > 0.0,
-                crop(0.0, 1.0 - tf.crop_bottom, 1.0, 1.0),
-            ),
+            (crop_left > 0.0, crop(0.0, 0.0, crop_left, 1.0)),
+            (crop_right > 0.0, crop(1.0 - crop_right, 0.0, 1.0, 1.0)),
+            (crop_top > 0.0, crop(0.0, 0.0, 1.0, crop_top)),
+            (crop_bottom > 0.0, crop(0.0, 1.0 - crop_bottom, 1.0, 1.0)),
         ] {
             if on {
                 painter.rect_filled(r, 0.0, shade);
             }
         }
         if masks {
-            let n = self.pan.grid.max(1.0);
-            let grid = self.pan.snap.then_some([src.0 / n, src.1 / n]);
+            let n = f64::from(self.pan.grid.max(1.0));
+            let grid = self
+                .pan
+                .snap
+                .then_some([f64::from(src.0) / n, f64::from(src.1) / n]);
             let normal = self.pan.tool == Tool::Normal;
             *new_mask = self.pan.mask.workspace(
                 ui,
@@ -2300,7 +2417,10 @@ impl FxWindow {
                 normal,
             );
         } else {
-            paint_f_box(&painter, &sp, &vp, tf, true);
+            let shown = result.as_ref().unwrap_or(&pc.key);
+            let flips = (shown.width < 0.0, shown.height < 0.0);
+            let turns = (shown.pivot[0] as f32, shown.pivot[1] as f32);
+            paint_f_box(&painter, &sp, &vp, flips, turns, true);
         }
         self.pan.view = Some((sp, vp));
         result
@@ -2312,8 +2432,11 @@ impl FxWindow {
     /// what it asked for: the needle, the row, Sync Cursor, the masks on
     /// or off, the rows' new keyframes.
     fn key_strip(&mut self, ui: &mut egui::Ui, app: &mut BananaApp, clip: &Clip, rate: FrameRate) {
+        let place = app.project().clip_place_in(clip.id);
         let cx = crate::pancrop_keys::StripCtx {
             clip,
+            media: place.map_or([1.0; 2], |p| p.media),
+            aspect: place.map_or(1.0, |p| p.media_aspect),
             rate,
             pos: self.pan.pos,
             row: self.pan.row,
@@ -2346,12 +2469,13 @@ impl FxWindow {
         }
         if let Some((keys, drag)) = answer.keys {
             let set = move |p: &mut Project| {
+                let media = p.clip_place_in(id).map(|place| place.media);
                 let Some(c) = p.clip_mut(id) else { return };
-                if keys.position != c.transform_keys {
-                    if let Some(first) = keys.position.first() {
-                        c.transform = first.value;
+                if keys.position != c.pan_crop.keys {
+                    c.pan_crop.keys = keys.position.clone();
+                    if let Some(m) = media {
+                        c.pan_crop.size = [m[0] as u32, m[1] as u32];
                     }
-                    c.transform_keys = keys.position.clone();
                 }
                 if let Some(m) = c.mask.as_mut()
                     && (!m.keys.is_empty() || !keys.mask.is_empty())
@@ -2381,13 +2505,19 @@ impl FxWindow {
         let key = egui::Id::new(("qc-suavidade", id, at.0));
         let (curve, _) = app.settings.prefs.new_motion_keys();
         app.modify_merged(key, |p| {
+            let media = p.clip_place_in(id).map(|place| place.media);
             let Some(c) = p.clip_mut(id) else { return };
-            if c.transform_keys.is_empty() {
-                c.transform_keys
-                    .push(TransformKey::new(Tick::ZERO, c.transform, curve));
+            if c.pan_crop.keys.is_empty()
+                && let Some(m) = media
+            {
+                c.pan_crop.ensure_size(m);
+                c.pan_crop.keys.push(PanCropKey {
+                    curve,
+                    ..PanCropKey::whole(m)
+                });
             }
-            if let Some(k) = c.transform_keys.iter_mut().find(|k| k.at == at) {
-                k.smoothness = s.clamp(0.0, 100.0);
+            if let Some(k) = c.pan_crop.keys.iter_mut().find(|k| k.at == at) {
+                k.smoothness = f64::from(s.clamp(0.0, 100.0) / 100.0);
             }
         });
     }
@@ -4047,7 +4177,8 @@ pub(crate) fn paint_f_box(
     painter: &Painter,
     sp: &Space,
     vp: &Viewport,
-    tf: &Transform,
+    flips: (bool, bool),
+    turns: (f32, f32),
     rotation: bool,
 ) {
     // Unturned, on the pixels' middles: a pixel wide and sharp.
@@ -4084,8 +4215,8 @@ pub(crate) fn paint_f_box(
     let s = vp.w.min(vp.h);
     let (fw, fh) = (0.54 * s, 0.81 * s);
     let (flip_x, flip_y) = (
-        if tf.flip_h { -1.0 } else { 1.0 },
-        if tf.flip_v { -1.0 } else { 1.0 },
+        if flips.0 { -1.0 } else { 1.0 },
+        if flips.1 { -1.0 } else { 1.0 },
     );
     let f: Vec<Pos2> = F_SHAPE
         .iter()
@@ -4101,7 +4232,7 @@ pub(crate) fn paint_f_box(
     ants(painter, &f);
     // The small circle where the box turns: its middle, or its pivot
     // (Rotation's X and Y Center).
-    let turns = sp.screen(pancrop::pivot_point(vp, tf.pivot));
+    let turns = sp.screen(turns);
     let middle: Vec<Pos2> = (0..=24)
         .map(|i| turns + Vec2::angled(i as f32 / 24.0 * std::f32::consts::TAU) * 4.0)
         .collect();
@@ -4202,6 +4333,29 @@ mod tests {
         let c = app.project().clip(clip).unwrap();
         assert!(c.transition_fx.is_none() && !c.transition_bypass);
         assert!(target.chain(app.project()).is_none());
+    }
+
+    /// A preset of a shape: the box of that shape, as large as fits, where
+    /// the box was; not the frame's shape a framing would keep.
+    #[test]
+    fn a_shape_preset_gives_its_box() {
+        let mut app = BananaApp::new(egui::Context::default());
+        app.load_demo();
+        let p = app.project().clone();
+        let id = p
+            .clips()
+            .find(|(t, _)| t.kind == TrackKind::Video)
+            .map(|(_, c)| c.id)
+            .expect("a video event");
+        let place = p.clip_place_in(id).expect("its place");
+        let key = PanCropKey::whole(place.media).matched(1.0 / place.media_aspect);
+        assert!(key.width < place.media[0]);
+        let mut w = FxWindow::new(FxTarget::Clip(id), Node::PanCrop);
+        w.apply_preset(&mut app, &p, &[], &PresetValue::PanBox(key));
+        let c = app.project().clip(id).expect("the event");
+        let now = c.box_at(c.start, place.media, place.media_aspect);
+        assert_eq!((now.width, now.height), (key.width, key.height));
+        assert_eq!(now.center, key.center);
     }
 
     #[test]
@@ -4598,9 +4752,10 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         let c = app.project().clip(id).expect("clipe").clone();
         // O cursor está no meio do clipe: virou animação com dois quadros-chave.
-        assert_eq!(c.transform_keys.len(), 2, "{:?}", c.transform_keys);
-        assert_eq!(c.transform_at(c.start).scale, 1.0);
-        let tf = c.transform_at(app.cursor);
+        assert_eq!(c.pan_crop.keys.len(), 2, "{:?}", c.pan_crop.keys);
+        let at = |t: Tick| app.project().clip_transform_at(id, t).expect("clipe");
+        assert_eq!(at(c.start).scale, 1.0);
+        let tf = at(app.cursor);
         let expected = vp.w / (vp.w + 2.0 * 60.0 / sp.k);
         assert!(
             (tf.scale - expected).abs() < 0.02,
@@ -4612,7 +4767,8 @@ mod tests {
             app.project()
                 .clip(id)
                 .expect("clipe")
-                .transform_keys
+                .pan_crop
+                .keys
                 .is_empty()
         );
     }
@@ -4655,13 +4811,13 @@ mod tests {
         let m = c.mask.expect("masks made");
         assert!(m.enabled && m.active(), "{m:?}");
         let (lo, hi) = m.paths[0].bounds().expect("a path");
-        let near = |a: f32, b: f32| (a - b).abs() < sp.src.0 * 0.01;
+        let near = |a: f64, b: f64| (a - b).abs() < f64::from(sp.src.0) * 0.01;
         assert!(
-            near(lo[0], sp.src.0 * 0.25) && near(hi[0], sp.src.0 * 0.75),
+            near(lo[0], f64::from(sp.src.0) * 0.25) && near(hi[0], f64::from(sp.src.0) * 0.75),
             "{lo:?} {hi:?}"
         );
         assert!(
-            near(lo[1], sp.src.1 * 0.25) && near(hi[1], sp.src.1 * 0.5),
+            near(lo[1], f64::from(sp.src.1) * 0.25) && near(hi[1], f64::from(sp.src.1) * 0.5),
             "{lo:?} {hi:?}"
         );
         app.undo();
@@ -4737,20 +4893,20 @@ mod tests {
         let on = segment_point(&was[0], 1, 0.37);
         // Clicked 3 pixels off the line, across it.
         let ahead = segment_point(&was[0], 1, 0.38);
-        let along = (sp.screen((ahead[0], ahead[1])) - sp.screen((on[0], on[1]))).normalized();
-        let p = sp.screen((on[0], on[1])) + vec2(-along.y, along.x) * 3.0;
+        let along = (sp.screen64((ahead[0], ahead[1])) - sp.screen64((on[0], on[1]))).normalized();
+        let p = sp.screen64((on[0], on[1])) + vec2(-along.y, along.x) * 3.0;
         click_at(&ctx, &mut app, p);
         let now = shapes(&app, id);
         assert_eq!(now[0].len(), was[0].len() + 1, "an anchor added");
         let a = now[0][2];
-        let target = sp.media(p);
+        let target = sp.media64(p);
         // The point of the curve nearest the click.
-        let dist = |q: [f32; 2]| (q[0] - target.0).hypot(q[1] - target.1);
+        let dist = |q: [f64; 2]| (q[0] - target.0).hypot(q[1] - target.1);
         let nearest = (0..=4000)
-            .map(|k| segment_point(&was[0], 1, k as f32 / 4000.0))
+            .map(|k| segment_point(&was[0], 1, f64::from(k) / 4000.0))
             .min_by(|x, y| dist(*x).total_cmp(&dist(*y)))
             .expect("points");
-        let px = 1.0 / sp.k;
+        let px = 1.0 / f64::from(sp.k);
         assert!(
             (a.at[0] - nearest[0]).abs() < px && (a.at[1] - nearest[1]).abs() < px,
             "{:?} {nearest:?}",
@@ -4759,11 +4915,11 @@ mod tests {
         // The curve kept: its two halves run along the old segment.
         for seg in [1, 2] {
             for k in 1..10 {
-                let q = segment_point(&now[0], seg, k as f32 / 10.0);
+                let q = segment_point(&now[0], seg, f64::from(k) / 10.0);
                 let off = (0..=400)
-                    .map(|j| segment_point(&was[0], 1, j as f32 / 400.0))
+                    .map(|j| segment_point(&was[0], 1, f64::from(j) / 400.0))
                     .map(|w| (w[0] - q[0]).hypot(w[1] - q[1]))
-                    .fold(f32::MAX, f32::min);
+                    .fold(f64::MAX, f64::min);
                 assert!(off < 1.0, "{seg} {k}: {off}");
             }
         }
@@ -4789,7 +4945,7 @@ mod tests {
             let (id, sp) = masked(&ctx, &mut app, tool);
             let was = shapes(&app, id)[0][1];
             assert!(was.after != [0.0; 2], "curved");
-            let p = sp.screen((was.at[0], was.at[1]));
+            let p = sp.screen64((was.at[0], was.at[1]));
             click_at(&ctx, &mut app, p);
             let corner = shapes(&app, id)[0][1];
             assert_eq!(
@@ -4814,24 +4970,31 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = BananaApp::new(ctx.clone());
         let (id, sp) = masked(&ctx, &mut app, MaskTool::AddAnchor);
-        let (w, h) = sp.src;
+        let (w, h) = (f64::from(sp.src.0), f64::from(sp.src.1));
         let spots = [(0.85, 0.1), (0.95, 0.1), (0.9, 0.3)];
         for (x, y) in spots {
-            click_at(&ctx, &mut app, sp.screen((x * w, y * h)));
+            click_at(&ctx, &mut app, sp.screen64((x * w, y * h)));
             for _ in 0..30 {
                 frame(&ctx, &mut app, Vec::new());
             }
         }
-        click_at(&ctx, &mut app, sp.screen((spots[0].0 * w, spots[0].1 * h)));
+        click_at(
+            &ctx,
+            &mut app,
+            sp.screen64((spots[0].0 * w, spots[0].1 * h)),
+        );
         let now = shapes(&app, id);
         assert_eq!(now.len(), 3, "a new path");
         assert_eq!(now[2].len(), 3, "{:?}", now[2]);
         for (a, (x, y)) in now[2].iter().zip(spots) {
             assert_eq!((a.before, a.after), ([0.0; 2], [0.0; 2]), "a corner");
-            assert!((a.at[0] - x * w).abs() < 1.0 / sp.k && (a.at[1] - y * h).abs() < 1.0 / sp.k);
+            assert!(
+                (a.at[0] - x * w).abs() < 1.0 / f64::from(sp.k)
+                    && (a.at[1] - y * h).abs() < 1.0 / f64::from(sp.k)
+            );
         }
         // Closed: the next click starts another path.
-        click_at(&ctx, &mut app, sp.screen((0.86 * w, 0.92 * h)));
+        click_at(&ctx, &mut app, sp.screen64((0.86 * w, 0.92 * h)));
         assert_eq!(shapes(&app, id).len(), 4);
     }
 
@@ -4845,10 +5008,10 @@ mod tests {
         let mut app = BananaApp::new(ctx.clone());
         let (id, sp) = masked(&ctx, &mut app, MaskTool::Normal);
         let was = shapes(&app, id);
-        let (w, h) = sp.src;
+        let (w, h) = (f64::from(sp.src.0), f64::from(sp.src.1));
         let (from, to) = (
-            sp.screen((0.05 * w, 0.05 * h)),
-            sp.screen((0.47 * w, 0.55 * h)),
+            sp.screen64((0.05 * w, 0.05 * h)),
+            sp.screen64((0.47 * w, 0.55 * h)),
         );
         drag_from(&ctx, &mut app, from, to);
         let r = Rect::from_two_pos(from, to);
@@ -4858,7 +5021,7 @@ mod tests {
             .flat_map(|(i, s)| {
                 s.iter()
                     .enumerate()
-                    .filter(|(_, a)| r.contains(sp.screen((a.at[0], a.at[1]))))
+                    .filter(|(_, a)| r.contains(sp.screen64((a.at[0], a.at[1]))))
                     .map(move |(k, _)| (i, k))
             })
             .collect();
@@ -4875,7 +5038,7 @@ mod tests {
         // One of them dragged: all move alike.
         let (gp, ga) = inside[0];
         let g = was[gp][ga].at;
-        let from = sp.screen((g[0], g[1]));
+        let from = sp.screen64((g[0], g[1]));
         drag_from(&ctx, &mut app, from, from + vec2(30.0, 12.0));
         let now = shapes(&app, id);
         let d = [now[gp][ga].at[0] - g[0], now[gp][ga].at[1] - g[1]];
@@ -4903,7 +5066,7 @@ mod tests {
         let (id, sp) = masked(&ctx, &mut app, MaskTool::Normal);
         let was = shapes(&app, id);
         let q = bv_timeline::mask::segment_point(&was[0], 0, 0.5);
-        let p = sp.screen((q[0], q[1]));
+        let p = sp.screen64((q[0], q[1]));
         click_at(&ctx, &mut app, p);
         assert_eq!(mask_editor(&app).selected, Some(0));
         assert!(!mask_editor(&app).box_shows(), "one click: no box");
@@ -4939,7 +5102,7 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         let now = bv_timeline::mask::segment_point(&shapes(&app, id)[0], 0, 0.5);
         assert!(
-            (now[1] - (q[1] - 24.0 / sp.k)).abs() < 0.5 / sp.k,
+            (now[1] - (q[1] - 24.0 / f64::from(sp.k))).abs() < 0.5 / f64::from(sp.k),
             "{now:?} {q:?}"
         );
     }
@@ -4954,11 +5117,14 @@ mod tests {
         let v = vp();
         let corner = box_point(&sp, &v, 1.0, 1.0);
         assert_eq!(hit(&sp, &v, corner, true), Hit::Handle(1.0, 1.0));
-        assert_eq!(hit(&sp, &v, sp.screen((450.0, 520.0)), true), Hit::Inside);
-        assert_eq!(hit(&sp, &v, sp.screen((900.0, 900.0)), true), Hit::Outside);
+        assert_eq!(hit(&sp, &v, sp.screen64((450.0, 520.0)), true), Hit::Inside);
+        assert_eq!(
+            hit(&sp, &v, sp.screen64((900.0, 900.0)), true),
+            Hit::Outside
+        );
         // Round the box, up to its circle (0.55 of its diagonal, as VEGAS's),
         // it turns.
-        let round = sp.screen((500.0, 630.0));
+        let round = sp.screen64((500.0, 630.0));
         assert_eq!(hit(&sp, &v, round, true), Hit::Rotate);
         assert_eq!(hit(&sp, &v, round, false), Hit::Outside);
         let ring = sp.screen((500.0 + 0.55 * 400f32.hypot(200.0), 500.0));

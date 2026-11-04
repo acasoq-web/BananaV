@@ -26,6 +26,8 @@ pub struct LiveRoute {
     /// The device (empty: the default) and its channels (no input bus).
     pub input: RecordInput,
     pub chains: Vec<Vec<Effect>>,
+    /// The project's tempo, for effects with tempo sync.
+    pub tempo: bv_timeline::Tempo,
     /// Linear.
     pub gain: f32,
     /// −1 left to 1 right.
@@ -299,6 +301,7 @@ impl Live {
             if state.chains.len() != route.chains.len()
                 || state.route.chains != route.chains
                 || state.route.input != route.input
+                || state.route.tempo != route.tempo
             {
                 state.chains = route
                     .chains
@@ -306,6 +309,7 @@ impl Live {
                     .map(|effects| {
                         let mut c = Chain::default();
                         let list: Vec<&Effect> = effects.iter().collect();
+                        c.set_tempo(route.tempo);
                         c.sync(&list, rate, channels, false);
                         c
                     })
@@ -392,6 +396,7 @@ mod tests {
                 bus: None,
             },
             chains: vec![vec![gain.clone()]],
+            tempo: bv_timeline::Tempo::default(),
             gain: 1.0,
             pan: 0.0,
             active: true,
