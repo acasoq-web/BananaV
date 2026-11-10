@@ -658,7 +658,18 @@ mod tests {
     #[test]
     fn brightness_moves_the_greys_and_keeps_text_and_accents() {
         let base = shown(Interface::Dark, 0);
-        assert!(std::ptr::eq(base, Interface::Dark.palette()));
+        let own = Interface::Dark.palette();
+        assert_eq!(
+            (
+                base.bg,
+                base.panel,
+                base.panel_dark,
+                base.text,
+                base.track_video
+            ),
+            (own.bg, own.panel, own.panel_dark, own.text, own.track_video),
+            "no brightness: the type's own palette"
+        );
         let lighter = shown(Interface::Dark, 40);
         let darker = shown(Interface::Dark, -40);
         let luma = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;

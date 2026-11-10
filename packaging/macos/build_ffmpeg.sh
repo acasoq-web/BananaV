@@ -73,7 +73,7 @@ cd "$work/ffmpeg"
     --enable-shared --disable-static --enable-pic \
     --disable-programs --disable-doc --disable-network \
     --disable-avdevice --disable-avfilter --disable-postproc \
-    --disable-autodetect --enable-pthreads --enable-zlib --enable-bzlib --enable-iconv \
+    --disable-autodetect --enable-pthreads --enable-zlib --enable-bzlib \
     --enable-videotoolbox --enable-audiotoolbox \
     --enable-libdav1d --enable-libmp3lame --enable-libsvtav1 \
     --extra-cflags="$min -I$prefix/include" \

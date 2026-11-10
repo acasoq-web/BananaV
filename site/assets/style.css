@@ -159,6 +159,7 @@ svg.heart { fill: currentColor; stroke: none; }
 .eyebrow:hover { border-color: var(--yellow); transform: translateY(-1px); }
 .eyebrow svg { width: 15px; height: 15px; color: var(--muted); stroke-width: 2.2; }
 .badge-new { background: var(--yellow); color: var(--on-accent); font-weight: 800; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; }
+.badge-exp { border: 1px solid var(--yellow); color: var(--accent-text); font-weight: 800; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; vertical-align: middle; margin-left: 6px; }
 .hero h1 { font-size: clamp(48px, 8.4vw, 108px); font-weight: 820; margin: 28px 0 22px; letter-spacing: -0.05em; }
 .accent { background: linear-gradient(100deg, #ffe45a 0%, var(--yellow) 35%, var(--amber) 95%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 :root[data-theme="light"] .accent { background-image: linear-gradient(100deg, #e0a800 10%, #a66a00 90%); }
@@ -231,7 +232,7 @@ a.card { text-decoration: none; display: block; }
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* Downloads */
-.downloads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.downloads { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
 .dl { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 32px 28px; display: flex; flex-direction: column; gap: 12px; transition: border-color .2s ease; }
 .dl:hover { border-color: color-mix(in srgb, var(--yellow) 40%, var(--line)); }
 .dl > svg { width: 46px; height: 46px; color: var(--accent-text); stroke-width: 1.5; }

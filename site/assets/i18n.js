@@ -4,10 +4,33 @@
 // and a button to the language menu in index.html.
 window.BANANAV_I18N = {
   "pt-BR": {
+    // BananaV 0.3.0.
+    "BananaV comes to the Mac": "O BananaV chega ao Mac",
+    "macOS as an experimental version, smooth 4K playback, VST plug-ins, a Transform mode and windows where you want them.": "O macOS como versão experimental, reprodução lisa em 4K, plug-ins VST, um modo Transform e janelas onde você quiser.",
+    "macOS, experimental": "macOS, experimental",
+    "One app for Apple's chips and Intel Macs, macOS 11 and later. It is built and started on GitHub's Macs but not yet tried on ours: tell us how it goes.": "Um só aplicativo para Macs com chip da Apple e Intel, macOS 11 ou mais novo. Ele é compilado e aberto nos Macs do GitHub, mas ainda não foi testado nos nossos: conte para nós como foi.",
+    "Smooth playback in 4K": "Reprodução lisa em 4K",
+    "A 4K 59.94 project at Best (Full) plays every frame, heavy 4K parts no longer stall when they start, and picture and sound start together.": "Um projeto 4K a 59,94 em Best (Full) toca todos os quadros, trechos 4K pesados não travam mais ao começar, e imagem e som começam juntos.",
+    "VST 2 and VST 3 plug-ins": "Plug-ins VST 2 e VST 3",
+    "Their editors inside the FX window, 32-bit ones in a bridge of their own, and each one tried apart, so a crash never takes BananaV down.": "Com as janelas deles dentro da janela de FX, os de 32 bits numa ponte própria, e cada um testado à parte, para que uma falha nunca derrube o BananaV.",
+    "Transform on the preview": "Transform no preview",
+    "Drag the picture to move, resize and turn it, with every control of the event in the Transform window beside the Explorer.": "Arraste a imagem para mover, redimensionar e girar, com todos os controles do evento na janela Transform ao lado do Explorer.",
+    "Windows where you want them": "Janelas onde você quiser",
+    "Drop a window beside another or on a side, float it on another monitor, and make the interface darker or lighter.": "Solte uma janela ao lado de outra ou num canto, deixe-a flutuando em outro monitor, e deixe a interface mais escura ou mais clara.",
+    "18 more languages, and updates": "Mais 18 idiomas, e atualizações",
+    "The interface partly translated into 18 more languages, from Chinese to Swedish, and BananaV tells you when a new version is out.": "A interface traduzida em parte para mais 18 idiomas, do chinês ao sueco, e o BananaV avisa quando sai uma versão nova.",
+    "plug-in hosts for video and audio, VST 2 and VST 3": "hosts de plug-ins para vídeo e áudio, VST 2 e VST 3",
+    "Experimental": "Experimental",
+    "macOS 11 or later, one app for Apple's chips and Intel Macs: open the disk image and drag BananaV into Applications. It is not signed yet: if macOS stops it, open it anyway from System Settings › Privacy & Security.": "macOS 11 ou mais novo, um só aplicativo para Macs com chip da Apple e Intel: abra a imagem de disco e arraste o BananaV para Aplicativos. Ele ainda não é assinado: se o macOS bloquear, abra mesmo assim em Ajustes do Sistema › Privacidade e Segurança.",
+    "Download for Mac": "Baixar para Mac",
+    "Experimental: built and started on GitHub's Macs, not yet tried on ours. Tell us on Discord what works and what doesn't.": "Experimental: compilado e aberto nos Macs do GitHub, ainda não testado nos nossos. Conte para nós no Discord o que funciona e o que não funciona.",
+    "November 10, 2026": "10 de novembro de 2026",
+    "BananaV 0.3.0, on the Mac too": "BananaV 0.3.0, também no Mac",
+    "BananaV comes to macOS as an experimental version, with smooth 4K playback, VST 2 and VST 3 plug-ins, a Transform mode on the preview, windows that dock where you drop them and 18 more languages. Read what changed.": "O BananaV chega ao macOS como versão experimental, com reprodução lisa em 4K, plug-ins VST 2 e VST 3, um modo Transform no preview, janelas que se encaixam onde você solta e mais 18 idiomas. Veja o que mudou.",
     // BananaV 0.2.0.
-    "BananaV 0.2.0 is out, with a Windows installer": "O BananaV 0.2.0 saiu, com instalador para Windows",
+    "BananaV 0.3.0 is out, now on macOS too (experimental)": "O BananaV 0.3.0 saiu, agora também para macOS (experimental)",
     "audio effects, with their panels and presets": "efeitos de áudio, com seus painéis e presets",
-    "What's new in 0.2.0": "Novidades da versão 0.2.0",
+    "What's new in 0.3.0": "Novidades da versão 0.3.0",
     "Audio effects, .veg projects, color correction with LUTs, and an installer that does the work for you.": "Efeitos de áudio, projetos .veg, correção de cor com LUTs e um instalador que faz tudo por você.",
     "51 audio effects": "51 efeitos de áudio",
     "Equalizers, compressors, reverbs, delays, modulation and restoration, each with its panel and factory presets.": "Equalizadores, compressores, reverbs, delays, modulação e restauração, cada um com seu painel e presets de fábrica.",
@@ -21,9 +44,9 @@ window.BANANAV_I18N = {
     "Position, rotation, smooth paths and masks redone, and compared frame by frame with reference renders.": "Posição, rotação, caminhos suaves e máscaras refeitos, e comparados quadro a quadro com renders de referência.",
     "Smooth playback": "Reprodução lisa",
     "The graphics card draws from the first frame: 1080p at 60 frames a second, evenly, on about one processor core.": "A placa de vídeo desenha desde o primeiro quadro: 1080p a 60 quadros por segundo, sem engasgos, usando cerca de um núcleo do processador.",
-    "51 audio effects of its own, a mixing console with busses and effects chains, VST 3 plug-ins, 5.1 surround panning, loudness meters and auto ducking.": "51 efeitos de áudio próprios, console de mixagem com barramentos e cadeias de efeitos, plug-ins VST 3, panorama surround 5.1, medidores de loudness e ducking automático.",
+    "51 audio effects of its own, a mixing console with busses and effects chains, VST 2 and VST 3 plug-ins, 5.1 surround panning, loudness meters and auto ducking.": "51 efeitos de áudio próprios, console de mixagem com barramentos e cadeias de efeitos, plug-ins VST 2 e VST 3, panorama surround 5.1, medidores de loudness e ducking automático.",
     ".veg projects, OpenTimelineIO, EDL and XML timelines in and out, closed captions and subtitles, and renders to MP4, MOV, ProRes and more.": "Projetos .veg, timelines OpenTimelineIO, EDL e XML de ida e volta, legendas, e renderização para MP4, MOV, ProRes e mais.",
-    "BananaV 0.2.0 is out for Windows and Linux, and its source code is on GitHub.": "O BananaV 0.2.0 saiu para Windows e Linux, e o código-fonte está no GitHub.",
+    "BananaV 0.3.0 is out for Windows and Linux, and for macOS as an experimental version. Its source code is on GitHub.": "O BananaV 0.3.0 saiu para Windows e Linux, e para macOS como versão experimental. O código-fonte está no GitHub.",
     "Windows 10 and 11. An installer: open it and follow the steps, no administrator password needed. It is not signed yet: if Windows warns you, choose More info, then Run anyway.": "Windows 10 e 11. Um instalador: abra e siga os passos, sem pedir senha de administrador. Ele ainda não é assinado: se o Windows avisar, clique em Mais informações e depois em Executar assim mesmo.",
     "Prefer no installation? Get the zip": "Prefere sem instalar? Baixe o zip",
     "Download the installer": "Baixar o instalador",
@@ -42,7 +65,7 @@ window.BANANAV_I18N = {
     "Tour": "Tour",
     "New": "Novo",
     "Download for free": "Baixar grátis",
-    "Windows & Linux · x64 & ARM64 · GPL v3 · No account, no watermark, no subscription": "Windows e Linux · x64 e ARM64 · GPL v3 · Sem conta, sem marca d'água, sem assinatura",
+    "Windows, macOS & Linux · x64 & ARM64 · GPL v3 · No account, no watermark, no subscription": "Windows, macOS e Linux · x64 e ARM64 · GPL v3 · Sem conta, sem marca d'água, sem assinatura",
     "BananaV's main window: the effects chooser with Add Noise's presets, the Video Preview, the Master Bus and the timeline": "A janela principal do BananaV: a lista de efeitos com os presets do Adicionar ruído, a pré-visualização, o barramento mestre e a timeline",
     "BananaV in numbers": "O BananaV em números",
     "built-in effects, transitions and generators": "efeitos, transições e geradores próprios",
@@ -100,8 +123,7 @@ window.BANANAV_I18N = {
 
     // The document and the attributes.
     "BananaV — Free and open-source video editor": "BananaV — Editor de vídeo gratuito e de código aberto",
-    "BananaV is a free and open-source video editor for Windows and Linux, written in Rust: a track-based timeline, keyframes and envelopes, effects at every level, pro audio and color.":
-      "O BananaV é um editor de vídeo gratuito e de código aberto para Windows e Linux, escrito em Rust: timeline de trilhas, quadros-chave e envelopes, efeitos em todos os níveis, áudio e cor profissionais.",
+    "BananaV is a free and open-source video editor for Windows, macOS and Linux, written in Rust: a track-based timeline, keyframes and envelopes, effects at every level, pro audio and color.": "O BananaV é um editor de vídeo gratuito e de código aberto para Windows, macOS e Linux, escrito em Rust: timeline de trilhas, quadros-chave e envelopes, efeitos em todos os níveis, áudio e cor profissionais.",
     "Skip to content": "Pular para o conteúdo",
     "BananaV home": "Início do BananaV",
     "Menu": "Menu",
@@ -132,8 +154,7 @@ window.BANANAV_I18N = {
     "In development · first public release coming soon": "Em desenvolvimento · primeira versão pública em breve",
     "Edit freely.": "Edite com liberdade.",
     "Meet BananaV.": "Conheça o BananaV.",
-    "A free and open-source video editor for Windows and Linux, written from scratch in Rust. Everything you need to cut, mix, color and finish your videos, in one fast timeline.":
-      "Um editor de vídeo gratuito e de código aberto para Windows e Linux, escrito do zero em Rust. Tudo o que você precisa para cortar, mixar, colorir e finalizar seus vídeos, numa timeline rápida.",
+    "A free and open-source video editor for Windows, macOS and Linux, written from scratch in Rust. Everything you need to cut, mix, color and finish your videos, in one fast timeline.": "Um editor de vídeo gratuito e de código aberto para Windows, macOS e Linux, escrito do zero em Rust. Tudo o que você precisa para cortar, mixar, colorir e finalizar seus vídeos, numa timeline rápida.",
     "Join the community": "Entre na comunidade",
     "Free forever": "Grátis para sempre",
     "Open source, GPL v3": "Código aberto, GPL v3",
@@ -233,7 +254,7 @@ window.BANANAV_I18N = {
       "As trilhas de barramento e os canais do console de mixagem agora gravam volume, pan, mudo e envios enquanto o projeto toca, como as trilhas.",
 
     // The footer.
-    "A free and open-source video editor for Windows and Linux.": "Um editor de vídeo gratuito e de código aberto para Windows e Linux.",
+    "A free and open-source video editor for Windows, macOS and Linux.": "Um editor de vídeo gratuito e de código aberto para Windows, macOS e Linux.",
     "Project": "Projeto",
     "Community": "Comunidade",
     "About": "Sobre",
