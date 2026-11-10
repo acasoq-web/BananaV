@@ -397,12 +397,10 @@ fn built_library() -> PathBuf {
         .status()
         .expect("cargo runs");
     assert!(status.success());
-    let name = if cfg!(windows) {
-        "bv_ofx_testplug.dll"
-    } else {
-        "libbv_ofx_testplug.so"
-    };
-    target.join("debug").join(name)
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+    target
+        .join("debug")
+        .join(format!("{DLL_PREFIX}bv_ofx_testplug{DLL_SUFFIX}"))
 }
 
 #[test]

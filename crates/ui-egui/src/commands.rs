@@ -2625,7 +2625,7 @@ mod tests {
         let mut app = BananaApp::new(ctx.clone());
         let km = crate::keymap::Keymap::in_memory();
         let action = crate::keymap::Action::Cmd(Cmd::Window(Tab::LoudnessMeters));
-        assert_eq!(km.text_for(action), "Ctrl+Alt+7");
+        assert_eq!(km.text_for(action), crate::i18n::system_keys("Ctrl+Alt+7"));
         assert!(!app.is_tab_open(Tab::LoudnessMeters));
         frame(&ctx, &mut app, vec![]);
         press(&ctx, &mut app, CMD_ALT, Key::Num7);
@@ -3116,10 +3116,15 @@ mod tests {
     fn menu_shortcuts_come_from_the_keyboard_map() {
         let km = crate::keymap::Keymap::in_memory();
         let text = |c| km.text_for(crate::keymap::Action::Cmd(c));
-        assert_eq!(text(Cmd::Redo), "Ctrl+Y; Ctrl+Shift+Z");
-        assert_eq!(text(Cmd::FrameLeft), "Alt+Left");
-        assert_eq!(text(Cmd::Layout(LayoutPreset::AudioMixing)), "Alt+D, A");
-        assert_eq!(text(Cmd::Save), "Ctrl+S");
-        assert_eq!(text(Cmd::Window(Tab::Explorer)), "Alt+1");
+        // In this system's names of the keys (Cmd and Option on macOS).
+        let named = crate::i18n::system_keys;
+        assert_eq!(text(Cmd::Redo), named("Ctrl+Y; Ctrl+Shift+Z"));
+        assert_eq!(text(Cmd::FrameLeft), named("Alt+Left"));
+        assert_eq!(
+            text(Cmd::Layout(LayoutPreset::AudioMixing)),
+            named("Alt+D, A")
+        );
+        assert_eq!(text(Cmd::Save), named("Ctrl+S"));
+        assert_eq!(text(Cmd::Window(Tab::Explorer)), named("Alt+1"));
     }
 }

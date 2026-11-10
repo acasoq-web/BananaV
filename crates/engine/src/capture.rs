@@ -756,6 +756,7 @@ fn video(
     let rate = s.rate;
     let mut out = match &record {
         Some((path, _)) => {
+            let format = s.video_codec.format();
             let params = VideoParams {
                 width: w,
                 height: h,
@@ -764,9 +765,13 @@ fn video(
                 alpha: false,
                 bitrate: s.video_quality.video_bitrate(w, h, rate),
                 max_bitrate: s.video_quality.video_bitrate(w, h, rate) * 2,
+                // The processor's encoder where there is one, else this
+                // computer's first (a Mac encodes H.264 and HEVC on its
+                // media engine only).
+                encoder: format.video_encoders().first().copied().unwrap_or_default(),
                 ..VideoParams::default()
             };
-            match open_output(path, s.video_codec.format(), Some(params), None) {
+            match open_output(path, format, Some(params), None) {
                 Ok(o) => Some(o),
                 Err(e) => {
                     set_error(live, Some(e.clone()));

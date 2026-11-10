@@ -248,15 +248,12 @@ fn build(package: &str, target: Option<&str>) -> PathBuf {
 
 /// The test plug-in's library copied into a folder of its own.
 fn plug_in_file(built: &Path, tag: &str) -> PathBuf {
-    let name = if cfg!(windows) {
-        "bv_vst2_testplug.dll"
-    } else {
-        "libbv_vst2_testplug.so"
-    };
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+    let name = format!("{DLL_PREFIX}bv_vst2_testplug{DLL_SUFFIX}");
     let dir = std::env::temp_dir().join(format!("bananav-vst2-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join(name);
-    std::fs::copy(built.join(name), &file).unwrap();
+    let file = dir.join(&name);
+    std::fs::copy(built.join(&name), &file).unwrap();
     file
 }
 
@@ -289,7 +286,9 @@ fn libraries_are_looked_at_in_a_process_of_their_own() {
     assert_eq!((e.params, e.programs, e.inputs, e.outputs), (4, 3, 2, 2));
     assert_eq!(e.tail, Some(plug::TAIL as u32));
     let crashed = scanner(&[("BV_VST2_TESTPLUG_CRASH", "process")], None).describe(&file);
-    if cfg!(all(windows, target_env = "msvc")) {
+    // The child lives through it where a guard catches it (Windows with
+    // MSVC, macOS).
+    if cfg!(any(all(windows, target_env = "msvc"), target_os = "macos")) {
         let effects = crashed.result.expect("the child lived");
         let error = effects[0].error.as_deref().unwrap_or_default();
         assert!(error.contains("crashed in process"), "{error}");

@@ -61,7 +61,10 @@ def dependencies(path):
 
 
 def resolve(dep, prefix, loader_dir):
-    """Where library `dep` (as a program names it) is on this computer."""
+    """Where library `dep` (as a program names it) is on this computer. A
+    full path is where the library was built, maybe on another machine (the
+    packages' builds give their FFmpeg to this one): the library of that
+    name in `prefix` first, which is this processor's build."""
     lib = os.path.join(prefix, "lib")
     for start in ("@rpath/", "@loader_path/", "@executable_path/"):
         if dep.startswith(start):
@@ -70,6 +73,9 @@ def resolve(dep, prefix, loader_dir):
                 if os.path.exists(p):
                     return p
             return None
+    moved = os.path.join(lib, os.path.basename(dep))
+    if os.path.exists(moved):
+        return moved
     return dep if os.path.exists(dep) else None
 
 

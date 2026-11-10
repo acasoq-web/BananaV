@@ -227,19 +227,44 @@ fn bundle_in(folder: &Path) -> PathBuf {
         .status()
         .expect("cargo runs");
     assert!(status.success());
-    let built = target.join("debug").join(if cfg!(windows) {
-        "bv_vst3_testplug.dll"
-    } else {
-        "libbv_vst3_testplug.so"
-    });
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+    let built = target
+        .join("debug")
+        .join(format!("{DLL_PREFIX}bv_vst3_testplug{DLL_SUFFIX}"));
     let bundle = folder.join("BananaV Tests.vst3");
-    let library = bv_vst3::library_of(&{
-        std::fs::create_dir_all(&bundle).unwrap();
-        bundle.clone()
-    });
+    std::fs::create_dir_all(&bundle).unwrap();
+    mac_info_plist(&bundle);
+    let library = bv_vst3::library_of(&bundle);
     std::fs::create_dir_all(library.parent().unwrap()).unwrap();
     std::fs::copy(&built, &library).unwrap();
     bundle
+}
+
+/// A Mac bundle's Info.plist naming its executable, as vendors ship one
+/// (Core Foundation finds the executable through it); nothing elsewhere.
+fn mac_info_plist(bundle: &Path) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let contents = bundle.join("Contents");
+    std::fs::create_dir_all(&contents).unwrap();
+    let name = bundle.file_stem().unwrap().to_string_lossy();
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.bananav.tests.vst3</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+</dict>
+</plist>
+"#
+    );
+    std::fs::write(contents.join("Info.plist"), plist).unwrap();
 }
 
 #[test]
@@ -485,7 +510,7 @@ fn modules_are_looked_at_in_a_process_of_their_own() {
     // Crashing as they process: told for each effect (the guard caught
     // it in the child), or the child's crash where there is no guard.
     let crashed = scanner(&[("BV_VST3_TESTPLUG_CRASH", "process")]).describe(&bundle);
-    if cfg!(all(windows, target_env = "msvc")) {
+    if cfg!(any(all(windows, target_env = "msvc"), target_os = "macos")) {
         let effects = crashed.result.expect("the child lived");
         let error = effects[0].error.as_deref().unwrap_or_default();
         assert!(error.contains("crashed in process"), "{error}");

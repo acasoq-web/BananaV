@@ -464,14 +464,15 @@ fn vst3_em_portugues() {
         .status()
         .expect("cargo runs");
     assert!(status.success());
-    let built = target.join("debug").join(if cfg!(windows) {
-        "bv_vst3_testplug.dll"
-    } else {
-        "libbv_vst3_testplug.so"
-    });
+    let built = target.join("debug").join(format!(
+        "{}bv_vst3_testplug{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
     let folder = std::env::temp_dir().join(format!("bananav-pt-vst3-{}", std::process::id()));
     let bundle = folder.join("BananaV Tests.vst3");
     std::fs::create_dir_all(&bundle).unwrap();
+    mac_info_plist(&bundle);
     let library = bv_vst3::library_of(&bundle);
     std::fs::create_dir_all(library.parent().unwrap()).unwrap();
     std::fs::copy(&built, &library).unwrap();
@@ -802,4 +803,31 @@ fn edit_details_em_portugues() {
             app,
         );
     snap(&mut h, "command_properties");
+}
+
+/// A Mac bundle's Info.plist naming its executable, as vendors ship one
+/// (Core Foundation finds the executable through it); nothing elsewhere.
+fn mac_info_plist(bundle: &std::path::Path) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let contents = bundle.join("Contents");
+    std::fs::create_dir_all(&contents).unwrap();
+    let name = bundle.file_stem().unwrap().to_string_lossy();
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{name}</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.bananav.tests.vst3</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+</dict>
+</plist>
+"#
+    );
+    std::fs::write(contents.join("Info.plist"), plist).unwrap();
 }

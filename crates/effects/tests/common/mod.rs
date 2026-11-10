@@ -15,11 +15,10 @@ pub fn bundle_in(folder: &Path) -> PathBuf {
         .status()
         .expect("cargo runs");
     assert!(status.success());
-    let lib = target.join("debug").join(if cfg!(windows) {
-        "bananav_ofx.dll"
-    } else {
-        "libbananav_ofx.so"
-    });
+    use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
+    let lib = target
+        .join("debug")
+        .join(format!("{DLL_PREFIX}bananav_ofx{DLL_SUFFIX}"));
     let contents = folder
         .join("BananaV.ofx.bundle")
         .join("Contents")

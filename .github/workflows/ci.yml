@@ -208,6 +208,26 @@ jobs:
           else
             cargo test "$@" --quiet --no-fail-fast
           fi
+      - name: Crash reports
+        # What macOS wrote of a test process that died (its threads'
+        # stacks): the crashed thread's frames here, the reports kept.
+        if: failure()
+        run: |
+          mkdir -p target/crash-reports
+          find ~/Library/Logs/DiagnosticReports -name '*.ips' -newer Cargo.toml \
+            -exec cp {} target/crash-reports/ \; 2>/dev/null || true
+          for f in target/crash-reports/*.ips; do
+            [ -f "$f" ] || continue
+            echo "== $f"
+            python3 packaging/macos/crash_report.py "$f" || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: macos-${{ matrix.arch }}-crash-reports
+          path: target/crash-reports
+          retention-days: 7
+          if-no-files-found: ignore
       - name: The interface's pictures
         # What the screenshot tests draw (target/telas), drawn by Metal.
         if: inputs.crate == '' || inputs.crate == 'bv-ui-egui'

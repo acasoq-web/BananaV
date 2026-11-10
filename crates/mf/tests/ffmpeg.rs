@@ -1,5 +1,6 @@
-//! FFmpeg on Linux, with no tool around: a movie written with the system's
-//! encoders (H.264 and AAC) and BananaV's MP4 writer reads back through
+//! FFmpeg on Linux and macOS, with no tool around: a movie written with
+//! the system's encoders (H.264 and AAC) and BananaV's MP4 writer reads
+//! back through
 //! bv-mf — the probe tells its streams, each frame decodes where it was
 //! (played on and sought), the sound lands on its sample and the video's
 //! packets come one per frame. A picture in an icon reads as a still.
@@ -66,12 +67,21 @@ fn audio() -> Vec<f32> {
     v
 }
 
-/// The movie (H.264 of the processor, AAC), made once.
+/// The system's H.264 encoder: the processor's (x264); on a Mac its media
+/// engine's (BananaV's FFmpeg for macOS has no H.264 encoder of the
+/// processor's).
+const H264: Vendor = if cfg!(target_os = "macos") {
+    Vendor::Apple
+} else {
+    Vendor::Software
+};
+
+/// The movie (the system's H.264, AAC), made once.
 fn movie() -> PathBuf {
     let path = out("movie.mp4");
     let mut venc = VideoEncoder::new(VideoEncoderSettings {
         codec: Codec::H264,
-        vendor: Vendor::Software,
+        vendor: H264,
         width: W,
         height: H,
         frame_rate: FrameRate::new(30, 1),
@@ -151,7 +161,7 @@ fn a_movie_reads_back_as_it_was_written() {
     assert!(
         bv_mf::encoders()
             .iter()
-            .any(|e| e.codec == Codec::H264 && e.vendor == Vendor::Software),
+            .any(|e| e.codec == Codec::H264 && e.vendor == H264),
         "{names:?}"
     );
     let path = movie();

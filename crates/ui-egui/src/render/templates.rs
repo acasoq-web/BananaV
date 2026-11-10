@@ -802,9 +802,20 @@ mod tests {
     fn names_follow_vegas() {
         let all = builtin();
         let find = |id: &str| all.iter().find(|t| t.id == id).unwrap().name();
+        // This computer's first AVC encoder: the processor's, else (a Mac)
+        // its media engine, named as the graphics cards' are.
+        let first = FileFormat::AvcMp4
+            .video_encoders()
+            .first()
+            .copied()
+            .unwrap_or(Encoder::Software);
+        let tag = match first {
+            Encoder::Software => String::new(),
+            e => format!(" ({})", e.short_name()),
+        };
         assert_eq!(
-            find("avc:1920x1080:60000-1001:cpu"),
-            "Internet HD 1080p 59.94 fps"
+            find(&format!("avc:1920x1080:60000-1001:{}", encoder_id(first))),
+            format!("Internet HD 1080p 59.94 fps{tag}")
         );
         assert_eq!(
             find("prores:Hq:1920x1080:30000-1001"),

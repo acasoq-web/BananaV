@@ -2370,7 +2370,7 @@ mod tests {
         }
         assert_eq!(
             Binding::parse("Alt+Left").map(|b| b.label()).as_deref(),
-            Some("Alt+Left")
+            Some(crate::i18n::system_keys("Alt+Left"))
         );
     }
 
@@ -2422,7 +2422,10 @@ mod tests {
         );
         assert_eq!(km.lookup(&new, Context::TrackView), Some(split));
         assert_eq!(km.map_names(), vec!["Test".to_string()]);
-        assert_eq!(km.text_for(Action::Cmd(Cmd::Split)), "Ctrl+Alt+Shift+K");
+        assert_eq!(
+            km.text_for(Action::Cmd(Cmd::Split)),
+            crate::i18n::system_keys("Ctrl+Alt+Shift+K")
+        );
         assert_eq!(km.map_bindings("Test").expect("saved")[split], vec![new]);
         km.delete_map("Test").expect("delete");
         assert_eq!(km.active, None);
@@ -2598,22 +2601,29 @@ mod tests {
         assert_eq!(global[325].id, "View.WindowLayouts.Save.UserLayout9");
         // Menu commands VEGAS lists nowhere come after its list.
         assert!(global[326..].iter().any(|c| c.id == "Edit.CloseGaps"));
+        // The labels, in this system's names of the keys.
         let keys = |id: &str| {
             let c = global.iter().find(|c| c.id == id).expect(id);
             c.defaults.iter().map(Binding::label).collect::<Vec<_>>()
         };
-        assert_eq!(keys("File.Close"), ["Ctrl+F4"]);
-        assert_eq!(keys("Transport.PlayToggle"), ["Ctrl+Space", "F12"]);
+        let named = |labels: &[&str]| {
+            labels
+                .iter()
+                .map(|l| crate::i18n::system_keys(l).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys("File.Close"), named(&["Ctrl+F4"]));
+        assert_eq!(keys("Transport.PlayToggle"), named(&["Ctrl+Space", "F12"]));
         assert_eq!(
             keys("View.WindowLayouts.Load.TimelineTopLayout"),
-            ["Alt+D, T"]
+            named(&["Alt+D, T"])
         );
         assert_eq!(
             keys("View.WindowLayouts.Save.UserLayout3"),
-            ["Ctrl+Alt+D, 3"]
+            named(&["Ctrl+Alt+D, 3"])
         );
         // BananaV's fixed menu keys are listed (and can be changed) too.
-        assert_eq!(keys("Edit.Undo"), ["Ctrl+Z"]);
+        assert_eq!(keys("Edit.Undo"), named(&["Ctrl+Z"]));
     }
 
     #[test]
@@ -2621,7 +2631,7 @@ mod tests {
         let b = Binding::parse("Ctrl+Alt+D, 3").expect("chord");
         assert!(b.ctrl && b.alt && b.then.is_some());
         assert_eq!(Binding::parse(&b.storage()), Some(b));
-        assert_eq!(b.label(), "Ctrl+Alt+D, 3");
+        assert_eq!(b.label(), crate::i18n::system_keys("Ctrl+Alt+D, 3"));
         let km = Keymap::in_memory();
         assert!(km.is_prefix(&b.first(), Context::TrackView));
         assert!(
