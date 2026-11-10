@@ -166,6 +166,11 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
+    # GitHub's Intel Macs are virtual machines with a virtual graphics card
+    # and no media engine (the processor-versus-card comparisons stray
+    # there, screen recording falls to Apple's software encoder): their
+    # run is told, not required.
+    continue-on-error: ${{ matrix.arch == 'x86_64' }}
     # FFmpeg built when its cache is new, then everything: longer.
     timeout-minutes: 100
     env:

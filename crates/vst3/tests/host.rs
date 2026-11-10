@@ -234,7 +234,13 @@ fn bundle_in(folder: &Path) -> PathBuf {
     let bundle = folder.join("BananaV Tests.vst3");
     std::fs::create_dir_all(&bundle).unwrap();
     mac_info_plist(&bundle);
-    let library = bv_vst3::library_of(&bundle);
+    // On a Mac, Core Foundation is not asked before the executable is in:
+    // it keeps a bundle as it first saw it for as long as the process runs.
+    let library = if cfg!(target_os = "macos") {
+        bundle.join("Contents").join("MacOS").join("BananaV Tests")
+    } else {
+        bv_vst3::library_of(&bundle)
+    };
     std::fs::create_dir_all(library.parent().unwrap()).unwrap();
     std::fs::copy(&built, &library).unwrap();
     bundle

@@ -37,7 +37,10 @@ for Apple's chips and Intel).
 
 - Experimental: the app is built and its start checked on GitHub's Macs,
   but we have not tried it on Macs of our own yet. Things may be missing or
-  wrong; tell us on Discord or in GitHub's issues.
+  wrong; tell us on Discord or in GitHub's issues. Intel Macs have been
+  checked less than Apple's chips (GitHub's are virtual machines): some
+  effects drawn on the graphics card may look slightly different there,
+  and screen recording may not work yet.
 - BananaV runs on macOS 11 and later, one app for Apple's chips (M1 and
   later) and Intel Macs: a disk image to drag into Applications.
 - Video is decoded and encoded on the Mac's media engine (H.264 and HEVC,
