@@ -11,10 +11,16 @@
 //!   values is in its integer slot as well (x64 copies it there, ARM64 puts
 //!   every argument of a variadic call in integer registers, named doubles
 //!   included): slots are read as integers, doubles from their bits.
-//! - Linux on x86-64 (System V) and AArch64: integers and pointers take
-//!   the next integer register, doubles the next floating-point one,
-//!   whatever their order: integer slots and floating-point slots are read
-//!   apart.
+//! - Apple's chips (macOS on ARM64): the named arguments take their
+//!   registers as usual, and every variadic value goes on the stack, each
+//!   in a 64-bit slot of its own (an `int` in the slot's low half, a
+//!   `double` as its bits). The function takes integer arguments until the
+//!   eight integer registers are full; the ones after them are the stack's
+//!   slots, read as on Windows.
+//! - Linux on x86-64 and AArch64, and Intel Macs (System V): integers and
+//!   pointers take the next integer register, doubles the next
+//!   floating-point one, whatever their order: integer slots and
+//!   floating-point slots are read apart.
 //!
 //! Slots a call did not fill hold whatever was there (a register, the
 //! caller's stack) and are never read: a parameter's type says how many
@@ -23,7 +29,8 @@
 //! the convention on every platform the CI builds.
 #![allow(unsafe_code)]
 
-/// How many integer (or, on Windows, any) slots a function reads.
+/// How many integer (or, on Windows and Apple's chips, any) slots a
+/// function reads.
 pub(crate) const SLOTS: usize = 8;
 
 /// A variadic call's values, read in order.
@@ -31,19 +38,19 @@ pub(crate) const SLOTS: usize = 8;
 pub(crate) struct Va {
     ints: [u64; SLOTS],
     next_int: usize,
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_vendor = "apple", target_arch = "aarch64"))))]
     floats: [f64; SLOTS],
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_vendor = "apple", target_arch = "aarch64"))))]
     next_float: usize,
 }
 
 impl Va {
-    #[cfg(windows)]
+    #[cfg(any(windows, all(target_vendor = "apple", target_arch = "aarch64")))]
     pub(crate) fn new(ints: [u64; SLOTS]) -> Va {
         Va { ints, next_int: 0 }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_vendor = "apple", target_arch = "aarch64"))))]
     pub(crate) fn new(ints: [u64; SLOTS], floats: [f64; SLOTS]) -> Va {
         Va {
             ints,
@@ -72,11 +79,11 @@ impl Va {
 
     /// The next value, a `double`.
     pub(crate) fn double(&mut self) -> f64 {
-        #[cfg(windows)]
+        #[cfg(any(windows, all(target_vendor = "apple", target_arch = "aarch64")))]
         {
             f64::from_bits(self.word())
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, all(target_vendor = "apple", target_arch = "aarch64"))))]
         {
             let v = self.floats.get(self.next_float).copied().unwrap_or(0.0);
             self.next_float += 1;
@@ -122,7 +129,28 @@ macro_rules! variadic {
             }
         }
 
-        #[cfg(not(windows))]
+        #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+        $(#[$meta])*
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) unsafe extern "C" fn $name(
+            $($p: *mut ::std::ffi::c_void,)+
+            $($($d: f64,)+)?
+            r0: u64, r1: u64, r2: u64, r3: u64, r4: u64, r5: u64, r6: u64, r7: u64,
+            s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64,
+        ) -> ::bv_ofx_sys::OfxStatus {
+            // The named pointers and the first `r…` fill the eight integer
+            // registers; the arguments after them are the stack's first
+            // slots, where the call's values are.
+            let named = [$(stringify!($p)),+].len();
+            let all = [r0, r1, r2, r3, r4, r5, r6, r7, s0, s1, s2, s3, s4, s5, s6, s7];
+            let mut slots = [0; $crate::varargs::SLOTS];
+            slots.copy_from_slice(&all[8 - named..][..$crate::varargs::SLOTS]);
+            let va = $crate::varargs::Va::new(slots);
+            // SAFETY: the plug-in's arguments, as `$imp` expects them.
+            unsafe { $imp($($p,)+ $($($d,)+)? va) }
+        }
+
+        #[cfg(not(any(windows, all(target_vendor = "apple", target_arch = "aarch64"))))]
         $(#[$meta])*
         #[allow(clippy::too_many_arguments)]
         pub(crate) unsafe extern "C" fn $name(

@@ -57,11 +57,14 @@ tar -xzf "$work/lame.tar.gz" -C "$work"
 mkdir -p "$prefix/share/licenses/lame"
 cp "$work/lame-$lame_version/COPYING" "$prefix/share/licenses/lame/"
 
-# SVT-AV1: AV1 encoding on the processor.
+# SVT-AV1: AV1 encoding on the processor. The processor-detection library
+# it brings asks for a CMake older than 3.5, which CMake 4 refuses unless
+# told the oldest policies it may assume.
 git clone -q --depth 1 --branch "$svtav1_version" https://gitlab.com/AOMediaCodec/SVT-AV1.git "$work/svt"
 cmake -S "$work/svt" -B "$work/svt/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_NAME_DIR="$prefix/lib" \
     -DBUILD_SHARED_LIBS=ON -DBUILD_APPS=OFF -DBUILD_TESTING=OFF \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
 ninja -C "$work/svt/build" install
 mkdir -p "$prefix/share/licenses/svt-av1"

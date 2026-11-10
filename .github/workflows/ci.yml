@@ -62,6 +62,8 @@ jobs:
   linux-x64:
     name: Linux x64
     runs-on: ubuntu-24.04
+    # A test that hangs ends the run here, not after GitHub's six hours.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: System libraries
@@ -113,6 +115,7 @@ jobs:
     name: Linux ARM64
     if: github.event_name == 'workflow_dispatch' && inputs.full
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: System libraries
@@ -135,6 +138,7 @@ jobs:
     name: Windows ARM64
     if: github.event_name == 'workflow_dispatch' && inputs.full
     runs-on: windows-11-arm
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -162,6 +166,8 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
+    # FFmpeg built when its cache is new, then everything: longer.
+    timeout-minutes: 100
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
