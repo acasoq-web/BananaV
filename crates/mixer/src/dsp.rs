@@ -410,6 +410,38 @@ impl Processor {
         }
     }
 
+    /// Where its next block lies on the timeline (samples) and the
+    /// project's tempo: a VST 3 plug-in reads them.
+    pub fn locate(&mut self, position: i64, tempo: &Tempo) {
+        #[cfg(not(target_family = "wasm"))]
+        if let State::Vst(run) = &mut self.state {
+            run.locate(position, tempo);
+        }
+        #[cfg(target_family = "wasm")]
+        let _ = (position, tempo);
+    }
+
+    /// A VST 3 plug-in's parameter `id` along the next block (sample,
+    /// normalized value): FX automation, sample by sample.
+    pub fn ramp(&mut self, id: u32, points: &[(usize, f64)]) {
+        #[cfg(not(target_family = "wasm"))]
+        if let State::Vst(run) = &mut self.state {
+            run.ramp(id, points);
+        }
+        #[cfg(target_family = "wasm")]
+        let _ = (id, points);
+    }
+
+    /// After a seek: a VST 3 plug-in's sound cleared, the plug-in kept.
+    /// Whether it was one that could (the others are made anew).
+    fn restart(&mut self) -> bool {
+        match &mut self.state {
+            #[cfg(not(target_family = "wasm"))]
+            State::Vst(run) => run.restart(),
+            _ => false,
+        }
+    }
+
     /// How many samples late its output comes: a VST 3 plug-in's latency,
     /// or that of one of BananaV's own effects working in blocks (FFTs).
     pub fn latency(&self) -> usize {
@@ -665,7 +697,14 @@ pub struct Chain {
     channels: usize,
     /// The project's tempo, for the effects that keep time with it.
     tempo: Tempo,
+    /// A seek happened: the next sync keeps the plug-ins (their sound
+    /// cleared) and makes the other effects anew.
+    cleared: bool,
 }
+
+/// FX automation's points along a block: one every this many samples (a
+/// VST 3 plug-in follows the envelope between them).
+const RAMP_STEP: usize = 32;
 
 impl Chain {
     /// How many samples late the chain's output comes: its effects'
@@ -703,27 +742,40 @@ impl Chain {
         } else {
             Vec::new()
         };
+        let cleared = std::mem::take(&mut self.cleared);
+        let tempo = self.tempo;
+        let made = |e: &Effect| {
+            let mut p = Processor::new(e, rate, channels);
+            p.keep_time(&tempo);
+            p
+        };
         self.procs = wanted
             .iter()
             .enumerate()
             .map(|(i, e)| {
                 let p = match old.get_mut(i).and_then(Option::take) {
-                    Some(mut p) if p.matches(e) => {
+                    // After a seek a plug-in is kept, its sound cleared (it
+                    // takes long to start); the others are made anew.
+                    Some(mut p) if cleared && p.same_effect(e) => {
+                        if p.restart() {
+                            p.follow(e);
+                            p
+                        } else {
+                            made(e)
+                        }
+                    }
+                    Some(mut p) if !cleared && p.matches(e) => {
                         p.follow(e);
                         p
                     }
                     // Other values (FX automation, a slider dragged): the
                     // same processor follows them.
-                    Some(mut p) if p.same_effect(e) => {
+                    Some(mut p) if !cleared && p.same_effect(e) => {
                         p.retune(e, rate, channels);
                         p.follow(e);
                         p
                     }
-                    _ => {
-                        let mut p = Processor::new(e, rate, channels);
-                        p.keep_time(&self.tempo);
-                        p
-                    }
+                    _ => made(e),
                 };
                 (p, e.enabled)
             })
@@ -746,10 +798,76 @@ impl Chain {
         }
     }
 
-    /// Zera o estado (depois de uma busca).
+    /// Clears what the effects hold (after a seek): the next sync makes
+    /// them anew, but for the VST 3 plug-ins, kept with their sound
+    /// cleared.
     pub fn reset(&mut self) {
-        self.procs.clear();
-        self.rate = 0;
+        self.cleared = true;
+    }
+
+    /// Where the next block lies on the timeline (samples): the VST 3
+    /// plug-ins read it, with the project's tempo and meter.
+    pub fn locate(&mut self, position: i64) {
+        let tempo = self.tempo;
+        for (p, _) in &mut self.procs {
+            p.locate(position, &tempo);
+        }
+    }
+
+    /// FX automation along the next block of `frames` samples from sample
+    /// `start` at `rate`: each VST 3 plug-in of `effects` (as last synced)
+    /// gets its automated parameters' values every [`RAMP_STEP`] samples
+    /// from `envelopes`, ramps it follows sample by sample.
+    pub fn automate(
+        &mut self,
+        effects: &[&Effect],
+        envelopes: &[bv_timeline::Envelope],
+        start: i64,
+        frames: usize,
+        rate: u32,
+    ) {
+        use bv_timeline::EnvelopeKind;
+        if frames == 0 || !envelopes.iter().any(|e| e.kind.is_fx()) {
+            return;
+        }
+        let rate = bv_core::SampleRate(rate);
+        for (k, (p, _)) in self.procs.iter_mut().enumerate() {
+            let Some(e) = self.slots.get(k).and_then(|&i| effects.get(i)) else {
+                continue;
+            };
+            if e.vst.is_none() || e.id == 0 || e.automation_bypassed {
+                continue;
+            }
+            for env in envelopes {
+                let EnvelopeKind::FxParam { fx, param } = env.kind else {
+                    continue;
+                };
+                if fx != e.id {
+                    continue;
+                }
+                let at =
+                    |off: usize| f64::from(env.value_at(rate.sample_start(start + off as i64)));
+                let mut all: Vec<(usize, f64)> = (0..frames)
+                    .step_by(RAMP_STEP)
+                    .chain(std::iter::once(frames - 1))
+                    .map(|off| (off, at(off)))
+                    .collect();
+                all.dedup_by_key(|p| p.0);
+                // A flat stretch needs its ends alone.
+                let same = |a: f64, b: f64| (a - b).abs() < 1e-9;
+                let points: Vec<(usize, f64)> = all
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, &(_, v))| {
+                        let before = j.checked_sub(1).map(|k| all[k].1);
+                        let after = all.get(j + 1).map(|q| q.1);
+                        !(before.is_some_and(|b| same(b, v)) && after.is_some_and(|a| same(a, v)))
+                    })
+                    .map(|(_, &p)| p)
+                    .collect();
+                p.ramp(param, &points);
+            }
+        }
     }
 
     pub fn process(&mut self, channels: &mut [Vec<f32>]) {
@@ -839,6 +957,164 @@ mod tests {
         // A missing plug-in.
         e.vst.as_mut().unwrap().path = "C:/nowhere/Missing.vst3".into();
         assert!((level(&mut chain, &e) - 1.0).abs() < 1e-6);
+    }
+
+    /// A test plug-in's effect in a chain: its id 1 (FX automation finds
+    /// it by that).
+    fn test_vst(class: bv_vst3_sys::Tuid, name: &str) -> Effect {
+        use bv_vst3_testplug as plug;
+        bv_vst3::linked("testplug", plug::GetPluginFactory).unwrap();
+        let mut e = Effect::vst(bv_timeline::VstFx {
+            path: "<linked>/testplug".into(),
+            class_id: bv_vst3_sys::uid_to_hex(&class),
+            name: name.into(),
+            ..Default::default()
+        });
+        e.id = 1;
+        e
+    }
+
+    /// The test plug-in's state in a chain's first processor.
+    fn vst_state(chain: &Chain) -> Vec<u8> {
+        match &chain.procs[0].0.state {
+            State::Vst(run) => run.plugin_state().expect("a state"),
+            _ => panic!("no plug-in"),
+        }
+    }
+
+    /// FX automation reaches a VST 3 plug-in sample by sample: a point
+    /// every 32 samples of the envelope, within each block.
+    #[test]
+    fn vst_automation_follows_the_envelope_within_a_block() {
+        use bv_timeline::{Envelope, EnvelopeKind, EnvelopePoint, KeyCurve};
+        use bv_vst3_testplug as plug;
+        let e = test_vst(plug::GAIN, "BananaV Test Gain");
+        // The gain from 0 to 1 over a second.
+        let mut env = Envelope::new(EnvelopeKind::FxParam {
+            fx: 1,
+            param: plug::GAIN_ID,
+        });
+        env.points[0].value = 0.0;
+        env.points.push(EnvelopePoint {
+            at: bv_core::Tick::from_seconds(1),
+            value: 1.0,
+            curve: KeyCurve::Linear,
+        });
+        let mut chain = Chain::default();
+        chain.sync(&[&e], 48_000, 1, false);
+        chain.locate(0);
+        chain.automate(&[&e], std::slice::from_ref(&env), 0, 4800, 48_000);
+        let mut ch = vec![vec![0.5f32; 4800]];
+        chain.process(&mut ch);
+        // Sample s plays the envelope at its point (2 × the value × 0.5).
+        for s in [0usize, 31, 32, 100, 1000, 4767] {
+            let at = (s / 32 * 32) as f32 / 48_000.0;
+            assert!((ch[0][s] - at).abs() < 1e-4, "sample {s}: {}", ch[0][s]);
+        }
+        // The next block starts where the envelope is then.
+        chain.locate(4800);
+        chain.automate(&[&e], std::slice::from_ref(&env), 4800, 4800, 48_000);
+        let mut ch = vec![vec![0.5f32; 4800]];
+        chain.process(&mut ch);
+        assert!((ch[0][0] - 0.1).abs() < 1e-4, "{}", ch[0][0]);
+    }
+
+    /// The timeline's place and tempo reach a VST 3 plug-in; after a seek
+    /// the plug-in is kept (it takes long to start), its sound cleared.
+    #[test]
+    fn vst_plug_ins_see_the_timeline_and_stay_after_a_seek() {
+        use bv_vst3_testplug as plug;
+        let e = test_vst(plug::PROGRAMS, "BananaV Test Programs");
+        let mut chain = Chain::default();
+        chain.set_tempo(Tempo {
+            beats_per_minute: 140.0,
+            beats_per_measure: 3,
+            beat_note: 4,
+        });
+        chain.sync(&[&e], 48_000, 2, false);
+        chain.locate(96_000);
+        let mut ch = vec![vec![0.1f32; 480]; 2];
+        chain.process(&mut ch);
+        let state = vst_state(&chain);
+        let f = |at: usize| f64::from_le_bytes(state[at..at + 8].try_into().unwrap());
+        assert_eq!(f(24), 140.0);
+        // Two seconds at 140 beats a minute: 4⅔ quarter notes.
+        assert!((f(32) - 140.0 / 30.0).abs() < 1e-9);
+        // A seek: the same plug-in (what it saw still there), restarted.
+        chain.reset();
+        chain.sync(&[&e], 48_000, 2, false);
+        let state = vst_state(&chain);
+        assert_eq!(
+            f64::from_le_bytes(state[24..32].try_into().unwrap()),
+            140.0,
+            "made anew"
+        );
+    }
+
+    /// A VST 3 plug-in sleeps once its input and output have been silent
+    /// for longer than its tail (a second at least): it is not called
+    /// until sound comes again.
+    #[test]
+    fn vst_plug_ins_sleep_through_silence() {
+        use bv_vst3_testplug as plug;
+        let e = test_vst(plug::PROGRAMS, "BananaV Test Programs");
+        let mut chain = Chain::default();
+        chain.sync(&[&e], 48_000, 2, false);
+        let place = |chain: &Chain| {
+            let s = vst_state(chain);
+            i64::from_le_bytes(s[40..48].try_into().unwrap())
+        };
+        for k in 0..20 {
+            chain.locate(k * 4800);
+            let mut ch = vec![vec![0.0f32; 4800]; 2];
+            chain.process(&mut ch);
+        }
+        // Asleep after a second of silence in and out: its last block
+        // started at 43 200 (its second piece, of the plug-in's 4096, at
+        // 47 296).
+        assert_eq!(place(&chain), 43_200 + 4096);
+        // Sound wakes it.
+        chain.locate(20 * 4800);
+        let mut ch = vec![vec![0.25f32; 4800]; 2];
+        chain.process(&mut ch);
+        assert_eq!(place(&chain), 96_000 + 4096);
+        assert!((ch[0][100] - 0.25).abs() < 1e-6, "{}", ch[0][100]);
+    }
+
+    /// A VST 2 plug-in (BananaV's own compatibility) runs in the chain as a
+    /// VST 3 one does: its values followed, its state when made.
+    #[test]
+    fn a_vst2_effect_runs_in_the_chain() {
+        use bv_vst2_testplug as plug;
+        bv_vst2::linked("testplug2", plug::VSTPluginMain).unwrap();
+        let fx = bv_timeline::VstFx {
+            format: bv_timeline::VstFormat::Vst2,
+            path: "<linked>/testplug2".into(),
+            class_id: bv_vst2::class_id(plug::UNIQUE_ID, 0),
+            name: "BananaV Test Gain 2".into(),
+            params: [(plug::GAIN, 0.25)].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut e = Effect::vst(fx);
+        let x = sine(1000.0, 48_000.0, 4800, 0.5);
+        let mut chain = Chain::default();
+        let level = |chain: &mut Chain, e: &Effect| {
+            chain.sync(&[e], 48_000, 2, false);
+            let mut ch = vec![x.clone(), x.clone()];
+            chain.process(&mut ch);
+            rms(&ch[0]) / rms(&x)
+        };
+        assert!((level(&mut chain, &e) - 0.5).abs() < 1e-4);
+        e.vst.as_mut().unwrap().params.insert(plug::GAIN, 1.0);
+        assert!((level(&mut chain, &e) - 2.0).abs() < 1e-4);
+        // Its state taken from another instance: Half, as a program.
+        let mut other =
+            bv_vst2::Instance::new(std::path::Path::new("<linked>/testplug2"), 0).unwrap();
+        other.set_program(1);
+        let v = e.vst.as_mut().unwrap();
+        v.state = other.state().unwrap();
+        v.params.clear();
+        assert!((level(&mut chain, &e) - 0.5).abs() < 1e-4);
     }
 
     #[test]

@@ -203,11 +203,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
                 ui.add_space(4.0);
                 ui.label(RichText::new(trf!("Transition: {}", fx.name)).strong());
                 let key = crate::ofx::EditorKey {
-                    owner: crate::ofx::EditorOwner::Transition(id),
+                    owner: crate::ofx::EditorOwner::Transition(id, false),
                     index: 0,
                     id: fx.id.clone(),
                 };
-                if let Some(place) = crate::ofx::transition_place(&project, id, app.cursor)
+                if let Some(place) = crate::ofx::transition_place(&project, id, false, app.cursor)
                     && let Some(new) = crate::ofx::params(ui, &mut app.ofx, key, &fx, &place, 1)
                 {
                     c.transition_fx = Some(Box::new(new));

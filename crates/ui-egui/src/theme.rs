@@ -4,7 +4,8 @@
 //! functions (`theme::panel()`), so a change of interface type shows at
 //! once.
 
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI8, AtomicU8, AtomicU32, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,18 @@ pub struct Palette {
     /// The accent of open tabs and focused lists.
     pub snap: Color32,
     pub loop_bar: Color32,
+    /// The loop region's bar: a grey of its own, a step from the panels
+    /// around it (a drag there makes the loop region), lighter under the
+    /// pointer.
+    pub loop_band: Color32,
+    pub loop_band_hover: Color32,
+    /// The loop region in its bar, its handles and the lines down the
+    /// timeline at its ends (VEGAS's yellow), the tracks' lighter (or
+    /// darker) tint within it and the room under the tracks within it.
+    pub loop_strip: Color32,
+    pub loop_handle: Color32,
+    pub loop_tint: Color32,
+    pub loop_below: Color32,
     pub marker: Color32,
     pub region: Color32,
     pub error: Color32,
@@ -123,6 +136,12 @@ const DARK: Palette = Palette {
     cursor: rgb(0xFFFFFF),
     snap: rgb(0x5CC8FF),
     loop_bar: rgb(0x6C8ED8),
+    loop_band: rgb(0x313131),
+    loop_band_hover: rgb(0x3B3B3B),
+    loop_strip: rgb(0x4B4B4B),
+    loop_handle: rgb(0xF0C83C),
+    loop_tint: Color32::from_rgba_premultiplied(20, 20, 20, 20),
+    loop_below: rgb(0x2B4D70),
     marker: rgb(0xF09A3E),
     region: rgb(0x5DC07A),
     error: rgb(0xFF7A6E),
@@ -158,6 +177,12 @@ const MEDIUM: Palette = Palette {
     cursor: rgb(0xFFFFFF),
     snap: rgb(0x6ED0FF),
     loop_bar: rgb(0x7E9EE6),
+    loop_band: rgb(0x555555),
+    loop_band_hover: rgb(0x5F5F5F),
+    loop_strip: rgb(0x707070),
+    loop_handle: rgb(0xF0C83C),
+    loop_tint: Color32::from_rgba_premultiplied(20, 20, 20, 20),
+    loop_below: rgb(0x365C82),
     marker: rgb(0xF5A54E),
     region: rgb(0x6FD08C),
     error: rgb(0xFF8B80),
@@ -193,6 +218,12 @@ const LIGHT: Palette = Palette {
     cursor: rgb(0x000000),
     snap: rgb(0x175F92),
     loop_bar: rgb(0x3A5CB0),
+    loop_band: rgb(0x979797),
+    loop_band_hover: rgb(0xA8A8A8),
+    loop_strip: rgb(0xBEBEBE),
+    loop_handle: rgb(0xB88A08),
+    loop_tint: Color32::from_rgba_premultiplied(0, 0, 0, 22),
+    loop_below: rgb(0x7FA2C8),
     marker: rgb(0xB8620E),
     region: rgb(0x23804A),
     error: rgb(0x9E1C14),
@@ -228,6 +259,12 @@ const WHITE: Palette = Palette {
     cursor: rgb(0x000000),
     snap: rgb(0x175F92),
     loop_bar: rgb(0x3A5CB0),
+    loop_band: rgb(0xC5C5C5),
+    loop_band_hover: rgb(0xD6D6D6),
+    loop_strip: rgb(0xEBEBEB),
+    loop_handle: rgb(0xB88A08),
+    loop_tint: Color32::from_rgba_premultiplied(0, 0, 0, 16),
+    loop_below: rgb(0xA9C5E2),
     marker: rgb(0xB8620E),
     region: rgb(0x23804A),
     error: rgb(0x9E1C14),
@@ -299,7 +336,76 @@ pub fn desaturate(color: Color32, percent: u8) -> Color32 {
 }
 
 fn palette() -> &'static Palette {
-    interface().palette()
+    shown(interface(), brightness())
+}
+
+/// Options › Preferences › Display: "Interface brightness" (BananaV's own):
+/// the interface type's greys lighter (up to 40 %) or darker.
+static BRIGHTNESS: AtomicI8 = AtomicI8::new(0);
+/// The palettes made for a type and a brightness (−40 to 40), each once
+/// and kept for the program's life.
+static MADE: [[OnceLock<&'static Palette>; 81]; 4] = [const { [const { OnceLock::new() }; 81] }; 4];
+
+/// The brightness from now on, −40 to 40 (%).
+pub fn set_brightness(percent: i8) {
+    BRIGHTNESS.store(percent.clamp(-40, 40), Ordering::Relaxed);
+}
+
+pub fn brightness() -> i8 {
+    BRIGHTNESS.load(Ordering::Relaxed)
+}
+
+/// `kind`'s palette at `brightness` (%): its greys — backgrounds, panels,
+/// tracks, widgets, lines — toward white or black; text and accents as
+/// they are.
+pub fn shown(kind: Interface, brightness: i8) -> &'static Palette {
+    if brightness == 0 {
+        return kind.palette();
+    }
+    let i = Interface::ALL.iter().position(|&k| k == kind).unwrap_or(0);
+    let b = brightness.clamp(-40, 40);
+    MADE[i % 4][(i32::from(b) + 40) as usize]
+        .get_or_init(|| Box::leak(Box::new(brightened(kind.palette(), b))))
+}
+
+/// `p` with its greys moved by `percent`: toward white (three quarters of
+/// the way at most) or black.
+fn brightened(p: &Palette, percent: i8) -> Palette {
+    let k = f32::from(percent.clamp(-40, 40)) / 100.0;
+    let shade = |c: Color32| {
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let f = |v: u8| {
+            let v = f32::from(v);
+            let out = if k >= 0.0 {
+                v + (255.0 - v) * k * 0.75
+            } else {
+                v * (1.0 + k)
+            };
+            out.round().clamp(0.0, 255.0) as u8
+        };
+        Color32::from_rgba_unmultiplied(f(r), f(g), f(b), a)
+    };
+    Palette {
+        bg: shade(p.bg),
+        panel: shade(p.panel),
+        panel_dark: shade(p.panel_dark),
+        hover: shade(p.hover),
+        separator: shade(p.separator),
+        track_video: shade(p.track_video),
+        track_audio: shade(p.track_audio),
+        header_selected: shade(p.header_selected),
+        header_selected_focused: shade(p.header_selected_focused),
+        check_border: shade(p.check_border),
+        faint_line: shade(p.faint_line),
+        grid: shade(p.grid),
+        widget: shade(p.widget),
+        widget_hover: shade(p.widget_hover),
+        widget_open: shade(p.widget_open),
+        loop_band: shade(p.loop_band),
+        loop_band_hover: shade(p.loop_band_hover),
+        loop_strip: shade(p.loop_strip),
+        ..*p
+    }
 }
 
 pub fn banana() -> Color32 {
@@ -352,6 +458,24 @@ pub fn snap() -> Color32 {
 }
 pub fn loop_bar() -> Color32 {
     palette().loop_bar
+}
+pub fn loop_band() -> Color32 {
+    palette().loop_band
+}
+pub fn loop_band_hover() -> Color32 {
+    palette().loop_band_hover
+}
+pub fn loop_strip() -> Color32 {
+    palette().loop_strip
+}
+pub fn loop_handle() -> Color32 {
+    palette().loop_handle
+}
+pub fn loop_tint() -> Color32 {
+    palette().loop_tint
+}
+pub fn loop_below() -> Color32 {
+    palette().loop_below
 }
 pub fn marker() -> Color32 {
     palette().marker
@@ -420,7 +544,7 @@ pub fn apply(ctx: &egui::Context) {
 
 /// Sets egui's style from the interface type `kind`.
 pub fn apply_kind(ctx: &egui::Context, kind: Interface) {
-    let p = kind.palette();
+    let p = shown(kind, brightness());
     // One style slot, holding the visuals of the interface type.
     ctx.set_theme(egui::Theme::Dark);
     ctx.global_style_mut(|style| {
@@ -529,5 +653,26 @@ mod tests {
             assert_eq!(serde_json::from_str::<Interface>(&json).unwrap(), kind);
         }
         assert_eq!(serde_json::to_string(&Interface::Dark).unwrap(), "\"Dark\"");
+    }
+
+    #[test]
+    fn brightness_moves_the_greys_and_keeps_text_and_accents() {
+        let base = shown(Interface::Dark, 0);
+        assert!(std::ptr::eq(base, Interface::Dark.palette()));
+        let lighter = shown(Interface::Dark, 40);
+        let darker = shown(Interface::Dark, -40);
+        let luma = |c: Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        assert!(luma(lighter.panel) > luma(base.panel));
+        assert!(luma(darker.panel) < luma(base.panel));
+        assert!(luma(lighter.track_video) > luma(base.track_video));
+        assert_eq!(lighter.text, base.text);
+        assert_eq!(darker.banana, base.banana);
+        assert_eq!(darker.loop_handle, base.loop_handle);
+        // The same palette each time (made once), within the range.
+        assert!(std::ptr::eq(lighter, shown(Interface::Dark, 40)));
+        assert!(std::ptr::eq(
+            shown(Interface::Light, 99),
+            shown(Interface::Light, 40)
+        ));
     }
 }

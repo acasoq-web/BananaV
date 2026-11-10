@@ -1,0 +1,20 @@
+[package]
+name = "bv-vst2-testplug"
+description = "A VST 2 plug-in written for the host's tests on BananaV's own declarations (a gain with programs, a chunk, a tail and an editor; one that crashes): never shipped."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bv-vst2-sys.workspace = true
+
+[lints]
+workspace = true

@@ -845,10 +845,13 @@ impl BananaApp {
                             .track(id)
                             .is_some_and(|tr| tr.kind == TrackKind::Video)
                     });
+                    let mut new_tracks = self.drop_tracks;
                     self.modify(|p| {
                         // The track let go on, else the first video track
-                        // (made when there is none).
+                        // (made when there is none); below the tracks, a
+                        // new one.
                         let video = video
+                            .or_else(|| new_tracks.as_mut().map(|f| f.track(p, TrackKind::Video)))
                             .or_else(|| {
                                 p.tracks
                                     .iter()
@@ -864,6 +867,9 @@ impl BananaApp {
                             let _ = p.set_clip_duration(id, length);
                         }
                     });
+                    if self.drop_tracks.is_some() {
+                        self.drop_tracks = new_tracks;
+                    }
                     length
                 }
             };

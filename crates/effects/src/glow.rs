@@ -1,8 +1,8 @@
 //! Glow: VEGAS's. Light spread around the picture's bright parts, in a
 //! color.
 //!
-//! VEGAS's math: the brightness — the plain average of red, green and
-//! blue — is blurred by VEGAS's Gaussian (`recursive_gauss`), its radius
+//! As VEGAS's renders measure: the brightness — the plain average of red, green and
+//! blue — is blurred as VEGAS blurs (`recursive_gauss`), its radius
 //! half of Glow percent × the frame's longer side (measured on the
 //! calibration card through each of VEGAS's presets: a sigma of `0.15 ×
 //! Glow percent × the frame's width`, this radius's); Suppression is taken

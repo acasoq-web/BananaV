@@ -209,6 +209,27 @@ fn capturas_da_interface() {
     snap(&mut h, "personalizar_teclado_tracklist_trilhas");
     h.get_by_label("Cancel").click();
     settle(&mut h);
+    // Options opened with Shift held: Internal… at its end, as VEGAS's; its
+    // window lists every preference until the search is used, then the
+    // internal ones holding its text. Cancel: nothing is written.
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.get_by_label("Options").click();
+    snap(&mut h, "menu_opcoes_shift");
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.get_by_label_contains("Internal").click();
+    snap(&mut h, "preferencias_internas");
+    let search = h
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .last()
+        .expect("the search box");
+    search.click();
+    search.type_text("envelope");
+    snap(&mut h, "preferencias_internas_envelope");
+    h.get_all_by_label("Cancel")
+        .last()
+        .expect("the window's Cancel")
+        .click();
+    settle(&mut h);
     // Options › Preferences, with BananaV's own Language tab. Nothing is
     // applied: OK/Apply would write the user's settings file.
     h.get_by_label("Options").click();
@@ -1986,7 +2007,12 @@ fn vst_test_bundle() -> PathBuf {
     } else {
         "libbv_vst3_testplug.so"
     });
-    let folder = std::env::temp_dir().join(format!("bananav-telas-vst3-{}", std::process::id()));
+    // A folder of its own each time: a library loaded stays loaded (its
+    // file cannot be written again).
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let folder =
+        std::env::temp_dir().join(format!("bananav-telas-vst3-{}-{n}", std::process::id()));
     let bundle = folder.join("BananaV Tests.vst3");
     std::fs::create_dir_all(&bundle).unwrap();
     let library = bv_vst3::library_of(&bundle);
@@ -5103,6 +5129,33 @@ fn captura_envelopes_de_evento() {
     snap(&mut h, "envelopes_de_evento");
 }
 
+/// A video track's composite level painted with Shift (the stroke VEGAS was
+/// measured with): a point each step, then let go and thinned to its ends,
+/// turns and plateau, joined by smooth curves.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_envelope_pintado() {
+    let mut app = new_app();
+    app.load_demo();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    h.state_mut().painted_envelope_for_review(false);
+    settle(&mut h);
+    snap(&mut h, "envelope_pintado");
+    h.state_mut().painted_envelope_for_review(true);
+    settle(&mut h);
+    snap(&mut h, "envelope_pintado_afinado");
+}
+
 /// The Loudness Meters: empty, then a program a little loud for EBU R 128
 /// (its true peaks over −1 dBTP), then ATSC A/85 on the EBU +18 scale.
 #[test]
@@ -5166,18 +5219,19 @@ fn captura_titulos() {
         .click();
     settle(&mut h);
     for preset in [
-        "Default",
-        "Lower Third",
-        "Large Title",
-        "Outlined",
-        "Soft Shadow",
+        "(Default)",
+        "Title01",
+        "Title25",
+        "Bounce",
+        "Twist In",
+        "Subtitles",
     ] {
         assert!(
             h.query_all_by_label(preset).next().is_some(),
             "no preset {preset}"
         );
     }
-    let cell = h.get_by_label("Lower Third").rect();
+    let cell = h.get_by_label("Title01").rect();
     h.event(egui::Event::PointerMoved(cell.center()));
     snap(&mut h, "titulos_geradores");
     // A new video track (Insert › Video Track: at the top, selected), then
@@ -5223,6 +5277,41 @@ fn captura_titulos() {
     h.state_mut().seek_seconds(6.5);
     h.state_mut().show_tab_named("Video Preview");
     snap(&mut h, "titulos_previa");
+}
+
+/// The Plug-In Chooser's search (every folder's plug-ins whose names have
+/// the text) and a letter typed over its list (the first plug-in it
+/// begins, scrolled to).
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_seletor_busca() {
+    let mut app = new_app();
+    app.load_demo();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    h.state_mut().open_clip_window("fx");
+    settle(&mut h);
+    h.get_by_label("Plug-In Chain…").click();
+    settle(&mut h);
+    assert!(h.state_mut().chooser_search_for_review("blur"));
+    settle(&mut h);
+    assert!(h.query_by_label("Gaussian Blur").is_some(), "found");
+    assert!(h.query_by_label("Border").is_none(), "left out");
+    snap(&mut h, "seletor_busca");
+    h.state_mut().chooser_search_for_review("");
+    settle(&mut h);
+    h.event(egui::Event::Text("s".into()));
+    settle(&mut h);
+    snap(&mut h, "seletor_letra");
 }
 
 /// OFX plug-ins: an effect picked in the Plug-In Chooser (in its own
@@ -7397,6 +7486,413 @@ fn double_clicking_a_sliders_bar_puts_its_default_back() {
             assert_ne!(params(&h), defaults, "{k:?}: a click moves it");
             double_click_slowly(&mut h, off);
             assert_eq!(params(&h), defaults, "{k:?}: a double-click puts it back");
+        }
+    }
+}
+
+/// The test plug-ins' bundle with its module information: its three
+/// effects listed by class (as the tests' programs read modules without
+/// running them).
+fn vst_test_bundle_with_info() -> PathBuf {
+    let bundle = vst_test_bundle();
+    let info = r#"{ "Name": "BananaV Tests", "Factory Info": { "Vendor": "BananaV Tests" },
+        "Classes": [
+            { "Category": "Audio Module Class", "Name": "BananaV Test Gain",
+              "CID": "42414E414E4156544553544741494E31", "Version": "1.0.0",
+              "Sub Categories": ["Fx", "Tools", "Stereo"] },
+            { "Category": "Audio Module Class", "Name": "BananaV Test Polarity",
+              "CID": "42414E414E415654455354504F4C4152", "Version": "1.0.0",
+              "Sub Categories": ["Fx", "Tools", "Stereo"] },
+            { "Category": "Audio Module Class", "Name": "BananaV Test Programs",
+              "CID": "42414E414E41565445535450524F4753", "Version": "1.0.0",
+              "Sub Categories": ["Fx", "Tools", "Stereo"] }
+        ] }"#;
+    let resources = bundle.join("Contents").join("Resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(resources.join("moduleinfo.json"), info).unwrap();
+    bundle
+}
+
+/// The VST 3 standard: the test plug-ins' bundle with its module
+/// information (three effects by class), an effect with programs in the FX
+/// window — its programs in the preset list, one chosen going into the
+/// effect's state, the preset bar's VST files — and Preferences › VST Effects
+/// listing the three with their boxes.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_vst3_padrao() {
+    let bundle = vst_test_bundle_with_info();
+    let mut app = new_app();
+    app.load_demo();
+    assert!(app.vst_chooser_for_review(&bundle));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    h.get_by_label("VST3").click();
+    settle(&mut h);
+    for name in [
+        "BananaV Test Gain",
+        "BananaV Test Polarity",
+        "BananaV Test Programs",
+    ] {
+        assert!(h.query_all_by_label(name).next().is_some(), "no {name}");
+    }
+    let item = h.get_by_label("BananaV Test Programs").rect().center();
+    double_click_at(&mut h, item);
+    h.get_by_label("OK").click();
+    settle(&mut h);
+    snap(&mut h, "vst3_programas_pagina");
+    for label in ["Save VST Preset As", "Open VST Preset", "Program"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "no {label}");
+    }
+    // The preset list, right of its label.
+    let label = h.get_by_label("Preset:").rect();
+    click_at(&mut h, egui::pos2(label.right() + 120.0, label.center().y));
+    settle(&mut h);
+    snap(&mut h, "vst3_programas_lista");
+    for name in ["Half", "Silent"] {
+        assert!(h.query_all_by_label(name).next().is_some(), "no {name}");
+    }
+    let half = h
+        .query_all_by_label("Half")
+        .map(|n| n.rect())
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("Half");
+    click_at(&mut h, half.center());
+    settle(&mut h);
+    snap(&mut h, "vst3_programa_escolhido");
+    // The program went into the effect's state (its gain, its program).
+    let fx = vst_fx(&h);
+    assert_eq!(fx.name, "BananaV Test Programs");
+    assert!(fx.state.len() >= 24, "{} bytes", fx.state.len());
+    let at = |k: usize| f64::from_le_bytes(fx.state[k..k + 8].try_into().unwrap());
+    assert_eq!((at(0), at(16)), (0.25, 0.5), "Half's gain and program");
+    let _ = std::fs::remove_dir_all(bundle.parent().unwrap());
+}
+
+/// Preferences › VST Effects with the test plug-ins' bundle: the three
+/// effects, ticked, their I/O and file; the search's line under the list.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_vst3_preferencias() {
+    let bundle = vst_test_bundle_with_info();
+    let mut app = new_app();
+    app.load_demo();
+    assert!(app.vst_chooser_for_review(&bundle));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    // The Plug-In Chooser it opened, closed.
+    h.get_all_by_label("Cancel")
+        .last()
+        .expect("the chooser's Cancel")
+        .click();
+    settle(&mut h);
+    h.get_by_label("Options").click();
+    settle(&mut h);
+    h.get(kittest::by().predicate(|n| n.label().is_some_and(|l| l.starts_with("Preferences…"))))
+        .click();
+    settle(&mut h);
+    h.get_by_label("VST Effects").click();
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    snap(&mut h, "vst3_preferencias");
+    // The first effect's box, clicked: unticked (the draft only; Cancel
+    // keeps the settings as they were).
+    let label = h
+        .get_by_label("Select VST effects to be available as audio plug-ins:")
+        .rect();
+    click_at(
+        &mut h,
+        egui::pos2(label.left() + 13.0, label.bottom() + 40.0),
+    );
+    settle(&mut h);
+    snap(&mut h, "vst3_preferencias_desmarcado");
+    h.get_all_by_label("Cancel")
+        .last()
+        .expect("the window's Cancel")
+        .click();
+    settle(&mut h);
+    let _ = std::fs::remove_dir_all(bundle.parent().unwrap());
+}
+
+/// The folder of the other editor's eFX plug-ins (VST 2, 32-bit and, in
+/// `x64`, 64-bit): `BV_EFX_FOLDER` (none: those captures are skipped).
+fn efx_folder() -> Option<PathBuf> {
+    let folder = std::env::var_os("BV_EFX_FOLDER").map(PathBuf::from)?;
+    folder.join("x64").is_dir().then_some(folder)
+}
+
+/// VST 2 plug-ins through BananaV's own compatibility, with real ones (the
+/// eFX, 64-bit and 32-bit): the Plug-In Chooser's VST folder, the 64-bit
+/// Compressor's page (its parameters by its own texts, its programs in the
+/// preset list), the 32-bit one's page (run in the 32-bit bridge, built
+/// for i686 beforehand) and Preferences › VST Effects listing them all.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_vst2() {
+    let Some(folder) = efx_folder() else {
+        eprintln!("left out: no eFX folder here");
+        return;
+    };
+    let shot = |name: &str, bits32: bool| {
+        let mut app = new_app();
+        app.load_demo();
+        // Their folder alone (its x64 folder within).
+        assert!(app.vst_chooser_for_review(&folder.join("eFX_Compressor.dll")));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .with_pixels_per_point(1.0)
+            .wgpu()
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        settle(&mut h);
+        h.get_by_label("VST").click();
+        settle(&mut h);
+        if !bits32 {
+            snap(&mut h, "vst2_seletor");
+        }
+        let label = if bits32 {
+            "eFX_Compressor (32-bit)"
+        } else {
+            "eFX_Compressor"
+        };
+        let item = h.get_by_label(label).rect().center();
+        double_click_at(&mut h, item);
+        h.get_by_label("OK").click();
+        for _ in 0..20 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        settle(&mut h);
+        snap(&mut h, name);
+        assert!(
+            h.query_all_by_label("Save VST Preset As").next().is_some(),
+            "the page"
+        );
+        if bits32 {
+            assert!(
+                h.query_all_by_label("32-bit").next().is_some(),
+                "the bridge's mark"
+            );
+        }
+        h
+    };
+    let _ = shot("vst2_efx_compressor", false);
+    let _ = shot("vst2_efx_compressor_32bit", true);
+}
+
+/// Preferences › VST Effects with the eFX folder: 64-bit and 32-bit VST 2
+/// plug-ins, ticked; the 32-bit ones marked; the option for them.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_vst2_preferencias() {
+    let Some(folder) = efx_folder() else {
+        eprintln!("left out: no eFX folder here");
+        return;
+    };
+    let mut app = new_app();
+    app.load_demo();
+    assert!(app.vst_chooser_for_review(&folder.join("eFX_Compressor.dll")));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    h.get_all_by_label("Cancel")
+        .last()
+        .expect("the chooser's Cancel")
+        .click();
+    settle(&mut h);
+    h.get_by_label("Options").click();
+    settle(&mut h);
+    h.get(kittest::by().predicate(|n| n.label().is_some_and(|l| l.starts_with("Preferences…"))))
+        .click();
+    settle(&mut h);
+    h.get_by_label("VST Effects").click();
+    for _ in 0..40 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    snap(&mut h, "vst2_preferencias");
+    h.get_all_by_label("Cancel")
+        .last()
+        .expect("the window's Cancel")
+        .click();
+    settle(&mut h);
+}
+
+/// A 32-bit VST 3 module (BananaV's test plug-ins built for i686, their
+/// bundle's 32-bit library alone): listed with its mark in the Plug-In
+/// Chooser's VST3 folder, its page in the FX window run in the 32-bit
+/// bridge (built for i686 beforehand) with the bridge's mark, a switch
+/// changed there going back into the effect's values and state.
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_vst3_32bit() {
+    const X86: &str = "i686-pc-windows-msvc";
+    if bv_bridge::exe().is_none() {
+        eprintln!("left out: no 32-bit bridge (cargo build -p bananav-bridge32 --target {X86})");
+        return;
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = root.join("target").join("vst3-testplug");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(cargo)
+        .current_dir(&root)
+        .args([
+            "build",
+            "-q",
+            "-p",
+            "bv-vst3-testplug",
+            "--target",
+            X86,
+            "--target-dir",
+        ])
+        .arg(&target)
+        .status()
+        .expect("cargo runs");
+    assert!(status.success());
+    let folder = std::env::temp_dir().join(format!("bananav-telas-vst3-32-{}", std::process::id()));
+    let bundle = folder.join("BananaV Tests.vst3");
+    std::fs::create_dir_all(&bundle).unwrap();
+    let library = bv_vst3::library_32(&bundle);
+    std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+    std::fs::copy(
+        target.join(X86).join("debug").join("bv_vst3_testplug.dll"),
+        &library,
+    )
+    .unwrap();
+    assert!(bv_vst3::is_32bit(&bundle));
+    let mut app = new_app();
+    app.load_demo();
+    assert!(app.vst_chooser_for_review(&bundle));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    h.get_by_label("VST3").click();
+    settle(&mut h);
+    snap(&mut h, "vst3_32bit_seletor");
+    let item = h.get_by_label("BananaV Tests (32-bit)").rect().center();
+    double_click_at(&mut h, item);
+    h.get_by_label("OK").click();
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    settle(&mut h);
+    snap(&mut h, "vst3_32bit_pagina");
+    for label in ["Gain", "Bypass", "0.0 dB", "32-bit", "Show Plug-In Window"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "no {label}");
+    }
+    // The bypass switched on in the bridge: the effect's value and its
+    // state follow.
+    let bypass = h.get_by_label("Bypass").rect();
+    click_at(&mut h, egui::pos2(bypass.right() + 24.0, bypass.center().y));
+    settle(&mut h);
+    let fx = vst_fx(&h);
+    assert_eq!(fx.params.get(&1), Some(&1.0));
+    assert_eq!(fx.state.len(), 16);
+    assert_eq!(f64::from_le_bytes(fx.state[8..].try_into().unwrap()), 1.0);
+    snap(&mut h, "vst3_32bit_bypass");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// The presets lists of the Media Generator and Transitions windows:
+/// Checkerboard's, Test Pattern's and Titles & Text's (each "Default"
+/// first, as the generators with no default preset of their own), Noise
+/// Texture's and Solid Color's (none: theirs is a preset), and the
+/// transitions' ("Default" first).
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_presets_padrao() {
+    let mut app = new_app();
+    app.load_demo();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    h.state_mut().show_tab_named("Media Generators");
+    settle(&mut h);
+    for (generator, name) in [
+        ("Checkerboard", "presets_checkerboard"),
+        ("Test Pattern", "presets_test_pattern"),
+        ("Titles & Text", "presets_titles"),
+        ("Noise Texture", "presets_noise_texture"),
+        ("Solid Color", "presets_solid_color"),
+    ] {
+        h.get_all_by_label(generator)
+            .find(|n| n.accesskit_node().toggled().is_some())
+            .expect(generator)
+            .click();
+        settle(&mut h);
+        snap(&mut h, name);
+    }
+    h.state_mut().show_tab_named("Transitions");
+    settle(&mut h);
+    for (transition, name) in [
+        ("3D Fly In/Out", "presets_3d_fly"),
+        ("Dissolve", "presets_dissolve"),
+    ] {
+        let found = h
+            .get_all_by_label(transition)
+            .find(|n| n.accesskit_node().toggled().is_some())
+            .map(|n| n.click())
+            .is_some();
+        if found {
+            settle(&mut h);
+            snap(&mut h, name);
         }
     }
 }

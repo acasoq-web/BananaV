@@ -185,6 +185,21 @@ pub enum Icon {
     /// The Mixing Console's Automation Settings: an envelope's line and
     /// points.
     Automation,
+    /// A text's lines lined up on the left, in the middle, on the right.
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    /// Transfer Text Properties: a brush passing a look on.
+    Transfer,
+    /// Replace Plug-In: f, x and a plus.
+    FxAdd,
+    /// Match Event Length: a frame stretched both ways.
+    FitLength,
+    /// A plug-in's help: a question mark in a ring.
+    Help,
+    /// Open VST Bank and Save VST Bank As: two folders, a disk over a page.
+    OpenBank,
+    SaveBank,
     /// Invert Track Phase: two waves crossing.
     Phase,
 }

@@ -205,6 +205,10 @@ impl Binary {
     /// system's: `QuietErrors`).
     #[cfg(not(target_family = "wasm"))]
     pub fn load(path: &Path) -> Result<Arc<Binary>, Error> {
+        // macOS: the guard's handlers before the plug-in's code (it may
+        // add its own).
+        #[cfg(target_os = "macos")]
+        bv_apple::guard::install();
         #[cfg(windows)]
         let _quiet = QuietErrors::new();
         #[cfg(windows)]
@@ -635,6 +639,11 @@ pub fn architectures() -> &'static [&'static str] {
         &["Linux-x86-64"]
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         &["Linux-arm64", "Linux-aarch64"]
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        // Universal binaries, then the older Intel-only folder.
+        &["MacOS", "MacOS-x86-64"]
+    } else if cfg!(target_os = "macos") {
+        &["MacOS"]
     } else {
         &[]
     }
@@ -703,6 +712,8 @@ pub fn standard_folders() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     out.push(PathBuf::from("/usr/OFX/Plugins"));
+    #[cfg(target_os = "macos")]
+    out.push(PathBuf::from("/Library/OFX/Plugins"));
     out.dedup();
     out
 }

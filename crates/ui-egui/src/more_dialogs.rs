@@ -22,6 +22,8 @@ pub struct MoreDialogs {
     loudness_written: bool,
     /// Options › Preferences.
     pub preferences: Option<crate::preferences::PreferencesDialog>,
+    /// Options › Internal… (the menu opened with Shift held).
+    pub(crate) internal: Option<crate::internal_prefs::InternalDialog>,
     /// Help window: 0 = contents, 1 = keyboard shortcuts.
     pub help: Option<usize>,
     /// Options › Customize Keyboard.
@@ -36,6 +38,10 @@ pub struct MoreDialogs {
     pub command: Option<crate::command_ui::CommandDialog>,
     /// Create Subclip.
     pub subclip: Option<crate::subclip_ui::SubclipDialog>,
+    /// Options › Envelope Appearance… (and an envelope's shortcut menu).
+    pub envelope_look: Option<crate::envelope_look::EnvelopeLookDialog>,
+    /// Help › Check for Software Updates…, and the check as BananaV starts.
+    pub updates: Option<crate::updates::UpdateDialog>,
     /// Project Media's Rename: the media, its name being typed and where
     /// the box shows.
     pub media_rename: Option<(bv_timeline::MediaId, String, egui::Pos2)>,
@@ -201,6 +207,11 @@ impl MoreDialogs {
         {
             self.preferences = Some(p);
         }
+        if let Some(mut d) = self.internal.take()
+            && d.show(ctx, app)
+        {
+            self.internal = Some(d);
+        }
         self.help_window(ctx, app);
         if let Some(mut k) = self.keyboard.take()
             && k.show(ctx, app)
@@ -231,6 +242,16 @@ impl MoreDialogs {
             && d.show(ctx, app)
         {
             self.subclip = Some(d);
+        }
+        if let Some(mut d) = self.envelope_look.take()
+            && d.show(ctx, app)
+        {
+            self.envelope_look = Some(d);
+        }
+        if let Some(mut d) = self.updates.take()
+            && d.show(ctx, app)
+        {
+            self.updates = Some(d);
         }
         if let Some(mut r) = self.media_rename.take()
             && crate::media_menu::rename_box(ctx, app, &mut r)

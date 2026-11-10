@@ -42,13 +42,27 @@ use crate::accel::{Accel, Painter};
 pub struct PreviewFrame {
     pub time: Tick,
     pub generation: u64,
+    /// Its pixels: `drawn`, or fewer when reduced for the screen's room.
     pub width: u32,
     pub height: u32,
+    /// The size it was drawn at (its effects worked out at it) and the
+    /// room of the screen it was reduced for ((0, 0): none) — what frames
+    /// are asked for by.
+    pub drawn: (u32, u32),
+    pub room: (u32, u32),
     /// RGBA, 8 bits, encoded in BT.709 (as renders write it).
     pub rgba: Vec<u8>,
     /// `false` while scrubbing, when pictures on the way to the frame stood
     /// in for some of its pictures (the exact frame follows).
     pub exact: bool,
+}
+
+impl Drop for PreviewFrame {
+    /// Its bytes go to the next frames of its size (see
+    /// `bv_gpu::give_back`).
+    fn drop(&mut self) {
+        bv_gpu::give_back(std::mem::take(&mut self.rgba));
+    }
 }
 
 /// One channel of the picture, as the Video Preview's Overlays menu shows
@@ -87,10 +101,13 @@ pub struct PreviewLook {
 pub(crate) struct Drawing {
     pub(crate) look: PreviewLook,
     pub(crate) bypassed: Option<Arc<Project>>,
+    /// The pixels the screen shows the frames in: drawn larger, they come
+    /// back reduced to it on the card ((0, 0): as drawn).
+    pub(crate) room: (u32, u32),
 }
 
-/// A frame for the screen as `drawing` says, and whether it is exact (no
-/// picture on the way stood in).
+/// A frame for the screen as `drawing` says, the size of its pixels, and
+/// whether it is exact (no picture on the way stood in).
 fn paint(
     painter: &mut Painter,
     project: &Project,
@@ -98,7 +115,7 @@ fn paint(
     t: Tick,
     size: (u32, u32),
     pool: &mut VideoPool,
-) -> (Vec<u8>, bool) {
+) -> (Vec<u8>, (u32, u32), bool) {
     let look = drawing.look;
     // The alpha channel only shows over a transparent background.
     let background = if look.channel == Channel::AlphaGray {
@@ -106,15 +123,20 @@ fn paint(
     } else {
         [0.0, 0.0, 0.0, 1.0]
     };
-    let mut rgba = painter.display_as(project, t, size, pool, look.quality, background);
+    let room = drawing.room;
+    let (mut rgba, pixels) =
+        painter.display_in(project, t, size, pool, look.quality, background, room);
     let mut exact = !pool.took_on_the_way();
     if let (Some(area), Some(bypassed)) = (look.bypass, &drawing.bypassed) {
-        let plain = painter.display_as(bypassed, t, size, pool, look.quality, background);
+        let (plain, plain_pixels) =
+            painter.display_in(bypassed, t, size, pool, look.quality, background, room);
         exact &= !pool.took_on_the_way();
-        copy_area(&mut rgba, &plain, size, area);
+        if plain_pixels == pixels {
+            copy_area(&mut rgba, &plain, pixels, area);
+        }
     }
     isolate(&mut rgba, look.channel);
-    (rgba, exact)
+    (rgba, pixels, exact)
 }
 
 /// Copies the part `area` (left, top, right, bottom; 0–1) of `from` into
@@ -180,6 +202,15 @@ const FIRST_FRAME: Duration = Duration::from_secs(3);
 /// How long playback goes on with one thread after a second one showed no
 /// more frames.
 const RETRY: Duration = Duration::from_secs(30);
+
+/// Seconds the frame playback started from may have waited for its
+/// pictures (its readers opening and seeking) for a second thread to be
+/// tried when it reads several media: that thread's readers would seek as
+/// long, decoding as much again beside the first one's — two 4K
+/// recordings with keyframes seconds apart (a transition) held the frames
+/// back for seconds. One reader catching up is borne: a single 4K event
+/// with heavy effects went from 37 frames a second to 54 with two threads.
+const SEEK_LIMIT: f64 = 0.25;
 
 /// How far ahead of what is drawn the plug-ins of events starting are
 /// readied (making a plug-in's instance and drawing its first frame may
@@ -286,9 +317,11 @@ impl Request {
         self.of_this(f) && time == f.time
     }
 
-    /// A frame of this project and size.
+    /// A frame of this project and size (for the screen's room).
     fn of_this(&self, f: &PreviewFrame) -> bool {
-        self.generation == f.generation && self.width == f.width && self.height == f.height
+        self.generation == f.generation
+            && (self.width, self.height) == f.drawn
+            && self.drawing.room == f.room
     }
 
     fn key(&self, time: Tick) -> Key {
@@ -297,6 +330,7 @@ impl Request {
             time,
             width: self.width,
             height: self.height,
+            room: self.drawing.room,
         }
     }
 }
@@ -308,12 +342,16 @@ struct Key {
     time: Tick,
     width: u32,
     height: u32,
+    room: (u32, u32),
 }
 
 impl Key {
     /// Of the project and size `req` asks for.
     fn of(&self, req: &Request) -> bool {
-        self.generation == req.generation && self.width == req.width && self.height == req.height
+        self.generation == req.generation
+            && self.width == req.width
+            && self.height == req.height
+            && self.room == req.drawing.room
     }
 }
 
@@ -334,6 +372,11 @@ struct Pace {
     trial: Option<Trial>,
     /// No second thread before then (it showed no more frames).
     not_before: Option<Instant>,
+    /// Seconds the last frame asked for waited for its pictures: what a
+    /// second thread's readers would take to open and seek (see
+    /// `SEEK_LIMIT`), and how many readers were open then.
+    seek: f64,
+    readers: usize,
 }
 
 /// A second thread being tried for playback.
@@ -356,13 +399,21 @@ impl Pace {
     fn note(&mut self, took: Duration, waited: Duration, second: bool) {
         let secs = took.as_secs_f64().max(1e-4);
         let wait = (waited.as_secs_f64() / secs).min(1.0);
-        if self.cost == 0.0 {
+        // A second thread's first frame waited for its readers to open and
+        // seek (in a recording with keyframes seconds apart, a second of
+        // decoding): not what frames cost. Counted, it sent the other
+        // thread half a second ahead, a stall of its own.
+        let opening = second && self.trial.is_some_and(|t| t.after.is_none());
+        if opening {
+        } else if self.cost == 0.0 {
             (self.cost, self.waiting) = (secs, wait);
         } else {
             self.cost += 0.3 * (secs - self.cost);
             self.waiting += 0.3 * (wait - self.waiting);
         }
-        self.recent.push_back(secs);
+        if !opening {
+            self.recent.push_back(secs);
+        }
         while self.recent.len() > 7 {
             self.recent.pop_front();
         }
@@ -402,12 +453,18 @@ impl Pace {
     fn plan(&mut self, interval: f64, on_the_card: bool) -> Option<bool> {
         let before = self.two;
         if !on_the_card || self.waiting > 0.5 || self.done.len() < 4 {
+            // Two threads made the frames wait for their pictures (each
+            // decodes every one): not tried again for a while.
+            if self.two && self.waiting > 0.5 {
+                self.not_before = Some(Instant::now() + RETRY);
+            }
             self.two = false;
             self.trial = None;
         } else if !self.two {
             let behind = self.typical() > interval * 1.05;
             let may = self.not_before.is_none_or(|t| Instant::now() >= t);
-            if behind && may {
+            let opens = self.seek <= SEEK_LIMIT || self.readers <= 1;
+            if behind && may && opens {
                 self.trial = Some(Trial {
                     one: 1.0 / self.typical(),
                     since: Instant::now(),
@@ -436,6 +493,8 @@ impl Pace {
     fn stop(&mut self) {
         *self = Pace {
             not_before: self.not_before,
+            seek: self.seek,
+            readers: self.readers,
             ..Pace::default()
         };
     }
@@ -622,7 +681,8 @@ impl PreviewRenderer {
     ) {
         let mut st = lock(&self.shared);
         let same_frame = st.asked.as_ref().is_some_and(|a| {
-            (a.generation, a.time, a.width, a.height) == (generation, time, width, height)
+            (a.generation, a.time, a.width, a.height, a.drawing.room)
+                == (generation, time, width, height, drawing.room)
         });
         if !same_frame {
             st.serial += 1;
@@ -819,7 +879,7 @@ impl Worker {
                     self.pool.set_patience(None);
                     let start = Instant::now();
                     let waited = self.pool.waited();
-                    let (rgba, exact) = paint(
+                    let (rgba, pixels, exact) = paint(
                         &mut self.painter,
                         &project,
                         &drawing,
@@ -832,8 +892,10 @@ impl Worker {
                     let frame = Arc::new(PreviewFrame {
                         time: t,
                         generation,
-                        width: size.0,
-                        height: size.1,
+                        width: pixels.0,
+                        height: pixels.1,
+                        drawn: size,
+                        room: drawing.room,
                         rgba,
                         exact,
                     });
@@ -868,7 +930,7 @@ impl Worker {
         let size = (req.width, req.height);
         let start = Instant::now();
         let waited = self.pool.waited();
-        let (rgba, exact) = paint(
+        let (rgba, pixels, exact) = paint(
             &mut self.painter,
             &source,
             &req.drawing,
@@ -879,8 +941,10 @@ impl Worker {
         let frame = Arc::new(PreviewFrame {
             time,
             generation: req.generation,
-            width: req.width,
-            height: req.height,
+            width: pixels.0,
+            height: pixels.1,
+            drawn: size,
+            room: req.drawing.room,
             rgba,
             exact,
         });
@@ -897,14 +961,20 @@ impl Worker {
         // for the window to read; playback's first frame does not.
         let watch = crate::plugins::watching().filter(|_| scrubbing);
         crate::plugins::keep_watched_input(watch.is_some());
+        let mut seeking = Duration::ZERO;
         loop {
             self.pool
                 .set_patience(scrubbing.then(|| Instant::now() + PATIENCE));
             let (frame, took, waited) = self.draw(req, req.time);
             self.trace_took("asked", req.time, frame.exact, took, waited);
+            seeking += waited;
             let exact = frame.exact;
+            let readers = self.pool.open_readers();
             let newer = {
                 let mut st = lock(shared);
+                if exact {
+                    (st.pace.seek, st.pace.readers) = (seeking.as_secs_f64(), readers);
+                }
                 // Its readers may have sought: what it took tells nothing of
                 // playback's frames.
                 st.keep(&frame);
@@ -1043,7 +1113,14 @@ fn next_job(st: &mut State, me: usize) -> Option<Job> {
             return Some(Job::Asked(req.clone()));
         }
         if playing && current && me < st.pace.lanes() {
-            let busy = st.drawing.iter().filter(|k| k.of(req)).count();
+            // A frame being drawn for a time the position passed (a thread
+            // whose readers still seek) holds no lane: with it, the other
+            // thread waited seconds for it once a trial of two ended.
+            let busy = st
+                .drawing
+                .iter()
+                .filter(|k| k.of(req) && k.time >= req.time)
+                .count();
             if busy < st.pace.lanes()
                 && let Some(t) = st.next_ahead(req)
             {
@@ -1237,6 +1314,8 @@ mod tests {
                 generation: 1,
                 width: 64,
                 height: 36,
+                drawn: (64, 36),
+                room: (0, 0),
                 rgba: Vec::new(),
                 exact: true,
             })
@@ -1283,9 +1362,12 @@ mod tests {
         }
         assert!(pace.plan(interval, false).is_none(), "not on the processor");
         assert_eq!(pace.plan(interval, true), Some(true), "behind: two threads");
-        // The second thread's first frame starts the count.
+        // The second thread's first frame starts the count; its readers'
+        // seek is not what frames cost.
+        let cost = pace.cost;
         pace.note(Duration::from_millis(400), Duration::from_millis(390), true);
         assert_eq!(pace.trial.and_then(|t| t.after), Some(0));
+        assert_eq!(pace.cost, cost, "the opening frame left out");
         // As many frames a second as one gave: let go.
         if let Some(t) = &mut pace.trial {
             (t.one, t.after) = (1e9, Some(TRIAL));
@@ -1303,5 +1385,24 @@ mod tests {
         }
         assert!(pace.plan(interval, true).is_none());
         assert!(!pace.two);
+        // Several readers slow to seek (keyframes seconds apart): a second
+        // thread's would be as slow, so one.
+        let mut pace = Pace {
+            seek: 0.7,
+            readers: 2,
+            ..Pace::default()
+        };
+        for _ in 0..4 {
+            pace.note(Duration::from_millis(40), Duration::ZERO, false);
+        }
+        assert!(pace.plan(interval, true).is_none(), "seeks too long");
+        pace.stop();
+        assert_eq!((pace.seek, pace.readers), (0.7, 2), "kept past a stop");
+        // One reader catching up is borne.
+        pace.readers = 1;
+        for _ in 0..4 {
+            pace.note(Duration::from_millis(40), Duration::ZERO, false);
+        }
+        assert_eq!(pace.plan(interval, true), Some(true), "one reader: tried");
     }
 }

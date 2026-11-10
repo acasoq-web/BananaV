@@ -7,7 +7,8 @@
 //!
 //! `cargo test -p bv-ofx --test vegas_poc -- --ignored --nocapture`
 //!
-//! `BV_OFX_POC_DIR` names the plug-ins' folder (VEGAS 23's by default) and
+//! `BV_OFX_POC_DIR` names the plug-ins' folder (the test is skipped
+//! without it) and
 //! `BV_OFX_POC_LIBS` the folder with the libraries they need (the folder
 //! above theirs by default); `BV_OFX_POC_ONLY` (texts, commas between)
 //! tries only the plug-ins whose name or identifier holds one of them,
@@ -20,9 +21,6 @@ use std::time::Duration;
 
 use bv_ofx::scan::{Scanner, read_raw};
 use bv_ofx::{Error, plugin};
-
-const DEFAULT_DIR: &str =
-    r"F:\SteamLibrary\steamapps\common\VEGAS Pro 23 Steam Edition\App\OFX Video Plug-Ins";
 
 fn png(raw: &Path) -> Option<PathBuf> {
     let img = read_raw(raw)?;
@@ -47,9 +45,10 @@ fn result(r: &Result<(), Error>) -> String {
 #[test]
 #[ignore = "needs an installed VEGAS; writes a report"]
 fn vegas_plugins_in_bananav() {
-    let dir = std::env::var_os("BV_OFX_POC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DIR));
+    let Some(dir) = std::env::var_os("BV_OFX_POC_DIR").map(PathBuf::from) else {
+        eprintln!("BV_OFX_POC_DIR names no folder: skipped");
+        return;
+    };
     if !dir.is_dir() {
         eprintln!("no plug-ins at {}", dir.display());
         return;

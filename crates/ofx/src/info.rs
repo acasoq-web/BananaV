@@ -214,6 +214,10 @@ pub struct ParamInfo {
     pub name: String,
     pub ty: ParamType,
     pub label: String,
+    /// Its short label (`kOfxPropShortLabel`; empty: none), a button's on
+    /// a line of controls.
+    #[serde(default)]
+    pub short_label: String,
     pub hint: String,
     /// The group it sits in ("" at the top).
     pub parent: String,
@@ -242,6 +246,9 @@ pub struct ParamInfo {
     pub open: bool,
     /// A page's parameters.
     pub children: Vec<String>,
+    /// A page shown as a tab (BananaV's extension, `kBananaVParamPropTab`).
+    #[serde(default)]
+    pub tab: bool,
     /// The parametric curves' count and range.
     pub curves: u32,
     pub curve_range: [f64; 2],
@@ -324,6 +331,27 @@ pub struct ParamInfo {
     /// save.
     #[serde(default)]
     pub file_to_write: bool,
+    /// How a boolean button's label is written, "bold" or "italic"
+    /// (BananaV's `kBananaVParamPropButtonStyle`; empty: plain).
+    #[serde(default)]
+    pub button_style: String,
+    /// A choice's options as toggle buttons with these pictures (BananaV's
+    /// `kBananaVParamPropOptionIcons`; empty: a list).
+    #[serde(default)]
+    pub option_icons: Vec<String>,
+    /// Values offered in a list beside a number's box (BananaV's
+    /// `kBananaVParamPropSuggested`; empty: none).
+    #[serde(default)]
+    pub suggested: Vec<f64>,
+    /// A push button's picture (BananaV's `kBananaVParamPropIcon`; empty:
+    /// a button with its label).
+    #[serde(default)]
+    pub icon: String,
+    /// The parameters the other events keep when a push button gives them
+    /// this one's settings (BananaV's `kBananaVParamPropTransfer`; empty:
+    /// it does not).
+    #[serde(default)]
+    pub transfer: String,
 }
 
 impl ParamInfo {
@@ -336,6 +364,7 @@ impl ParamInfo {
             name: p.name.clone(),
             ty: p.ty,
             label: p.label(),
+            short_label: s(kOfxPropShortLabel),
             hint: s(kOfxParamPropHint),
             parent: s(kOfxParamPropParent),
             default: p.default_value(),
@@ -357,6 +386,7 @@ impl ParamInfo {
             increment: props.dbl(kOfxParamPropIncrement, 0).unwrap_or(1.0),
             open: props.flag(kOfxParamPropGroupOpen).unwrap_or(true),
             children: props.strs(kOfxParamPropPageChild),
+            tab: props.int(bv_ofx_sys::extensions::kBananaVParamPropTab, 0) == Some(1),
             curves: props
                 .int(kOfxParamPropParametricDimension, 0)
                 .unwrap_or(1)
@@ -400,6 +430,11 @@ impl ParamInfo {
             mask_tracking: s(bv_ofx_sys::extensions::kBananaVParamPropMaskTracking),
             event_length: s(bv_ofx_sys::extensions::kBananaVParamPropEventLength),
             file_to_write: props.int(kOfxParamPropStringFilePathExists, 0) == Some(0),
+            button_style: s(bv_ofx_sys::extensions::kBananaVParamPropButtonStyle),
+            option_icons: props.strs(bv_ofx_sys::extensions::kBananaVParamPropOptionIcons),
+            suggested: props.dbls(bv_ofx_sys::extensions::kBananaVParamPropSuggested),
+            icon: s(bv_ofx_sys::extensions::kBananaVParamPropIcon),
+            transfer: s(bv_ofx_sys::extensions::kBananaVParamPropTransfer),
         }
     }
 }

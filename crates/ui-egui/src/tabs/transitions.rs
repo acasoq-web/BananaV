@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::i18n::tr;
 use bv_core::Tick;
-use bv_timeline::{Clip, ClipId, Direction, PluginFx, Transition};
+use bv_timeline::{Clip, ClipId, Direction, OutTransition, PluginFx, Transition};
 
 use super::chooser::{self, Category, Plugin};
 use crate::app::{BananaApp, MediaDrag};
@@ -153,6 +153,55 @@ pub fn apply_plugin(app: &mut BananaApp, clips: &[ClipId], fx: &PluginFx) {
     let fx = fx.clone();
     apply_with(app, clips, move |c| {
         c.transition_fx = Some(Box::new(fx.clone()));
+    });
+}
+
+/// A transition let go on the end of event `clip` (a video one): the
+/// entrance transition of the event after it, where one starts there (a
+/// crossfade), else the transition `clip` goes out with, over its fade-out
+/// — a second long when it has none —, as VEGAS's.
+pub fn apply_at_end(app: &mut BananaApp, clip: ClipId, drag: &MediaDrag) {
+    let p = app.project();
+    let Some(c) = p.clip(clip) else {
+        return;
+    };
+    let next = p.clip_track(clip).and_then(|t| {
+        t.clips
+            .iter()
+            .filter(|n| n.id != clip && !n.muted && n.start > c.start && n.start <= c.end())
+            .min_by_key(|n| n.start)
+            .map(|n| n.id)
+    });
+    match (next, drag) {
+        (Some(n), MediaDrag::Transition(t)) => apply(app, &[n], *t),
+        (Some(n), MediaDrag::PluginTransition(fx)) => apply_plugin(app, &[n], fx),
+        (None, MediaDrag::Transition(t)) => {
+            let t = *t;
+            apply_out(app, clip, move |o| {
+                o.kind = t;
+                o.fx = None;
+            });
+        }
+        (None, MediaDrag::PluginTransition(fx)) => {
+            let fx = fx.clone();
+            apply_out(app, clip, move |o| o.fx = Some(fx));
+        }
+        _ => {}
+    }
+}
+
+/// Gives event `clip` the transition it goes out with (`set`), on, over
+/// its fade-out: a second long when it has none.
+fn apply_out(app: &mut BananaApp, clip: ClipId, set: impl FnOnce(&mut OutTransition)) {
+    app.modify(|p| {
+        if let Some(c) = p.clip_mut(clip) {
+            let o = c.out_transition.get_or_insert_with(Default::default);
+            set(o);
+            o.bypass = false;
+            if c.fade_out == Tick::ZERO {
+                c.fade_out = Tick::SECOND.min(c.duration - c.fade_in).max(Tick::ZERO);
+            }
+        }
     });
 }
 

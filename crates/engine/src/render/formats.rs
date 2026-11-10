@@ -83,6 +83,8 @@ pub enum Encoder {
     Intel,
     /// Qualcomm Adreno (Snapdragon computers).
     Qualcomm,
+    /// The Mac's own media engine (VideoToolbox).
+    Apple,
 }
 
 impl Encoder {
@@ -94,6 +96,7 @@ impl Encoder {
             Encoder::Amd => "AMD VCE",
             Encoder::Intel => "Intel QSV",
             Encoder::Qualcomm => "Qualcomm",
+            Encoder::Apple => "VideoToolbox",
         }
     }
 
@@ -104,6 +107,7 @@ impl Encoder {
             Encoder::Amd => bv_mf::Vendor::Amd,
             Encoder::Intel => bv_mf::Vendor::Intel,
             Encoder::Qualcomm => bv_mf::Vendor::Qualcomm,
+            Encoder::Apple => bv_mf::Vendor::Apple,
         }
     }
 
@@ -114,6 +118,7 @@ impl Encoder {
             bv_mf::Vendor::Amd => Some(Encoder::Amd),
             bv_mf::Vendor::Intel => Some(Encoder::Intel),
             bv_mf::Vendor::Qualcomm => Some(Encoder::Qualcomm),
+            bv_mf::Vendor::Apple => Some(Encoder::Apple),
             bv_mf::Vendor::OtherHardware => None,
         }
     }

@@ -1,0 +1,28 @@
+[package]
+name = "bv-vst2"
+description = "BananaV's own host for VST 2 plug-ins: their binary interface declared from how plug-ins behave (no Steinberg code), run in BananaV behind a crash guard or, 32-bit ones, in BananaV's 32-bit bridge; looked at in a process of their own; programs, states, .fxp presets, editors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+
+[dependencies]
+bv-apple.workspace = true
+bv-bridge.workspace = true
+bv-vst2-sys.workspace = true
+libloading = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+bv-vst2-testplug = { path = "../vst2-testplug" }
+
+[lints]
+workspace = true

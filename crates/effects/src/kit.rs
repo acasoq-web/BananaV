@@ -142,6 +142,39 @@ pub(crate) fn define_all(fx: Fx, specs: &[Spec]) {
     }
 }
 
+/// As [`define_all`], the way VEGAS's generators show their settings:
+/// their sections closed at first, their lists and switches animated (in
+/// steps) as their numbers are, their colors written as red, green, blue
+/// and alpha.
+pub(crate) fn define_generator(fx: Fx, specs: &[Spec]) {
+    let mut group: Option<&'static CStr> = None;
+    for &spec in specs {
+        match spec {
+            Spec::Group(name, label) => {
+                let g = fx.define_param(kOfxParamTypeGroup, name, label);
+                g.set_int(kOfxParamPropGroupOpen, 0);
+                group = Some(name);
+            }
+            Spec::GroupEnd => group = None,
+            _ => {
+                let Some(p) = define(fx, spec) else {
+                    continue;
+                };
+                if let Some(parent) = group {
+                    p.set_str(kOfxParamPropParent, parent);
+                }
+                match spec {
+                    Spec::Choice(..) | Spec::Toggle(..) => p.set_int(kOfxParamPropAnimates, 1),
+                    Spec::Color(..) | Spec::Rgb(..) => {
+                        p.set_str(bv_ofx_sys::extensions::kBananaVParamPropColorModel, c"RGB")
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Defines the parameter `spec` describes.
 pub(crate) fn define(fx: Fx, spec: Spec) -> Option<Props> {
     let p = match spec {
@@ -329,6 +362,12 @@ impl Vals {
         let v = self.get(name);
         std::array::from_fn(|k| v.get(k).copied().unwrap_or(1.0) as f32)
     }
+
+    /// A color with its alpha, in doubles (as the host gives it).
+    pub(crate) fn rgba64(&self, name: &CStr) -> [f64; 4] {
+        let v = self.get(name);
+        std::array::from_fn(|k| v.get(k).copied().unwrap_or(1.0))
+    }
 }
 
 /// Where the frame's pixels are: canonical coordinates and pixels.
@@ -356,11 +395,6 @@ impl Grid {
             cx * self.scale[0] / self.par - 0.5,
             cy * self.scale[1] - 0.5,
         )
-    }
-
-    /// The frame's width over its height, as it shows.
-    pub(crate) fn aspect(&self) -> f64 {
-        self.frame[0] / self.frame[1].max(1.0)
     }
 
     /// The frame's height in pixels at this scale.

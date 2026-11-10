@@ -104,14 +104,15 @@ enum ColorSetting {
     ButtonHighlight,
 }
 
-/// The values the window edits.
+/// The values the window edits (Options › Internal applies its own the
+/// same way).
 #[derive(Clone, Debug, PartialEq)]
-struct Draft {
-    show_welcome: bool,
-    language: Language,
-    gpu: GpuChoice,
-    decoding: DecodeChoice,
-    prefs: Prefs,
+pub(crate) struct Draft {
+    pub(crate) show_welcome: bool,
+    pub(crate) language: Language,
+    pub(crate) gpu: GpuChoice,
+    pub(crate) decoding: DecodeChoice,
+    pub(crate) prefs: Prefs,
 }
 
 impl Draft {
@@ -137,7 +138,7 @@ impl Draft {
         }
     }
 
-    fn apply(&self, app: &mut BananaApp) {
+    pub(crate) fn apply(&self, app: &mut BananaApp) {
         app.settings.show_welcome = self.show_welcome;
         app.set_language(self.language);
         app.settings.video_gpu = self.gpu.clone();
@@ -156,9 +157,11 @@ impl Draft {
             self.prefs.log_renders,
         );
         bv_engine::Engine::set_render_threads(self.prefs.render_threads as usize);
+        bv_engine::Engine::set_dim_db(self.prefs.dim_db as f32);
         bv_engine::Engine::set_peak_files(!self.prefs.no_peak_files, self.prefs.hide_peak_files);
         bv_engine::Engine::set_keep_bypassed_fx(self.prefs.keep_bypassed_fx);
         bv_engine::Engine::set_aces_on_gpu(self.prefs.aces_on_gpu);
+        bv_bridge::set_enabled(self.prefs.vst_32bit);
         app.engine
             .set_ram_preview((self.prefs.ram_preview_mb as usize) << 20);
         app.apply_audio_prefs();
@@ -180,7 +183,7 @@ enum Item {
 
 /// The General page's list, in VEGAS's order (without its maker's online
 /// services: BananaV has none).
-fn general_items() -> [(&'static str, Item); 34] {
+fn general_items() -> [(&'static str, Item); 35] {
     use Item::{Later, On, Welcome};
     [
         (
@@ -210,6 +213,10 @@ fn general_items() -> [(&'static str, Item); 34] {
         (
             tr("Check project file type associations at startup"),
             On(|p| &mut p.check_associations),
+        ),
+        (
+            tr("Check for updates when BananaV starts"),
+            On(|p| &mut p.check_updates),
         ),
         (tr("Enable joystick support"), On(|p| &mut p.joystick)),
         (
@@ -603,6 +610,8 @@ impl PreferencesDialog {
     pub fn show(&mut self, ctx: &egui::Context, app: &mut BananaApp) -> bool {
         let mut open = true;
         let mut close = false;
+        // The interface brightness shows as its slider moves.
+        app.look_preview = Some(self.draft.prefs.interface_brightness);
         crate::floating::Window::new(tr("Preferences"))
             .id(egui::Id::new("preferences"))
             .collapsible(false)
@@ -668,6 +677,9 @@ impl PreferencesDialog {
             }
             Some(color_picker::Outcome::Cancelled) => self.picker = None,
             _ => {}
+        }
+        if !open || close {
+            app.look_preview = None;
         }
         open && !close
     }
@@ -803,7 +815,6 @@ impl PreferencesDialog {
     /// VEGAS's Video page.
     fn video(&mut self, ui: &mut Ui, app: &BananaApp) {
         let cards = bv_engine::gpu_adapters();
-        let cores = crate::settings::cores();
         ui.spacing_mut().item_spacing.y = 6.0;
         // Memory for frames drawn ahead (Tools › Build Dynamic RAM
         // Preview, Shift+B) and kept to play again at once: up to half the
@@ -842,7 +853,10 @@ impl PreferencesDialog {
             WIDE_LIST,
             |ui| {
                 ui.add_space(WIDE_LIST - SPIN - 12.0);
-                spin(ui, &mut d.prefs.render_threads, 1..=cores.max(1));
+                // From Options › Internal's least to its most, as VEGAS's.
+                let lo = d.prefs.min_render_threads.max(1);
+                let hi = d.prefs.render_threads_limit.max(lo);
+                spin(ui, &mut d.prefs.render_threads, lo..=hi);
             },
         );
 
@@ -1162,8 +1176,14 @@ impl PreferencesDialog {
         ui.label(RichText::new(tr("Interface language")).strong());
         ui.add_space(4.0);
         for &lang in Language::ALL {
-            // Each language is listed by its own name, like system settings do.
-            crate::widgets::radio_value(ui, &mut self.draft.language, lang, lang.native_name());
+            // Each language is listed by its own name, like system settings
+            // do; the partial ones say so.
+            ui.horizontal(|ui| {
+                crate::widgets::radio_value(ui, &mut self.draft.language, lang, lang.native_name());
+                if lang.partial() {
+                    ui.label(RichText::new(tr("(partial translation)")).color(theme::text_dim()));
+                }
+            });
         }
         ui.add_space(10.0);
         crate::tabs::hint(
@@ -1719,14 +1739,11 @@ impl MidiPorts {
     }
 }
 
-/// The VST Effects page: the folder chosen in its list, and the plug-ins
-/// found in the folders (searched again when they change, or on Refresh).
+/// The VST Effects page: the folder chosen in its list (the plug-ins
+/// found are the interface's one search's, `vst::plugins`).
 #[derive(Debug, Default)]
 struct VstPage {
     folder: Option<usize>,
-    search: Option<vst::Search>,
-    /// The plug-ins found, and the folders they were looked for in.
-    found: Option<(Vec<PathBuf>, Vec<vst::VstPlugin>)>,
 }
 
 /// Height of a line of a list.
@@ -2051,21 +2068,15 @@ impl PreferencesDialog {
     }
 
     /// VEGAS's VST Effects page: the folders searched for VST plug-ins and
-    /// the plug-ins found in them. BananaV does not run VST plug-ins yet:
-    /// choosing which it offers comes with them.
+    /// the plug-ins found in them — each VST 3 module looked at in a
+    /// BananaV of its own —, the VST 3 effects ticked offered as audio
+    /// plug-ins, those that failed listed with why.
     fn vst_effects(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 4.0;
         let folders = self.draft.prefs.vst_folders.clone();
         let page = &mut self.vst;
-        if let Some(found) = page.search.as_ref().and_then(vst::Search::result) {
-            let searched = page.search.take().map(|s| s.folders).unwrap_or_default();
-            page.found = Some((searched, found));
-        }
-        let stale = page.found.as_ref().is_none_or(|(f, _)| *f != folders);
-        if stale && page.search.is_none() {
-            page.search = Some(vst::Search::start(folders.clone()));
-        }
-        if page.search.is_some() {
+        let found = vst::plugins(&folders, false, Some(ui.ctx()));
+        if found.running {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -2149,8 +2160,8 @@ impl PreferencesDialog {
         if let Some(f) = new_folders {
             self.draft.prefs.vst_folders = f;
         }
-        let page = &mut self.vst;
-        let left_out = &self.draft.prefs.vst_left_out;
+        let left_out = self.draft.prefs.vst_left_out.clone();
+        let off = self.draft.prefs.vst_effects_off.clone();
         ui.add_space(4.0);
         ui.label(tr("Select VST effects to be available as audio plug-ins:"));
         let columns = [
@@ -2160,13 +2171,16 @@ impl PreferencesDialog {
             (tr("I/O"), 40.0),
             (tr("Location"), 60.0),
         ];
+        // The plug-in whose box was clicked.
+        let mut toggled: Option<vst::VstPlugin> = None;
         list_view(ui, "vst-plugins", &columns, 196.0, |ui, w| {
             let width = w.iter().sum::<f32>();
-            let message = match &page.found {
-                _ if page.search.is_some() => Some(tr("Searching the folders…")),
-                Some((_, list)) if list.is_empty() => Some(tr("No VST effects in these folders.")),
-                None => Some(tr("Searching the folders…")),
-                Some(_) => None,
+            let message = match &found.plugins {
+                Some(list) if list.is_empty() && !found.running => {
+                    Some(tr("No VST effects in these folders.").to_string())
+                }
+                Some(list) if !list.is_empty() => None,
+                _ => Some(tr("Searching the folders…").to_string()),
             };
             if let Some(text) = message {
                 let (rect, _) = ui.allocate_exact_size(vec2(width, LIST_ROW), egui::Sense::hover());
@@ -2179,25 +2193,52 @@ impl PreferencesDialog {
                 );
                 return;
             }
-            let Some((_, list)) = &page.found else {
+            let Some(list) = &found.plugins else {
                 return;
             };
             for plugin in list {
                 let (rect, resp) =
                     ui.allocate_exact_size(vec2(width, LIST_ROW), egui::Sense::hover());
-                let painter = ui.painter();
                 let check = Rect::from_center_size(
                     pos2(rect.left() + 12.0, rect.center().y),
                     vec2(13.0, 13.0),
                 );
-                let on = !left_out.contains(&plugin.path);
-                crate::widgets::paint_check_box(ui, check, on, false, false);
+                // VST 3 effects that work can be ticked; the others are
+                // listed only.
+                let usable = plugin.usable();
+                let on = usable && !left_out.contains(&plugin.path) && !off.contains(&plugin.key());
+                let click = ui.interact(
+                    check.expand(3.0),
+                    ui.id().with(("vst-on", &plugin.path, &plugin.class_id)),
+                    if usable {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    },
+                );
+                if click.clicked() {
+                    toggled = Some(plugin.clone());
+                }
+                crate::widgets::paint_check_box(ui, check, on, false, usable);
                 let io = plugin
                     .io
                     .map_or_else(|| "–".to_string(), |(i, o)| format!("{i} / {o}"));
+                let color = if plugin.failure.is_some() {
+                    theme::text_disabled()
+                } else {
+                    theme::text()
+                };
+                let painter = ui.painter();
                 let mut x = rect.left() + w[0];
                 for (text, cw) in [
-                    (plugin.name.clone(), w[1]),
+                    (
+                        if plugin.bits32 {
+                            trf!("{} (32-bit)", plugin.name)
+                        } else {
+                            plugin.name.clone()
+                        },
+                        w[1],
+                    ),
                     (plugin.vendor.clone(), w[2]),
                     (io, w[3]),
                     (plugin.path.display().to_string(), w[4]),
@@ -2208,29 +2249,84 @@ impl PreferencesDialog {
                         Align2::LEFT_CENTER,
                         text,
                         font.clone(),
-                        theme::text(),
+                        color,
                         cw - 8.0,
                     );
                     x += cw;
                 }
-                if resp.hovered()
-                    && ui
-                        .input(|i| i.pointer.hover_pos())
-                        .is_some_and(|p| check.expand(3.0).contains(p))
-                {
-                    resp.on_hover_text(tr("Coming soon to BananaV"));
+                let tip = if let Some(why) = &plugin.failure {
+                    Some(trf!("It failed when tried and is not offered: {}", why))
+                } else if plugin.bits32 {
+                    Some(
+                        tr("A 32-bit plug-in: it runs in BananaV's 32-bit bridge, a process of its own.")
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(tip) = tip {
+                    resp.union(click).on_hover_text(tip);
                 }
             }
         });
+        if let Some(p) = toggled {
+            let prefs = &mut self.draft.prefs;
+            if p.class_id.is_empty() {
+                let list = &mut prefs.vst_left_out;
+                match list.iter().position(|x| *x == p.path) {
+                    Some(i) => {
+                        list.remove(i);
+                    }
+                    None => list.push(p.path.clone()),
+                }
+            } else {
+                let key = p.key();
+                let list = &mut prefs.vst_effects_off;
+                match list.iter().position(|x| *x == key) {
+                    Some(i) => {
+                        list.remove(i);
+                    }
+                    None => list.push(key),
+                }
+                // A module left out whole comes back with this effect.
+                prefs.vst_left_out.retain(|x| *x != p.path);
+            }
+        }
+        // How the search goes: each VST 3 module tried in a process of its
+        // own; what failed.
+        let failed = found
+            .plugins
+            .as_ref()
+            .map_or(0, |l| l.iter().filter(|p| p.failure.is_some()).count());
+        let status = match found.progress {
+            Some((done, total)) if found.running => Some(trf!(
+                "Trying the VST 3 plug-ins, each in a process of its own: {} of {}…",
+                done,
+                total
+            )),
+            _ if failed > 0 => Some(trn!(
+                failed,
+                "{} plug-in failed when tried and is not offered.",
+                "{} plug-ins failed when tried and are not offered.",
+                failed
+            )),
+            _ => None,
+        };
+        if let Some(status) = status {
+            ui.label(RichText::new(status).color(theme::text_dim()));
+        }
         crate::tabs::hint(
             ui,
-            tr(
-                "The VST 3 effects chosen here are offered as audio plug-ins; VST 2 plug-ins are listed only.",
-            ),
+            tr("The VST effects ticked here (VST 3 and VST 2) are offered as audio plug-ins."),
         );
         let refresh = ui
             .with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
-                let refresh = ui.button(tr("Refresh")).clicked();
+                let refresh = ui
+                    .add_enabled(!found.running, egui::Button::new(tr("Refresh")))
+                    .on_hover_text(tr(
+                        "Look at every plug-in again, each in a process of its own.",
+                    ))
+                    .clicked();
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         crate::widgets::checkbox(
@@ -2244,13 +2340,20 @@ impl PreferencesDialog {
                         ui.label(tr("Generic VST editor"));
                     });
                 });
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::widgets::checkbox(ui, &mut self.draft.prefs.vst_32bit, "")
+                            .on_hover_text(tr(
+                                "Run 32-bit VST plug-ins in BananaV's 32-bit bridge, a process of its own: a crash there costs that process only.",
+                            ));
+                        ui.label(tr("Enable support for 32-bit VST plug-ins"));
+                    });
+                });
                 refresh
             })
             .inner;
         if refresh {
-            let page = &mut self.vst;
-            page.found = None;
-            page.search = Some(vst::Search::start(folders));
+            vst::plugins(&folders, true, Some(ui.ctx()));
         }
     }
 
@@ -2704,7 +2807,11 @@ impl PreferencesDialog {
         ui.spacing_mut().item_spacing.y = 5.0;
         // One column for the lists, the slider and the swatch, as VEGAS's.
         let grouped = [tr("Track:"), tr("Envelope Type:"), tr("Snap Type:")];
-        let loose = [tr("Icon color strength:"), tr("Button Highlight Color:")];
+        let loose = [
+            tr("Icon color strength:"),
+            tr("Interface brightness:"),
+            tr("Button Highlight Color:"),
+        ];
         let column =
             (label_column(ui, 0.0, &grouped) + GROUP_INDENT).max(label_column(ui, 0.0, &loose));
         let page = &mut self.display;
@@ -2783,6 +2890,26 @@ impl PreferencesDialog {
                     egui::Slider::new(&mut p.icon_strength, 0..=100).show_value(false),
                 );
                 ui.label(format!("{} %", p.icon_strength));
+            },
+        );
+        // BananaV's own: the interface type's greys lighter or darker, shown
+        // at once (kept with OK).
+        field_in(
+            ui,
+            column,
+            |ui| {
+                ui.label(tr("Interface brightness:"));
+            },
+            |ui| {
+                let w = (ui.available_width() - 48.0).max(80.0);
+                let r = ui.add_sized(
+                    vec2(w, 18.0),
+                    egui::Slider::new(&mut p.interface_brightness, -40..=40).show_value(false),
+                );
+                if crate::widgets::bar_double_clicked(ui, &r, false) {
+                    p.interface_brightness = 0;
+                }
+                ui.label(format!("{:+} %", p.interface_brightness));
             },
         );
         field_in(
@@ -2899,12 +3026,16 @@ impl PreferencesDialog {
         let count = |k: SurfaceKind| p.control_devices.iter().filter(|d| d.kind == k).count();
         // A Mackie Control and up to four Extenders, five generic ones.
         let mackies = count(SurfaceKind::MackieControl);
-        let can_add = match self.surface_pick {
-            SurfaceKind::MackieControl => mackies <= crate::surface::MAX_EXTENDERS,
-            SurfaceKind::Generic => {
-                count(SurfaceKind::Generic) < crate::generic_surface::MAX_GENERIC
-            }
-        };
+        // No more than Options › Internal's "Number of Control Plug-ins
+        // allowed" in all.
+        let room = p.control_devices.len() < p.max_control_devices as usize;
+        let can_add = room
+            && match self.surface_pick {
+                SurfaceKind::MackieControl => mackies <= crate::surface::MAX_EXTENDERS,
+                SurfaceKind::Generic => {
+                    count(SurfaceKind::Generic) < crate::generic_surface::MAX_GENERIC
+                }
+            };
         ui.horizontal(|ui| {
             ui.label(tr("Available devices:"));
             egui::ComboBox::from_id_salt("pref-surfaces")

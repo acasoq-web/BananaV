@@ -55,6 +55,69 @@ fn check_style(ui: &mut Ui) {
     }
 }
 
+/// A double-click on `resp`, clicks counted in pairs: a click soon after
+/// another near it, unless that one already ended a pair. egui counts a
+/// quick third click as a triple-click, so a second double-click soon after
+/// a first one elsewhere (two envelope points in a row) was lost; here it
+/// is a double-click of its own. Asked again in the same frame (another
+/// widget looking at the same click), the same answer.
+pub(crate) fn double_click(ui: &Ui, resp: &Response) -> bool {
+    if !resp.clicked() {
+        return false;
+    }
+    resp.interact_pointer_pos()
+        .is_some_and(|at| click_pairs(ui, at))
+}
+
+/// [`double_click`] for a click of the main button anywhere (what reads
+/// the mouse itself rather than a widget's response).
+pub(crate) fn double_click_here(ui: &Ui) -> bool {
+    let (clicked, at) = ui.input(|i| {
+        (
+            i.pointer.button_clicked(egui::PointerButton::Primary),
+            i.pointer.interact_pos(),
+        )
+    });
+    clicked && at.is_some_and(|at| click_pairs(ui, at))
+}
+
+/// Notes a click at `at`: whether it ends a pair.
+fn click_pairs(ui: &Ui, at: egui::Pos2) -> bool {
+    let now = ui.input(|i| i.time);
+    let pass = ui.ctx().cumulative_pass_nr();
+    let (delay, near) = ui.ctx().options(|o| {
+        (
+            o.input_options.max_double_click_delay,
+            o.input_options.max_click_dist,
+        )
+    });
+    let id = egui::Id::new("bv-double-click");
+    // The last click: when, where, whether it ended a pair, and in which
+    // frame.
+    let last: Option<(f64, egui::Pos2, bool, u64)> = ui.ctx().data(|d| d.get_temp(id));
+    if let Some((t, _, double, at_pass)) = last
+        && at_pass == pass
+        && t == now
+    {
+        return double;
+    }
+    let double = pairs(last.map(|(t, p, d, _)| (t, p, d)), (now, at), delay, near);
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(id, (now, at, double, pass)));
+    double
+}
+
+/// Whether a click at `now` (time, place) ends a pair with the click before
+/// (time, place, whether it ended one itself).
+fn pairs(
+    before: Option<(f64, egui::Pos2, bool)>,
+    now: (f64, egui::Pos2),
+    delay: f64,
+    near: f32,
+) -> bool {
+    before.is_some_and(|(t, p, ended)| !ended && now.0 - t <= delay && p.distance(now.1) <= near)
+}
+
 /// Whether `slider`'s bar was double-clicked this frame, to put its
 /// default back as VEGAS's sliders do: egui's slider senses drags only, so
 /// its response never says it was clicked. `value_shown`: its number box
@@ -215,7 +278,8 @@ pub fn pane_width(ui: &Ui, id: egui::Id, area: Rect, default: f32, min: f32, roo
     );
     let resp = ui.interact(bar, id.with("splitter"), Sense::drag());
     if resp.hovered() || resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        // A split bar, as VEGAS's.
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::SplitterEw);
     }
     if resp.dragged() {
         w = (w + resp.drag_delta().x).clamp(min, max);
@@ -381,7 +445,8 @@ pub(crate) fn zoom_scrollbar(
         .map(|g| g.part)
         .or_else(|| resp.hover_pos().and_then(|p| part_at(p.x)));
     if matches!(part, Some(BarPart::Start | BarPart::End)) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        // The thumb's ends, as VEGAS's scroll bars': ↔.
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::ResizeEw);
     }
     let painter = ui.painter_at(rect);
     let body = thumb.shrink2(vec2(0.0, 2.0));
@@ -637,7 +702,7 @@ pub(crate) fn grading_wheel(
     if resp.dragged() {
         let on_dot = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
         let mut k = if on_dot { 1.0 / 32.0 } else { 1.0 / 20.0 };
-        if ui.input(|i| i.modifiers.ctrl) {
+        if ui.input(|i| i.modifiers.command) {
             k *= 0.1;
         }
         let d = resp.drag_delta();
@@ -645,7 +710,7 @@ pub(crate) fn grading_wheel(
             to = on_wheel([to[0] + f64::from(d.x) * k, to[1] - f64::from(d.y) * k]);
         }
         if on_dot {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            crate::cursors::system(ui.ctx(), egui::CursorIcon::None);
         }
     }
     if resp.double_clicked() {
@@ -1147,5 +1212,23 @@ mod tests {
             let p = db_to_pos(db, -60.0, 12.0);
             assert!((pos_to_db(p, -60.0, 12.0) - db).abs() < 1e-3);
         }
+    }
+
+    /// Two double-clicks in a row at two spots are two (egui calls the
+    /// fourth click a triple one); slow or far clicks make no pair.
+    #[test]
+    fn clicks_pair_up_two_by_two() {
+        use egui::pos2;
+        let (d, n) = (0.5, 6.0);
+        let a = pos2(10.0, 10.0);
+        let b = pos2(80.0, 10.0);
+        assert!(!pairs(None, (0.0, a), d, n));
+        assert!(pairs(Some((0.0, a, false)), (0.2, a), d, n));
+        // The next click starts a pair of its own, even quickly after.
+        assert!(!pairs(Some((0.2, a, true)), (0.3, b), d, n));
+        assert!(pairs(Some((0.3, b, false)), (0.45, pos2(81.0, 11.0)), d, n));
+        // Too late, too far.
+        assert!(!pairs(Some((0.0, a, false)), (0.6, a), d, n));
+        assert!(!pairs(Some((0.0, a, false)), (0.1, pos2(20.0, 10.0)), d, n));
     }
 }

@@ -86,7 +86,10 @@ impl Dialogs {
                 .resizable(false)
                 .open(&mut self.about)
                 .show(ctx, |ui| {
-                    ui.heading(RichText::new("BananaV 0.1").color(theme::banana()));
+                    ui.heading(
+                        RichText::new(format!("BananaV {}", env!("CARGO_PKG_VERSION")))
+                            .color(theme::banana()),
+                    );
                     ui.label(tr("Video editor written in Rust."));
                     ui.label(tr("Compositing in linear light, 32-bit float."));
                     ui.label(tr("Time in ticks: 254,016,000,000 per second."));
@@ -134,6 +137,7 @@ impl Dialogs {
                             (tr("Mouse wheel"), tr("Zoom the timeline")),
                             (tr("Shift+wheel"), tr("Scroll the timeline")),
                         ] {
+                            let k = crate::i18n::system_keys(k);
                             ui.label(RichText::new(k).monospace().color(theme::banana()));
                             ui.label(d);
                             ui.end_row();

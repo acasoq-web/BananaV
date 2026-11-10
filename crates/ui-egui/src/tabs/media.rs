@@ -281,6 +281,10 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         super::storyboard::ui(ui, app, list);
     } else {
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| list_ui(ui, app));
+        // Nothing dragged goes onto the media: the system's "no".
+        if dragged_here(ui, app, list) {
+            crate::cursors::system(ui.ctx(), egui::CursorIcon::NotAllowed);
+        }
     }
     if panel_h > 0.0 {
         super::media_tags::tags_panel(ui, app, panel);
@@ -700,6 +704,12 @@ struct RowResponse {
     response: Option<egui::Response>,
 }
 
+/// Whether something BananaV drags is over `rect` of this window (files
+/// dragged in from the system have the system's pointer).
+fn dragged_here(ui: &Ui, app: &BananaApp, rect: Rect) -> bool {
+    app.media_drag.is_some() && app.os_drag.is_none() && ui.rect_contains_pointer(rect)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bin_row(
     ui: &mut Ui,
@@ -730,6 +740,11 @@ fn bin_row(
     };
     let pointer = ui.input(|i| i.pointer.latest_pos());
     let under = dragging.is_some() && pointer.is_some_and(|p| rect.contains(p));
+    // Whatever else is dragged over it can't go in: the system's "no",
+    // as VEGAS's Project Media shows.
+    if dragging.is_none() && dragged_here(ui, app, rect) {
+        crate::cursors::system(ui.ctx(), egui::CursorIcon::NotAllowed);
+    }
     let painter = ui.painter();
     if under {
         painter.rect_stroke(

@@ -4,8 +4,8 @@
 //! picture's motion (BananaV's `kBananaVParamPropAnalysis` "Motion", kept
 //! in the hidden M20 data) and the values it was applied with are kept
 //! apart, so changing a setting greys nothing out but turns Apply on with
-//! VEGAS's message until it is applied again. VEGAS's own math being out
-//! of reach, BananaV's: the camera's moves smoothed by Video
+//! VEGAS's message until it is applied again. The math is BananaV's own:
+//! the camera's moves smoothed by Video
 //! Stabilization's Blackman window over 0.2 to 5 seconds as Pan smoothing
 //! goes, each frame's correction held within the zoom Stabilization
 //! amount allows (a quarter of the frame at most), the view zoomed that

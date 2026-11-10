@@ -191,10 +191,14 @@ impl Coverage {
             let ia = fa as usize;
             let cb = b.ceil();
             let ib = cb as usize;
+            // What a piece leaves past the right edge belongs to no pixel
+            // of this row (and must not reach the next row's first).
             if ib <= ia + 1 {
                 let xm = (0.5 * (a + b) - fa) as f32;
                 self.acc[row + ia] += d - d * xm;
-                self.acc[row + ia + 1] += d * xm;
+                if ia + 1 < self.w {
+                    self.acc[row + ia + 1] += d * xm;
+                }
             } else {
                 let s = 1.0 / (b - a);
                 let fx = a - fa;
@@ -213,7 +217,9 @@ impl Coverage {
                     let a2 = a1 + (ib - ia - 3) as f64 * s;
                     self.acc[row + ib - 1] += d * (1.0 - a2 - am) as f32;
                 }
-                self.acc[row + ib] += d * am as f32;
+                if ib < self.w {
+                    self.acc[row + ib] += d * am as f32;
+                }
             }
             x = xnext;
         }
@@ -256,6 +262,25 @@ mod tests {
         assert!((at(1, 1) - 0.25).abs() < 1e-6);
         assert_eq!(at(7, 7), 0.0);
         assert_eq!(at(0, 3), 0.0);
+    }
+
+    #[test]
+    fn a_shape_past_the_right_edge_leaves_the_next_rows_alone() {
+        let mut c = Coverage::new(4, 4);
+        // A square from (1.5, 0.5) to (6.5, 2.5), half of it outside.
+        c.contour(&[
+            ([1.5, 0.5], true),
+            ([6.5, 0.5], true),
+            ([6.5, 2.5], true),
+            ([1.5, 2.5], true),
+        ]);
+        let v = c.finish();
+        let at = |x: usize, y: usize| v[y * 4 + x];
+        assert!((at(3, 1) - 1.0).abs() < 1e-4);
+        assert!((at(1, 1) - 0.5).abs() < 1e-6);
+        assert_eq!(at(0, 1), 0.0);
+        assert_eq!(at(0, 3), 0.0);
+        assert!(at(3, 3) < 1e-6, "{}", at(3, 3));
     }
 
     #[test]

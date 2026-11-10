@@ -20,8 +20,20 @@ use bv_timeline::{Effect, EffectKind};
 use crate::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use crate::i18n::{tr, trc};
 use crate::icons::Icon;
+use crate::ofx_curves::Grab;
 use crate::widgets::icon_button_ex;
 use crate::{menus, theme};
+
+/// The graph's pointer, as VEGAS's plug-ins' curves: a band's circle
+/// dragged (`dragged`: whether it has a gain) moves across and up and down,
+/// or across only (its frequency alone); else the hand over one.
+fn band_grab(dragged: Option<bool>, over: bool) -> Option<Grab> {
+    match dragged {
+        Some(true) => Some(Grab::Free),
+        Some(false) => Some(Grab::Across),
+        None => over.then_some(Grab::Over),
+    }
+}
 
 /// The graph's frequencies.
 const F_LO: f32 = 20.0;
@@ -637,11 +649,18 @@ fn graph(ui: &mut Ui, view: &mut View, s: &mut Settings, rate: f32, id: egui::Id
             None => ui.close(),
         }
     });
-    if let Some(b) = hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        if view.tooltips && view.drag.is_none() {
-            resp.clone().on_hover_text(band_text(b, &s.bands[b]));
-        }
+    let dragged = view
+        .drag
+        .and_then(|(b, _)| s.bands.get(b))
+        .map(|band| band.kind.has_gain());
+    if let Some(g) = band_grab(dragged, hovered.is_some()) {
+        g.show(ui.ctx());
+    }
+    if let Some(b) = hovered
+        && view.tooltips
+        && view.drag.is_none()
+    {
+        resp.clone().on_hover_text(band_text(b, &s.bands[b]));
     }
     paint_graph(ui, rect, &ax, s, rate, view, hovered);
 }
@@ -1485,5 +1504,15 @@ mod tests {
         assert_eq!(read(Unit::Hz, "2,5 kHz", false), Some(2500.0));
         assert_eq!(read(Unit::Hz, "off", true), Some(20.0));
         assert_eq!(read(Unit::Db, "−6 dB", false), Some(-6.0));
+    }
+
+    /// The hand over a band's circle; dragged, the four arrows (frequency
+    /// and gain) or ↔ (a band with no gain: its frequency alone).
+    #[test]
+    fn a_band_s_pointer_says_how_it_moves() {
+        assert_eq!(band_grab(None, true), Some(Grab::Over));
+        assert_eq!(band_grab(None, false), None);
+        assert_eq!(band_grab(Some(true), false), Some(Grab::Free));
+        assert_eq!(band_grab(Some(false), true), Some(Grab::Across));
     }
 }

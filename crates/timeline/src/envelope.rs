@@ -710,7 +710,7 @@ impl Project {
         }
     }
 
-    fn envelope_mut(
+    pub(crate) fn envelope_mut(
         &mut self,
         owner: impl Into<EnvelopeOwner>,
         kind: EnvelopeKind,
@@ -729,7 +729,7 @@ impl Project {
 
     /// The latest time a point of `owner`'s envelopes may take: an event's
     /// length (a track's have none).
-    fn envelope_end(&self, owner: EnvelopeOwner) -> Tick {
+    pub(crate) fn envelope_end(&self, owner: EnvelopeOwner) -> Tick {
         match owner {
             EnvelopeOwner::Track(_) | EnvelopeOwner::Strip(_) | EnvelopeOwner::VideoBus => {
                 Tick(i64::MAX / 4)
@@ -740,19 +740,31 @@ impl Project {
 
     /// The video event's `kind` envelope (velocity, transition progress)
     /// added, or removed when it has one; returns whether it has it now. A
-    /// transition progress envelope needs a transition (a fade-in or a
-    /// crossfade) and runs from 0 to 100 % over it.
+    /// transition progress envelope needs a fade (a fade-in, a crossfade
+    /// or a fade-out) and runs, as VEGAS's, from 0 to 100 % over the fade
+    /// in and from 100 % back to 0 over the fade out, smooth.
     pub fn toggle_event_envelope(&mut self, clip: ClipId, kind: EnvelopeKind) -> Result<bool> {
         let track = self.clip_track(clip).ok_or(EditError::UnknownClip(clip))?;
         if !kind.is_event() || track.kind != TrackKind::Video {
             return Err(EditError::WrongTrackKind);
         }
         let c = self.clip(clip).ok_or(EditError::UnknownClip(clip))?;
-        let (fade_in, _) = track.effective_fades(c, self.auto_crossfade);
+        let (fade_in, fade_out) = track.effective_fades(c, self.auto_crossfade);
+        // Its own fade-out: one an event overlaps is that event's.
+        let fade_out = if track.crossfades(c).1.is_some() && self.auto_crossfade {
+            Tick::ZERO
+        } else {
+            fade_out
+        };
         let has = c.envelope(kind).is_some();
-        if !has && kind == EnvelopeKind::TransitionProgress && fade_in <= Tick::ZERO {
+        if !has
+            && kind == EnvelopeKind::TransitionProgress
+            && fade_in <= Tick::ZERO
+            && fade_out <= Tick::ZERO
+        {
             return Err(EditError::NoTransition);
         }
+        let duration = c.duration;
         let c = self.clip_mut(clip).ok_or(EditError::UnknownClip(clip))?;
         if has {
             c.envelopes.retain(|e| e.kind != kind);
@@ -760,11 +772,21 @@ impl Project {
         }
         let mut env = Envelope::new(kind);
         if kind == EnvelopeKind::TransitionProgress {
-            env.points.push(EnvelopePoint {
-                at: fade_in,
-                value: 1.0,
-                curve: KeyCurve::Linear,
-            });
+            let point = |at: Tick, value: f32| EnvelopePoint {
+                at,
+                value,
+                curve: KeyCurve::Smooth,
+            };
+            env.points.clear();
+            if fade_in > Tick::ZERO {
+                env.points
+                    .extend([point(Tick::ZERO, 0.0), point(fade_in, 1.0)]);
+            }
+            if fade_out > Tick::ZERO {
+                let from = (duration - fade_out).max(fade_in);
+                env.points.retain(|p| p.at < from);
+                env.points.extend([point(from, 1.0), point(duration, 0.0)]);
+            }
         }
         c.envelopes.push(env);
         Ok(true)

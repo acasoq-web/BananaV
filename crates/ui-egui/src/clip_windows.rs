@@ -80,6 +80,15 @@ fn clip_name(app: &BananaApp, id: ClipId) -> String {
 }
 
 impl ClipWindows {
+    /// The Plug-In Chooser's search set to `text`, while it is open
+    /// (screen tests).
+    pub(crate) fn chooser_search_for_review(&mut self, text: &str) -> bool {
+        self.chooser
+            .as_mut()
+            .map(|c| c.search_for_review(text))
+            .is_some()
+    }
+
     /// The effects' presets saved by the user (read once).
     pub(crate) fn presets(&mut self) -> &Presets {
         self.presets.get_or_insert_with(Presets::load)
@@ -243,8 +252,12 @@ impl ClipWindows {
             return;
         };
         let prefs = &app.settings.prefs;
-        let (folders, left_out) = (prefs.vst_folders.clone(), prefs.vst_left_out.clone());
-        let vst = app.vst.effects(&folders, &left_out);
+        let (folders, left_out, off) = (
+            prefs.vst_folders.clone(),
+            prefs.vst_left_out.clone(),
+            prefs.vst_effects_off.clone(),
+        );
+        let vst = app.vst.effects(ctx, &folders, &left_out, &off);
         match c.show(ctx, app, &vst) {
             Choice::Open => self.chooser = Some(c),
             Choice::Cancel => {}

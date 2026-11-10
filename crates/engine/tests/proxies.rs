@@ -68,6 +68,8 @@ fn a_proxy_is_made_found_and_read_by_previews() {
             want: Want::Linear,
             span: None,
             video_levels: false,
+            eight_bit: false,
+            encoded: true,
         };
         match pool.picture(1, &info, asked) {
             Ok(bv_media::Picture::Linear(img)) => img.width,

@@ -378,6 +378,17 @@ fn categories() -> [Category; 4] {
 /// The window's index of the Third Party category (OFX plug-ins).
 const THIRD_PARTY: usize = 3;
 
+/// How long a title's animation plays where it has no event: the length
+/// an event of generated media takes.
+const TITLE_SECONDS: f64 = 5.0;
+
+/// Whether a Titles & Text preset moves (its Animation is one).
+fn animated(fx: &PluginFx) -> bool {
+    fx.params.get("animationName").is_some_and(
+        |p| matches!(&p.value, bv_timeline::PluginValue::Text(t) if !t.is_empty() && t != "_None"),
+    )
+}
+
 /// A preset's picture: the generated frame (noise moving while it plays),
 /// a speaker for a tone, the colors for Custom Color….
 fn paint_preset(
@@ -422,6 +433,13 @@ fn paint_preset(
         (Generator::Noise { .. }, Some(t)) => Tick::from_seconds_f64((t * 4.0).floor() as f64),
         (Generator::Plugin(_), play) if Kind::of(g) == Some(Kind::CreditRoll) => {
             Tick::from_seconds_f64(3.0 + f64::from(play.unwrap_or(0.0)) * 1.5)
+        }
+        // An animated title: halfway through its five seconds, playing
+        // them under the pointer.
+        (Generator::Plugin(fx), play)
+            if Kind::of(g) == Some(Kind::TitlesAndText) && animated(fx) =>
+        {
+            Tick::from_seconds_f64(play.map_or(2.5, |t| f64::from(t) % TITLE_SECONDS))
         }
         _ => Tick::ZERO,
     };

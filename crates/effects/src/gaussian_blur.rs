@@ -1,7 +1,7 @@
 //! Gaussian Blur: VEGAS's. The picture blurred across and up and down, in
 //! the channels picked.
 //!
-//! VEGAS's math: its Gaussian (`recursive_gauss`), the radii each range
+//! As VEGAS's renders measure: the Gaussian (`recursive_gauss`), the radii each range
 //! of the frame's longer side in pixels — the vertical one times how many
 //! times as wide as tall the pixels show —, the picture's edge pixels held
 //! beyond it (none blurs only with both ranges 0); each channel of the

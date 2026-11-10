@@ -573,3 +573,95 @@ fn playing_on_the_held_output() {
         );
     }
 }
+
+/// A crossfade of two events with effects of their own (a border and a
+/// blur), with the plain dissolve and with plug-in transitions: how many
+/// new pictures a second playback shows, against the same without effects.
+/// `BV_TRANSITIONS` picks the transitions (identifiers, comma-separated),
+/// `BV_EFFECTS=1` measures only with the effects, `BV_GPU=off` on the
+/// processor; "single" among the transitions measures one event alone.
+#[test]
+#[ignore = "needs ffmpeg"]
+fn playing_transitions_between_events_with_effects() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bv_timeline::{Effect, PluginFx};
+
+    let fx = |id: &str| PluginFx {
+        id: id.into(),
+        version: [1, 0],
+        name: id.rsplit('.').next().unwrap_or(id).into(),
+        params: Default::default(),
+    };
+    let base = crossfade_project();
+    let ids: Vec<bv_timeline::ClipId> = base.tracks[0].clips.iter().map(|c| c.id).collect();
+    let list = std::env::var("BV_TRANSITIONS")
+        .unwrap_or_else(|_| "org.bananav.Push,org.bananav.CrossEffect".into());
+    let mut transitions: Vec<Option<String>> = vec![None];
+    transitions.extend(list.split(',').map(|s| Some(s.trim().to_string())));
+    let only_effects = std::env::var_os("BV_EFFECTS").is_some();
+    // One engine for all, its kernels compiled first (a new one compiles
+    // them again in the background: the first seconds of the slowest to
+    // compile would be measured).
+    let mut engine = bv_engine::Engine::new(Arc::new(|| {}));
+    let off = std::env::var("BV_GPU").is_ok_and(|v| v == "off");
+    engine.set_gpu(if off {
+        bv_engine::GpuChoice::Off
+    } else {
+        bv_engine::GpuChoice::Auto
+    });
+    let start = Instant::now();
+    while matches!(engine.gpu_status(), bv_engine::GpuStatus::Starting)
+        && start.elapsed() < Duration::from_secs(30)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !off {
+        std::thread::sleep(Duration::from_secs(15));
+    }
+    for effects in [false, true].into_iter().filter(|&e| e || !only_effects) {
+        for transition in &transitions {
+            let mut p = base.clone();
+            for &id in &ids {
+                let c = p.clip_mut(id).unwrap();
+                if effects {
+                    c.effects = vec![
+                        Effect::plugin(fx("org.bananav.Border")),
+                        Effect::plugin(fx("org.bananav.GaussianBlur")),
+                    ];
+                }
+            }
+            let single = transition.as_deref() == Some("single");
+            if let Some(t) = transition.as_deref().filter(|_| !single) {
+                p.clip_mut(ids[1]).unwrap().transition_fx = Some(Box::new(fx(t)));
+            }
+            engine.set_project(&p);
+            // Warmed up a second before the crossfade, then measured in it.
+            let from = Tick::from_seconds(if single { 5 } else { 21 });
+            engine.play(from, bv_engine::PlayOptions::default());
+            let mut shown: Vec<Tick> = Vec::new();
+            let start = Instant::now();
+            let (warm, seconds) = (1.0, 5.0);
+            while start.elapsed().as_secs_f64() < warm + seconds {
+                if let Some(t) = engine.position() {
+                    engine.request_preview(t, 1280, 720);
+                }
+                if let Some(f) = engine.preview_frame()
+                    && start.elapsed().as_secs_f64() >= warm
+                    && shown.last() != Some(&f.time)
+                {
+                    shown.push(f.time);
+                }
+                std::thread::sleep(Duration::from_millis(16));
+            }
+            engine.stop();
+            println!(
+                "effects {effects:5} transition {:28}: {:.1} new pictures a second ({:?})",
+                transition.as_deref().unwrap_or("dissolve"),
+                shown.len() as f64 / seconds,
+                engine.gpu_status(),
+            );
+        }
+    }
+}

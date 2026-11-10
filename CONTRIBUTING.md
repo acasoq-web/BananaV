@@ -62,6 +62,42 @@ Vulkan or OpenGL.
 `RUSTFLAGS="--cfg bv_no_ffmpeg"` builds without FFmpeg (no media on Linux),
 to check the code on a computer that lacks its development files.
 
+### macOS
+
+macOS 11 or later, on Apple's chips or Intel. BananaV reads and writes
+media through FFmpeg's libraries (decoding and encoding H.264 and HEVC on
+the Mac's media engine, VideoToolbox), plays sound through Core Audio and
+draws with Metal.
+
+1. Install Xcode's command-line tools (`xcode-select --install`) and, with
+   Homebrew, pkg-config and FFmpeg's development files:
+
+   ```bash
+   brew install pkgconf ffmpeg
+   ```
+
+   Or build the FFmpeg BananaV's package carries (under the LGPL, with
+   VideoToolbox, dav1d, LAME and SVT-AV1), which also needs `brew install
+   nasm meson ninja cmake`:
+
+   ```bash
+   sh packaging/macos/build_ffmpeg.sh "$PWD/ffmpeg-lgpl"
+   export PKG_CONFIG_PATH="$PWD/ffmpeg-lgpl/lib/pkgconfig"
+   ```
+2. Build and run:
+
+   ```bash
+   cargo run --release -p bananav
+   ```
+3. The app and its disk image, as the package is made
+   (`.github/workflows/package.yml`): `python3 packaging/macos/make_app.py`
+   puts the program, its libraries, Info.plist and the icon in
+   `BananaV.app`, signs it and makes the `.dmg`.
+
+From Windows or Linux, `sh tools/mac_check.sh` runs clippy for macOS
+(`MAC_TARGET=x86_64-apple-darwin` for Intel Macs): nothing is linked there,
+the Mac's linker and libraries being only on a Mac.
+
 ## Before every pull request: `cargo xtask ci`
 
 ```bash
@@ -180,7 +216,7 @@ Forgot to sign off? `git commit --amend -s` fixes the last commit, and
    it may be known already.
 2. Open a **Bug report** with:
    - BananaV's version (the package's name, or the commit you built);
-   - your system (Windows or Linux and its version, x64 or ARM64) and
+   - your system (Windows, macOS or Linux and its version, x64 or ARM64) and
      graphics card;
    - the steps that make it happen, what you expected and what happened;
    - when you can, a small project file and media that show it. Share only

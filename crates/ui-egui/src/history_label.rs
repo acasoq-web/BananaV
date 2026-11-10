@@ -108,6 +108,12 @@ pub fn describe(before: &Project, after: &Project) -> &'static str {
             return tr("Track FX");
         }
         if o != t {
+            // A video track's Level slider alone, as VEGAS names it.
+            let mut level_only = t.clone();
+            level_only.level = o.level;
+            if t.kind == bv_timeline::TrackKind::Video && level_only == *o {
+                return tr("Track Overlay Level Change");
+            }
             return tr("Track Properties");
         }
     }
@@ -168,5 +174,12 @@ mod tests {
         let before = p.clone();
         p.delete_clips(&[id], false).unwrap();
         assert_eq!(describe(&before, &p), "Delete Event");
+        // A video track's Level slider, as VEGAS names it.
+        let before = p.clone();
+        p.tracks[0].level = 0.5;
+        assert_eq!(describe(&before, &p), "Track Overlay Level Change");
+        let before = p.clone();
+        p.tracks[0].muted = !p.tracks[0].muted;
+        assert_eq!(describe(&before, &p), "Track Properties");
     }
 }

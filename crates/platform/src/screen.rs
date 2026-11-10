@@ -271,7 +271,235 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: Core Graphics' window list and its pictures of the screen and
+/// of windows (macOS asks the user once to let BananaV record the screen;
+/// until then other programs' windows come out as the desktop). The
+/// pointer is not drawn in.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod imp {
+    use std::ffi::c_void;
+
+    use bv_apple::cf::{self, Owned, Ref};
+
+    use super::{AppWindow, Grab};
+    use crate::mac::{CgPoint, CgRect as Rect, CgSize};
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            origin: CgPoint { x, y },
+            size: CgSize {
+                width: w,
+                height: h,
+            },
+        }
+    }
+
+    /// On screen only, without the desktop's own windows.
+    const ON_SCREEN: u32 = 1 << 0;
+    const EXCLUDE_DESKTOP: u32 = 1 << 4;
+    const INCLUDING_WINDOW: u32 = 1 << 3;
+    const IGNORE_FRAMING: u32 = 1 << 0;
+    const BEST_RESOLUTION: u32 = 1 << 3;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> Ref;
+        fn CGWindowListCreateImage(
+            bounds: Rect,
+            option: u32,
+            window: u32,
+            image: u32,
+        ) -> *mut c_void;
+        fn CGRectMakeWithDictionaryRepresentation(dict: Ref, rect: *mut Rect) -> bool;
+        fn CGImageGetWidth(image: *mut c_void) -> usize;
+        fn CGImageGetHeight(image: *mut c_void) -> usize;
+        fn CGImageGetBytesPerRow(image: *mut c_void) -> usize;
+        fn CGImageGetBitsPerPixel(image: *mut c_void) -> usize;
+        fn CGImageGetBitmapInfo(image: *mut c_void) -> u32;
+        fn CGImageGetDataProvider(image: *mut c_void) -> *mut c_void;
+        fn CGDataProviderCopyData(provider: *mut c_void) -> Ref;
+        fn CGImageRelease(image: *mut c_void);
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGDisplayBounds(display: u32) -> Rect;
+        static kCGWindowNumber: Ref;
+        static kCGWindowName: Ref;
+        static kCGWindowOwnerName: Ref;
+        static kCGWindowOwnerPID: Ref;
+        static kCGWindowLayer: Ref;
+        static kCGWindowBounds: Ref;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDataGetBytePtr(data: Ref) -> *const u8;
+        fn CFDataGetLength(data: Ref) -> isize;
+    }
+
+    /// The main display's scale (pixels a point).
+    fn scale() -> f64 {
+        // SAFETY: plain queries.
+        unsafe {
+            let id = CGMainDisplayID();
+            let points = CGDisplayBounds(id).size.width.max(1.0);
+            (CGDisplayPixelsWide(id) as f64 / points).max(1.0)
+        }
+    }
+
+    pub fn app_windows() -> Vec<AppWindow> {
+        let me = std::process::id() as i64;
+        let k = scale();
+        // SAFETY: the window list (owned); each entry's values borrowed
+        // from it while it lives.
+        unsafe {
+            let Some(list) =
+                Owned::take(CGWindowListCopyWindowInfo(ON_SCREEN | EXCLUDE_DESKTOP, 0))
+            else {
+                return Vec::new();
+            };
+            cf::items(list.get())
+                .into_iter()
+                .filter_map(|w| {
+                    // Ordinary windows (layer 0) of other programs.
+                    if cf::to_i64(cf::get_by(w, kCGWindowLayer)) != Some(0)
+                        || cf::to_i64(cf::get_by(w, kCGWindowOwnerPID)) == Some(me)
+                    {
+                        return None;
+                    }
+                    let id = cf::to_i64(cf::get_by(w, kCGWindowNumber))?;
+                    let owner =
+                        cf::to_string(cf::get_by(w, kCGWindowOwnerName)).unwrap_or_default();
+                    let name = cf::to_string(cf::get_by(w, kCGWindowName)).unwrap_or_default();
+                    let title = match (owner.is_empty(), name.is_empty()) {
+                        (_, true) => owner,
+                        (true, false) => name,
+                        (false, false) => format!("{name} - {owner}"),
+                    };
+                    let mut r = Rect::default();
+                    if !CGRectMakeWithDictionaryRepresentation(
+                        cf::get_by(w, kCGWindowBounds),
+                        &mut r,
+                    ) || title.is_empty()
+                        || r.size.width < 2.0
+                        || r.size.height < 2.0
+                    {
+                        return None;
+                    }
+                    Some(AppWindow {
+                        id: id as isize,
+                        title,
+                        width: (r.size.width * k).round() as u32,
+                        height: (r.size.height * k).round() as u32,
+                    })
+                })
+                .collect()
+        }
+    }
+
+    /// The pixels of `image` as opaque BGRA, `w` × `h` (cut or filled with
+    /// black where the picture is smaller).
+    fn pixels(image: *mut c_void, w: usize, h: usize) -> Option<Grab> {
+        // SAFETY: a live image; its data copied (owned) and read within its
+        // length.
+        unsafe {
+            let (iw, ih) = (CGImageGetWidth(image), CGImageGetHeight(image));
+            let row = CGImageGetBytesPerRow(image);
+            if CGImageGetBitsPerPixel(image) != 32 || iw == 0 || ih == 0 {
+                return None;
+            }
+            let data = Owned::take(CGDataProviderCopyData(CGImageGetDataProvider(image)))?;
+            let bytes = std::slice::from_raw_parts(
+                CFDataGetBytePtr(data.get()),
+                CFDataGetLength(data.get()).max(0) as usize,
+            );
+            // The screen's pictures are BGRA (32-bit little-endian, alpha
+            // first): as they are; others, RGBA, swapped.
+            let little = CGImageGetBitmapInfo(image) & 0x7000 == 0x2000;
+            let mut bgra = vec![0u8; w * h * 4];
+            for y in 0..h.min(ih) {
+                let src = bytes.get(y * row..y * row + iw.min(w) * 4)?;
+                let dst = &mut bgra[y * w * 4..y * w * 4 + iw.min(w) * 4];
+                for (d, s) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<4>().0)
+                {
+                    if little {
+                        d.copy_from_slice(&[s[0], s[1], s[2], 255]);
+                    } else {
+                        d.copy_from_slice(&[s[2], s[1], s[0], 255]);
+                    }
+                }
+            }
+            for px in bgra.as_chunks_mut::<4>().0 {
+                px[3] = 255;
+            }
+            Some(Grab {
+                width: w as u32,
+                height: h as u32,
+                bgra,
+            })
+        }
+    }
+
+    pub fn grab_area(x: i32, y: i32, w: u32, h: u32) -> Option<Grab> {
+        // The display's own scale (each one's pixels are its points times
+        // it: `crate::displays`): the display the area begins at, else one
+        // holding its corner.
+        let all = crate::displays();
+        let k = all
+            .iter()
+            .find(|d| d.x == x && d.y == y)
+            .or_else(|| {
+                all.iter().find(|d| {
+                    x >= d.x && y >= d.y && x < d.x + d.width as i32 && y < d.y + d.height as i32
+                })
+            })
+            .map_or_else(scale, |d| f64::from(d.scale));
+        let bounds = rect(
+            f64::from(x) / k,
+            f64::from(y) / k,
+            f64::from(w) / k,
+            f64::from(h) / k,
+        );
+        // SAFETY: a picture of the screen (owned, released here).
+        unsafe {
+            let image = CGWindowListCreateImage(bounds, ON_SCREEN, 0, BEST_RESOLUTION);
+            if image.is_null() {
+                return None;
+            }
+            let g = pixels(image, w as usize, h as usize);
+            CGImageRelease(image);
+            g
+        }
+    }
+
+    pub fn grab_window(id: isize) -> Option<Grab> {
+        let id = u32::try_from(id).ok()?;
+        // A null rectangle: the window's own bounds.
+        let bounds = rect(f64::INFINITY, f64::INFINITY, 0.0, 0.0);
+        // SAFETY: a picture of one window (owned, released here).
+        unsafe {
+            let image = CGWindowListCreateImage(
+                bounds,
+                INCLUDING_WINDOW,
+                id,
+                IGNORE_FRAMING | BEST_RESOLUTION,
+            );
+            if image.is_null() {
+                return None;
+            }
+            let (w, h) = (CGImageGetWidth(image), CGImageGetHeight(image));
+            let g = (w > 0 && h > 0).then(|| pixels(image, w, h)).flatten();
+            CGImageRelease(image);
+            g
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::{AppWindow, Grab};
 

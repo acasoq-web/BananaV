@@ -93,8 +93,9 @@ static METRONOME: Mutex<Option<Arc<Clicks>>> = Mutex::new(None);
 static DOWNMIX: AtomicU32 = AtomicU32::new(0);
 static DIM: AtomicBool = AtomicBool::new(false);
 
-/// Dim Output's cut: 20 dB.
-const DIM_GAIN: f32 = 0.1;
+/// Dim Output's cut, as a gain (its bits): 20 dB unless Options › Internal's
+/// "Dim Attenuation" says otherwise.
+static DIM_GAIN: AtomicU32 = AtomicU32::new(0x3DCC_CCCD);
 
 /// File › Real-Time Render: each block playback mixes — the program,
 /// before the metronome's clicks and the Master Bus's monitoring
@@ -171,6 +172,16 @@ pub(crate) fn set_dim(on: bool) {
 
 pub(crate) fn dim() -> bool {
     DIM.load(Ordering::Relaxed)
+}
+
+/// Dim Output cuts `db` decibels.
+pub(crate) fn set_dim_db(db: f32) {
+    let gain = 10f32.powf(-db.max(0.0) / 20.0);
+    DIM_GAIN.store(gain.to_bits(), Ordering::Relaxed);
+}
+
+fn dim_gain() -> f32 {
+    f32::from_bits(DIM_GAIN.load(Ordering::Relaxed))
 }
 
 /// Sets the buffering: `playback` ahead of the device, and `track` more with
@@ -769,9 +780,10 @@ fn mix_loop(
         // The Master Bus's monitoring switches.
         bv_mixer::downmix(&mut buf.channels, p.settings.channels, downmix());
         if dim() {
+            let gain = dim_gain();
             for ch in &mut buf.channels {
                 for s in ch.iter_mut() {
-                    *s *= DIM_GAIN;
+                    *s *= gain;
                 }
             }
         }

@@ -25,13 +25,40 @@
 //!    lacks and the entries no text uses any more. Once a language is
 //!    complete, mark it `complete: true`: the tests then fail when a text
 //!    is added without its translation.
+//!
+//! Brazilian Portuguese is complete. Simplified Chinese, Russian, Spanish
+//! (Spain), German, Japanese, French, Polish and Korean are partial, and
+//! since 2026-11-10 Turkish, Traditional Chinese, Spanish (Latin America),
+//! Thai, Ukrainian, Italian, Czech, Hungarian, Portuguese (Portugal) and
+//! Swedish too: the texts people need most to find their way (menus, the
+//! main windows, the timeline, the render dialog); Preferences marks them
+//! so, and they are not kept up with every new text. Their Asian and Thai
+//! letters come from the computer's fonts (`interface_fonts`).
 
 use std::collections::HashMap;
 use std::fmt::{Display, Write as _};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod cs;
+mod de;
+mod es_419;
+mod es_es;
+mod fr;
+mod hu;
+mod it;
+mod ja;
+mod ko;
+mod pl;
 mod pt_br;
+mod pt_pt;
+mod ru;
+mod sv;
+mod th;
+mod tr_tr;
+mod uk;
+mod zh_cn;
+mod zh_tw;
 
 #[cfg(test)]
 mod coverage;
@@ -123,6 +150,26 @@ languages! {
     #[default]
     English => ENGLISH,
     PortugueseBrazil => pt_br::LOCALE,
+    // Partial: the essentials (menus, the main windows, the timeline, the
+    // render dialog); the rest shows in English.
+    ChineseSimplified => zh_cn::LOCALE,
+    Russian => ru::LOCALE,
+    SpanishSpain => es_es::LOCALE,
+    German => de::LOCALE,
+    Japanese => ja::LOCALE,
+    French => fr::LOCALE,
+    Polish => pl::LOCALE,
+    Korean => ko::LOCALE,
+    Turkish => tr_tr::LOCALE,
+    ChineseTraditional => zh_tw::LOCALE,
+    SpanishLatinAmerica => es_419::LOCALE,
+    Thai => th::LOCALE,
+    Ukrainian => uk::LOCALE,
+    Italian => it::LOCALE,
+    Czech => cs::LOCALE,
+    Hungarian => hu::LOCALE,
+    PortuguesePortugal => pt_pt::LOCALE,
+    Swedish => sv::LOCALE,
 }
 
 impl Language {
@@ -152,6 +199,12 @@ impl Language {
     /// Separator of thousands in whole numbers ("48,000" / "48.000").
     pub fn thousands_separator(self) -> char {
         self.locale().thousands_separator
+    }
+
+    /// Whether only part of the interface is translated (the rest shows in
+    /// English).
+    pub fn partial(self) -> bool {
+        !self.locale().complete
     }
 
     fn index(self) -> usize {
@@ -220,7 +273,60 @@ pub fn set_language(lang: Language) {
 
 /// `text` (English) in the interface language.
 pub fn tr(text: &str) -> &str {
-    translate(language(), text)
+    system_keys(translate(language(), text))
+}
+
+/// `text` with the keys named as this system names them: on macOS Cmd for
+/// Ctrl (BananaV's Ctrl is the Command key there) and Option for Alt
+/// ("Ctrl+drag: fine" reads "Cmd+drag: fine"); elsewhere as it is.
+pub fn system_keys(text: &str) -> &str {
+    if !cfg!(target_os = "macos") || !(text.contains("Ctrl") || text.contains("Alt")) {
+        return text;
+    }
+    static MAC: std::sync::Mutex<Option<HashMap<String, &'static str>>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut known) = MAC.lock() else {
+        return text;
+    };
+    let known = known.get_or_insert_with(HashMap::new);
+    if let Some(t) = known.get(text) {
+        return t;
+    }
+    // The catalog's texts are few: each one changed is kept for good.
+    let changed: &'static str = Box::leak(mac_key_names(text).into_boxed_str());
+    known.insert(text.to_string(), changed);
+    changed
+}
+
+/// The Mac's names of the keys in `text`: the words "Ctrl" and "Alt" (not
+/// within other words) become "Cmd" and "Option".
+pub fn mac_key_names(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    let mut before: Option<char> = None;
+    while !rest.is_empty() {
+        let word = [("Ctrl", "Cmd"), ("Alt", "Option")]
+            .into_iter()
+            .find(|(w, _)| {
+                rest.starts_with(w)
+                    && before.is_none_or(|c| !c.is_alphanumeric())
+                    && rest[w.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_alphanumeric())
+            });
+        if let Some((w, mac)) = word {
+            out.push_str(mac);
+            rest = &rest[w.len()..];
+            before = w.chars().last();
+            continue;
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        out.push(c);
+        before = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// `text` in `lang`; English when the catalog does not have it.
@@ -551,5 +657,26 @@ mod tests {
     fn templates_follow_the_catalog() {
         let pt = translate(Language::PortugueseBrazil, "Saved to {}");
         assert_eq!(fill(pt, &[&"x.srt"]), "Salvo em x.srt");
+    }
+}
+
+#[cfg(test)]
+mod key_name_tests {
+    use super::mac_key_names;
+
+    #[test]
+    fn the_mac_names_its_keys_its_own_way() {
+        assert_eq!(
+            mac_key_names("Ctrl+drag: fine; Alt+D, A"),
+            "Cmd+drag: fine; Option+D, A"
+        );
+        assert_eq!(
+            mac_key_names("(Ctrl: finer) Shift+Alt: round"),
+            "(Cmd: finer) Shift+Option: round"
+        );
+        // Words that only begin so stay.
+        assert_eq!(mac_key_names("Altura e Alternate"), "Altura e Alternate");
+        assert_eq!(mac_key_names("Ctrls"), "Ctrls");
+        assert_eq!(mac_key_names("Ctrl"), "Cmd");
     }
 }

@@ -57,6 +57,49 @@ pub fn pixels_per_point(egui_ctx: &egui::Context, window: &Window) -> f32 {
     egui_zoom_factor * native_pixels_per_point
 }
 
+// BananaV: bitmap cursors shared by all of the event loop's windows.
+thread_local! {
+    /// The cursors made from bitmaps, by their bitmap's address (the
+    /// application keeps each bitmap for as long as it runs).
+    static CUSTOM_CURSORS: std::cell::RefCell<std::collections::HashMap<usize, CustomCursor>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Bitmaps asked for by a window without the event loop at hand.
+    static PENDING_CURSORS: std::cell::RefCell<Vec<egui::CustomCursorImage>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `image` made a cursor with `event_loop`, and kept for every window.
+fn make_cursor(
+    event_loop: &ActiveEventLoop,
+    image: &egui::CustomCursorImage,
+) -> Result<CustomCursor, winit::window::BadImage> {
+    let key = std::sync::Arc::as_ptr(&image.rgba).cast::<u8>() as usize;
+    let source = winit::window::CustomCursor::from_rgba(
+        image.rgba.to_vec(),
+        image.size[0],
+        image.size[1],
+        image.hotspot[0],
+        image.hotspot[1],
+    )?;
+    let cursor = event_loop.create_custom_cursor(source);
+    CUSTOM_CURSORS.with(|m| m.borrow_mut().insert(key, cursor.clone()));
+    Ok(cursor)
+}
+
+/// The bitmaps windows without the event loop asked for, made cursors.
+fn make_pending_cursors(event_loop: &ActiveEventLoop) {
+    let pending = PENDING_CURSORS.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for image in pending {
+        let key = std::sync::Arc::as_ptr(&image.rgba).cast::<u8>() as usize;
+        if CUSTOM_CURSORS.with(|m| m.borrow().contains_key(&key)) {
+            continue;
+        }
+        if let Err(err) = make_cursor(event_loop, &image) {
+            log::warn!("egui-winit: invalid cursor bitmap: {err:?}");
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 
 #[must_use]
@@ -1235,54 +1278,59 @@ impl State {
         // have an event loop to register it with. Otherwise the bitmap is
         // dropped and we fall through to the icon path — this is the
         // documented fallback for integrations that didn't opt in.
-        if let (Some(image), Some(event_loop)) = (cursor_image, event_loop) {
+        // BananaV: cursors made from bitmaps are kept for every window of
+        // the event loop (by their bitmap's address), and one asked for
+        // where there is no event loop (an immediate viewport) is made at
+        // the next frame that has one; that window shows the icon until
+        // then.
+        if let Some(event_loop) = event_loop {
+            make_pending_cursors(event_loop);
+        }
+        if let Some(image) = cursor_image {
             let key = std::sync::Arc::as_ptr(&image.rgba).cast::<u8>() as usize;
-            let cached = self
-                .current_custom_cursor
-                .as_ref()
-                .filter(|(k, _)| *k == key)
-                .map(|(_, c)| c.clone());
-
-            let custom = match cached {
-                Some(c) => c,
-                None => match winit::window::CustomCursor::from_rgba(
-                    image.rgba.to_vec(),
-                    image.size[0],
-                    image.size[1],
-                    image.hotspot[0],
-                    image.hotspot[1],
-                ) {
-                    Ok(source) => {
-                        let c = event_loop.create_custom_cursor(source);
-                        self.current_custom_cursor = Some((key, c.clone()));
-                        c
-                    }
+            if let Some((current, _)) = &self.current_custom_cursor
+                && *current == key
+            {
+                return;
+            }
+            let made = CUSTOM_CURSORS.with(|m| m.borrow().get(&key).cloned());
+            let custom = match (made, event_loop) {
+                (Some(c), _) => Some(c),
+                (None, Some(event_loop)) => match make_cursor(event_loop, image) {
+                    Ok(c) => Some(c),
                     Err(err) => {
                         log::warn!(
                             "egui-winit: invalid cursor bitmap, falling back to cursor_icon: {err:?}"
                         );
-                        self.current_custom_cursor = None;
-                        self.set_cursor_icon_inner(window, cursor_icon);
-                        return;
+                        None
                     }
                 },
+                (None, None) => {
+                    PENDING_CURSORS.with(|p| p.borrow_mut().push(image.clone()));
+                    None
+                }
             };
-
-            window.set_cursor_visible(true);
-            window.set_cursor(custom);
-            // Resync `current_cursor_icon` so the next icon-only path
-            // notices a real change rather than dedupe-skipping it.
-            self.current_cursor_icon = None;
-            return;
+            if let Some(custom) = custom {
+                window.set_cursor_visible(true);
+                window.set_cursor(custom.clone());
+                self.current_custom_cursor = Some((key, custom));
+                // Resync `current_cursor_icon` so the next icon-only path
+                // notices a real change rather than dedupe-skipping it.
+                self.current_cursor_icon = None;
+                return;
+            }
         }
 
-        self.current_custom_cursor = None;
         self.set_cursor_icon_inner(window, cursor_icon);
     }
 
     /// Icon-only path, factored out so `apply_cursor` can fall back to it
     /// when the bitmap path bails. Preserves the original dedupe.
     fn set_cursor_icon_inner(&mut self, window: &Window, cursor_icon: egui::CursorIcon) {
+        // BananaV: leaving a bitmap cursor sets the icon again.
+        if self.current_custom_cursor.take().is_some() {
+            self.current_cursor_icon = None;
+        }
         if self.current_cursor_icon == Some(cursor_icon) {
             // Prevent flickering near frame boundary when Windows OS tries to control cursor icon for window resizing.
             // On other platforms: just early-out to save CPU.

@@ -3,7 +3,11 @@
 //! window's buttons at the right. The system's title bar is off (`lib.rs`'
 //! `run`), so this bar moves the window when dragged, maximizes or
 //! restores it when double-clicked and has the window's menu on a right
-//! click; `resize_edges` sizes the window from its edges.
+//! click; `resize_edges` sizes the window from its edges. On macOS the
+//! system's window buttons (close, minimize, zoom) stay at the bar's left,
+//! as Mac programs have them, over BananaV's bar (`lib.rs`' `run`: the
+//! content under a clear title bar); the system sizes the window and has
+//! no window menu.
 
 use crate::app::BananaApp;
 use crate::egui::{
@@ -19,6 +23,10 @@ pub(crate) const HEIGHT: f32 = 31.0;
 const BUTTON_W: f32 = 47.0;
 /// How far in from the window's edges the pointer sizes it.
 const EDGE: f32 = 5.0;
+/// The room the Mac's window buttons take at the bar's left.
+const MAC_BUTTONS: f32 = 78.0;
+/// The system's own window buttons and frame (macOS).
+const SYSTEM_FRAME: bool = cfg!(target_os = "macos");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Button {
@@ -40,19 +48,36 @@ pub(crate) fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     if resp.double_clicked() {
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
-    resp.context_menu(|ui| window_menu(ui, maximized));
-
-    // The program's icon, where VEGAS has its own.
-    let icon = Rect::from_min_size(
-        pos2(bar.left() + 5.0, bar.center().y - 10.0),
-        vec2(20.0, 20.0),
-    );
-    if let Some(texture) = program_icon(&ctx) {
-        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        ui.painter().image(texture.id(), icon, uv, Color32::WHITE);
+    if !SYSTEM_FRAME {
+        resp.context_menu(|ui| window_menu(ui, maximized));
     }
 
-    let buttons_left = bar.right() - 3.0 * BUTTON_W;
+    // The program's icon, where VEGAS has its own (on a Mac the window's
+    // buttons are there; in full screen they hide).
+    let icon = if SYSTEM_FRAME {
+        let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let room = if full { 4.0 } else { MAC_BUTTONS };
+        Rect::from_min_size(
+            pos2(bar.left() + room - 9.0, bar.center().y),
+            vec2(0.0, 0.0),
+        )
+    } else {
+        let icon = Rect::from_min_size(
+            pos2(bar.left() + 5.0, bar.center().y - 10.0),
+            vec2(20.0, 20.0),
+        );
+        if let Some(texture) = program_icon(&ctx) {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            ui.painter().image(texture.id(), icon, uv, Color32::WHITE);
+        }
+        icon
+    };
+
+    let buttons_left = if SYSTEM_FRAME {
+        bar.right()
+    } else {
+        bar.right() - 3.0 * BUTTON_W
+    };
     let row = ui.spacing().interact_size.y;
     let menus = Rect::from_min_max(
         pos2(icon.right() + 9.0, bar.center().y - row / 2.0),
@@ -86,10 +111,12 @@ pub(crate) fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         );
     }
 
-    for (i, button) in [Button::Minimize, Button::Maximize, Button::Close]
-        .into_iter()
-        .enumerate()
-    {
+    let buttons: &[Button] = if SYSTEM_FRAME {
+        &[]
+    } else {
+        &[Button::Minimize, Button::Maximize, Button::Close]
+    };
+    for (i, &button) in buttons.iter().enumerate() {
         let r = Rect::from_min_max(
             pos2(buttons_left + i as f32 * BUTTON_W, bar.top()),
             pos2(buttons_left + (i + 1) as f32 * BUTTON_W, bar.bottom()),
@@ -223,6 +250,9 @@ fn program_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 /// which would, is off.
 pub(crate) fn resize_edges(ui: &egui::Ui, window: Rect) {
     use egui::viewport::ResizeDirection as Dir;
+    if SYSTEM_FRAME {
+        return;
+    }
     let ctx = ui.ctx();
     let framed = ctx.input(|i| {
         let v = i.viewport();
@@ -279,7 +309,7 @@ pub(crate) fn resize_edges(ui: &egui::Ui, window: Rect) {
         let zone = Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
         let resp = ui.interact(zone, egui::Id::new(("window-edge", i)), Sense::drag());
         if resp.hovered() || resp.dragged() {
-            ctx.set_cursor_icon(cursor);
+            crate::cursors::system(ctx, cursor);
         }
         if resp.drag_started_by(egui::PointerButton::Primary) {
             ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));

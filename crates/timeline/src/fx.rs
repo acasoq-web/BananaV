@@ -1171,10 +1171,12 @@ impl Effect {
                 ..(**p).clone()
             }),
             (_, Some(v)) => Effect::vst(VstFx {
+                format: v.format,
                 path: v.path.clone(),
                 class_id: v.class_id.clone(),
                 name: v.name.clone(),
                 vendor: v.vendor.clone(),
+                wanted: v.wanted,
                 ..VstFx::default()
             }),
             _ => Effect::new(self.kind),
@@ -1288,14 +1290,34 @@ impl Transition {
     }
 }
 
-/// A VST 3 plug-in's effect: which (its module — a bundle or a library —
-/// and its class), its name and maker when applied (shown while it is
-/// missing), its parameters' values (normalized, 0–1, by identifier) and
-/// its states as the plug-in wrote them (the component's, the
-/// controller's own). The states hold the parameters too: the values are
-/// what the processing follows while the states stay the same.
+/// Which kind of VST plug-in an effect is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VstFormat {
+    #[default]
+    Vst3,
+    /// A VST 2 plug-in (BananaV's own compatibility: `bv-vst2`), its class
+    /// the number it is known by (eight hexadecimal digits; a shell's
+    /// plug-in's own after a colon), its parameters by index.
+    Vst2,
+}
+
+impl VstFormat {
+    pub fn is_vst3(&self) -> bool {
+        *self == VstFormat::Vst3
+    }
+}
+
+/// A VST plug-in's effect (VST 3, or VST 2): which (its module — a bundle
+/// or a library — and its class), its name and maker when applied (shown
+/// while it is missing), its parameters' values (normalized, 0–1, by
+/// identifier) and its states as the plug-in wrote them (the component's,
+/// the controller's own). The states hold the parameters too: the values
+/// are what the processing follows while the states stay the same.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VstFx {
+    /// VST 3 (written as nothing) or VST 2.
+    #[serde(default, skip_serializing_if = "VstFormat::is_vst3")]
+    pub format: VstFormat,
     pub path: std::path::PathBuf,
     /// The class's identifier (32 hexadecimal digits); empty for the
     /// module's first effect.
@@ -1323,6 +1345,11 @@ pub struct VstFx {
     /// Automation's envelopes are named after them).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub param_names: std::collections::BTreeMap<u32, String>,
+    /// Read from another editor's project, its plug-in not found yet
+    /// among those installed: what that editor knows it by (BananaV looks
+    /// for it among the plug-ins it finds, and fills its path and class).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wanted: Option<crate::vst_id::VstWanted>,
 }
 
 /// A plug-in's effect (OpenFX): which plug-in, and the values its
@@ -1475,6 +1502,7 @@ impl PluginFx {
             ("org.bananav.TinyPlanet", [2, 0]),
             ("org.bananav.RadialPixelate", [2, 0]),
             ("org.bananav.Checkerboard", [2, 0]),
+            ("org.bananav.ColorGradient", [2, 0]),
             ("org.bananav.TestPattern", [2, 0]),
             ("org.bananav.ChromaKeyer", [2, 0]),
             ("org.bananav.BumpMap", [2, 0]),
@@ -1537,6 +1565,282 @@ impl PluginFx {
                 self.params.clear();
                 self.version = version;
             }
+        }
+        // Credit Roll took VEGAS's settings in 2.0: sizes in points for a
+        // frame 480 lines tall (they were for 1080), the room above and
+        // below lines a part of the frame's height (it was ems), VEGAS's
+        // sixteen ways in and out, its four displays and the dual lines'
+        // sides each snapped (they stood against the middle before).
+        if self.id == "org.bananav.CreditRoll" && self.version < [2, 0] {
+            self.upgrade_credit_roll();
+            self.version = [2, 0];
+        }
+        // Titles & Text took VEGAS's units and defaults in 2.0: points of
+        // a 200th of the frame's height (they were points of a 1080-line
+        // frame, 4.05 times smaller), tracking in twentieths of its height
+        // (it was ems), the outline a stroke along the letters' edges, a
+        // 400th of the height a unit and half of it outside (it was ems
+        // outside them), the shadow's offsets and blur tenths of the
+        // frame's width, down for Y (they were ems, up for Y). Each title
+        // keeps its look: its values converted, and the defaults of before
+        // written where it has none.
+        if self.id == "org.bananav.TitlesText" && self.version < [2, 0] {
+            self.upgrade_titles(frame);
+            self.version = [2, 0];
+        }
+        // Generators that took VEGAS's parameters' names (a .veg's meet
+        // them): their values of before under the new names.
+        /// A plug-in, the version its names changed in, and each old
+        /// name with its new one.
+        type Renames = (
+            &'static str,
+            [u32; 2],
+            &'static [(&'static str, &'static str)],
+        );
+        const RENAMED: &[Renames] = &[
+            (
+                "org.bananav.Checkerboard",
+                [2, 1],
+                &[
+                    ("tileWidth", "tileDimensionsWidth"),
+                    ("tileHeight", "tileDimensionsHeight"),
+                    ("square", "tileDimensionsSquare"),
+                    ("blendHorizontal", "edgeBlendingHorizontal"),
+                    ("blendVertical", "edgeBlendingVertical"),
+                    ("proportional", "edgeBlendingProportional"),
+                    ("offsetX", "gridOffsetX"),
+                    ("offsetY", "gridOffsetY"),
+                ],
+            ),
+            (
+                "org.bananav.TestPattern",
+                [2, 1],
+                &[("pattern", "testPatternType")],
+            ),
+            (
+                "org.bananav.NoiseTexture",
+                [2, 1],
+                &[
+                    ("style", "noiseStyle"),
+                    ("layers", "numberOfLayers"),
+                    ("swapColors", "swapcolors"),
+                    ("progress", "offsetprogressinDegrees"),
+                    ("min", "noiseParametersMin"),
+                    ("max", "noiseParametersMax"),
+                    ("bias", "noiseParametersBias"),
+                    ("amplitude", "noiseParametersAmplitude"),
+                    ("grain", "noiseParametersGrainAmplitudeFalloff"),
+                ],
+            ),
+        ];
+        for &(id, version, names) in RENAMED {
+            if self.id == id && self.version < version {
+                for (old, new) in names {
+                    if let Some(p) = self.params.remove(*old) {
+                        self.params.insert((*new).to_string(), p);
+                    }
+                }
+                self.version = version;
+            }
+        }
+    }
+}
+
+impl PluginFx {
+    /// [`PluginFx::upgrade`]'s Titles & Text from 1.x, in a frame `frame`
+    /// pixels big.
+    fn upgrade_titles(&mut self, frame: (u32, u32)) {
+        const OLD_POINT: f64 = 4.0 / 3.0 / 1080.0;
+        const POINT: f64 = 1.0 / 200.0;
+        const UNIT: f64 = 1.0 / 20.0;
+        const STROKE: f64 = 1.0 / 400.0;
+        let (w, h) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+        let first = |p: Option<&PluginParam>, default: f64| match p.map(|p| &p.value) {
+            Some(PluginValue::Num(n)) if !n.is_empty() => n[0],
+            _ => default,
+        };
+        let size = first(self.params.get("size"), 48.0);
+        let scale = first(self.params.get("scale"), 1.0);
+        // The old em, a part of the frame's height (the scale aside).
+        let em = size * OLD_POINT;
+        // Six decimals: what was typed stays readable.
+        let tidy = |v: f64| (v * 1e6).round() / 1e6;
+        let mut put = |name: &str, default: &[f64], f: &dyn Fn(f64) -> f64| {
+            let p = self.params.entry(name.to_string()).or_insert(PluginParam {
+                value: PluginValue::Num(default.to_vec()),
+                keys: Vec::new(),
+            });
+            let one = |v: &mut PluginValue| {
+                if let PluginValue::Num(n) = v {
+                    for x in n {
+                        *x = tidy(f(*x));
+                    }
+                }
+            };
+            one(&mut p.value);
+            for k in &mut p.keys {
+                one(&mut k.value);
+            }
+        };
+        put("size", &[48.0], &|x| x * OLD_POINT / POINT);
+        put("tracking", &[0.0], &|x| x * em / UNIT);
+        put("outlineWidth", &[0.0], &|x| x * em * 2.0 / STROKE);
+        // Ems of the frame's height (times the scale) to tenths of its
+        // width; the blur's sigma to the size VEGAS's blur takes for it.
+        let across = em * scale * h / w * 10.0;
+        put("shadowOffsetX", &[0.06], &|x| x * across);
+        put("shadowOffsetY", &[-0.06], &|x| -x * across);
+        put("shadowBlur", &[0.05], &|x| {
+            shadow_blur(x * em * scale * h, w)
+        });
+        // The defaults that changed, as they were.
+        let mut keep = |name: &str, value: PluginValue| {
+            self.params.entry(name.to_string()).or_insert(PluginParam {
+                value,
+                keys: Vec::new(),
+            });
+        };
+        keep("font", PluginValue::Text("Arial".into()));
+        keep("justification", PluginValue::Num(vec![1.0]));
+        keep("outlineColor", PluginValue::Num(vec![0.0, 0.0, 0.0, 1.0]));
+        keep("shadowColor", PluginValue::Num(vec![0.0, 0.0, 0.0, 0.75]));
+        // The selected parts' sizes ("start end size=…;bold=…" lines).
+        if let Some(PluginParam {
+            value: PluginValue::Text(runs),
+            ..
+        }) = self.params.get_mut("styles")
+        {
+            *runs = runs
+                .split('\n')
+                .map(|line| {
+                    let mut parts: Vec<String> = line.splitn(3, ' ').map(String::from).collect();
+                    if let Some(set) = parts.get_mut(2) {
+                        *set = set
+                            .split(';')
+                            .map(|kv| match kv.strip_prefix("size=").map(str::parse::<f64>) {
+                                Some(Ok(v)) => format!("size={}", tidy(v * OLD_POINT / POINT)),
+                                _ => kv.to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(";");
+                    }
+                    parts.join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    }
+}
+
+/// Titles & Text's shadow blur (tenths of the frame's width: the blur's
+/// diameter) that blurs about `sigma` pixels in a frame `width` pixels
+/// wide: its sigma is 1.1 pixels for each step of the blur's size, and its
+/// sizes reach these radii (straight between them here).
+fn shadow_blur(sigma: f64, width: f64) -> f64 {
+    const RADII: [(f64, f64); 12] = [
+        (0.0, 0.5),
+        (0.75, 3.0),
+        (6.0, 25.0),
+        (12.0, 55.0),
+        (18.0, 88.0),
+        (24.0, 127.0),
+        (30.0, 200.0),
+        (36.0, 300.0),
+        (42.0, 445.0),
+        (48.0, 730.0),
+        (51.0, 1200.0),
+        (54.0, 3000.0),
+    ];
+    if !(sigma > 0.0 && width > 0.0) {
+        return 0.0;
+    }
+    let size = sigma / 1.1;
+    let radius = RADII
+        .windows(2)
+        .find(|p| size <= p[1].0)
+        .map_or(3000.0, |p| {
+            let t = (size - p[0].0) / (p[1].0 - p[0].0);
+            p[0].1 + t * (p[1].1 - p[0].1)
+        });
+    20.0 * radius / width
+}
+
+impl PluginFx {
+    /// [`PluginFx::upgrade`]'s Credit Roll from 1.x.
+    fn upgrade_credit_roll(&mut self) {
+        let each = |p: &mut PluginParam, f: &dyn Fn(f64) -> f64| {
+            let one = |v: &mut PluginValue| {
+                if let PluginValue::Num(n) = v {
+                    for x in n {
+                        *x = f(*x);
+                    }
+                }
+            };
+            one(&mut p.value);
+            for k in &mut p.keys {
+                one(&mut k.value);
+            }
+        };
+        let first = |p: Option<&PluginParam>, default: f64| match p.map(|p| &p.value) {
+            Some(PluginValue::Num(n)) if !n.is_empty() => n[0],
+            _ => default,
+        };
+        // Each style's size and room: ems of the old size become parts
+        // of the frame's height.
+        for (style, size) in [("title", 44.0), ("item", 34.0), ("columns", 34.0)] {
+            let old = first(self.params.get(&format!("{style}Size")), size);
+            let em = old * 4.0 / 3.0 / 1080.0;
+            for (room, default) in [
+                ("SpaceAbove", if style == "title" { 0.8 } else { 0.0 }),
+                ("SpaceBelow", if style == "title" { 0.3 } else { 0.15 }),
+            ] {
+                let p = self
+                    .params
+                    .entry(format!("{style}{room}"))
+                    .or_insert(PluginParam {
+                        value: PluginValue::Num(vec![default]),
+                        keys: Vec::new(),
+                    });
+                each(p, &|x| x * em);
+            }
+            let p = self
+                .params
+                .entry(format!("{style}Size"))
+                .or_insert(PluginParam {
+                    value: PluginValue::Num(vec![size]),
+                    keys: Vec::new(),
+                });
+            each(p, &|x| x * 480.0 / 1080.0);
+        }
+        // The ways: cut, fade, slide up, down, left and right.
+        for (name, map) in [
+            ("in", [0.0, 1.0, 6.0, 5.0, 4.0, 3.0]),
+            ("out", [0.0, 1.0, 5.0, 6.0, 3.0, 4.0]),
+        ] {
+            let p = self.params.entry(name.to_string()).or_insert(PluginParam {
+                value: PluginValue::Num(vec![1.0]),
+                keys: Vec::new(),
+            });
+            each(p, &|x| map[(x.round().clamp(0.0, 5.0)) as usize]);
+        }
+        // Lines at once: one a time, else up to the next header.
+        let p = self
+            .params
+            .entry("display".to_string())
+            .or_insert(PluginParam {
+                value: PluginValue::Num(vec![3.0]),
+                keys: Vec::new(),
+            });
+        each(p, &|x| if x.round() <= 1.0 { 1.0 } else { 0.0 });
+        // The dual lines' sides against the middle, as they stood.
+        for (name, snap) in [("columnsLeftSnapping", 2.0), ("columnsRightSnapping", 0.0)] {
+            self.params.insert(
+                name.to_string(),
+                PluginParam {
+                    value: PluginValue::Num(vec![snap]),
+                    keys: Vec::new(),
+                },
+            );
         }
     }
 }
@@ -1963,6 +2267,8 @@ mod tests {
             state: vec![0, 1, 2, 250, 255],
             controller_state: Vec::new(),
             param_names: [(7, "Feedback".to_string())].into(),
+            wanted: None,
+            format: VstFormat::Vst3,
         };
         let e = Effect::vst(fx.clone());
         assert!(e.kind.is_audio());
@@ -2069,6 +2375,79 @@ mod tests {
             assert_eq!(fx.version, [2, 0], "{id}");
             assert!(fx.params.is_empty(), "{id}");
         }
+    }
+
+    #[test]
+    fn an_old_checkerboard_keeps_its_values_under_vegas_names() {
+        let param = |v: f64| PluginParam {
+            value: PluginValue::Num(vec![v]),
+            keys: Vec::new(),
+        };
+        let mut fx = PluginFx {
+            id: "org.bananav.Checkerboard".into(),
+            version: [2, 0],
+            name: String::new(),
+            params: std::collections::BTreeMap::from([
+                ("tileWidth".to_string(), param(0.25)),
+                ("offsetY".to_string(), param(0.5)),
+                ("color1".to_string(), param(0.0)),
+            ]),
+        };
+        fx.upgrade((1920, 1080));
+        assert_eq!(fx.version, [2, 1]);
+        let names: Vec<&str> = fx.params.keys().map(String::as_str).collect();
+        assert_eq!(names, ["color1", "gridOffsetY", "tileDimensionsWidth"]);
+        assert_eq!(fx.params["tileDimensionsWidth"], param(0.25));
+    }
+
+    /// An older title keeps its look in VEGAS's units: 48 points of a
+    /// 1080-line frame are 11.85 of VEGAS's, its tracking and outline in
+    /// their units, its shadow down and to the right in tenths of the
+    /// width, and the defaults of before where it had none.
+    #[test]
+    fn an_old_title_keeps_its_look_in_vegas_units() {
+        let num = |v: &[f64]| PluginParam {
+            value: PluginValue::Num(v.to_vec()),
+            keys: Vec::new(),
+        };
+        let mut fx = PluginFx {
+            id: "org.bananav.TitlesText".into(),
+            version: [1, 0],
+            name: String::new(),
+            params: std::collections::BTreeMap::from([
+                ("size".to_string(), num(&[48.0])),
+                ("tracking".to_string(), num(&[0.1])),
+                ("outlineWidth".to_string(), num(&[0.05])),
+                (
+                    "styles".to_string(),
+                    PluginParam {
+                        value: PluginValue::Text("0 5 size=97.2;bold=1\n6 9 font=Arial".into()),
+                        keys: Vec::new(),
+                    },
+                ),
+            ]),
+        };
+        fx.upgrade((1920, 1080));
+        assert_eq!(fx.version, [2, 0]);
+        let n = |name: &str| match &fx.params[name].value {
+            PluginValue::Num(v) => v.clone(),
+            v => panic!("{name}: {v:?}"),
+        };
+        assert_eq!(n("size"), [11.851852]);
+        assert_eq!(n("tracking"), [0.118519]);
+        assert_eq!(n("outlineWidth"), [2.37037]);
+        assert_eq!(n("shadowOffsetX"), [0.02]);
+        assert_eq!(n("shadowOffsetY"), [0.02]);
+        assert_eq!(n("outlineColor"), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(n("justification"), [1.0]);
+        // Three pixels' blur: about a tenth of the width there.
+        let blur = n("shadowBlur")[0];
+        assert!(blur > 0.1 && blur < 0.15, "{blur}");
+        assert_eq!(
+            fx.params["styles"].value,
+            PluginValue::Text("0 5 size=24;bold=1\n6 9 font=Arial".into())
+        );
+        assert_eq!(fx.params["font"].value, PluginValue::Text("Arial".into()));
     }
 
     #[test]

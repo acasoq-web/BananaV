@@ -1,0 +1,5 @@
+/* BananaV.app's texts the system shows, in Brazilian Portuguese (its
+   permission questions, the project files' kind in Finder). */
+"NSMicrophoneUsageDescription" = "O BananaV grava o som do seu microfone ou interface de áudio nas trilhas que você armar para gravação.";
+"NSAppleEventsUsageDescription" = "O BananaV pede ao sistema para desligar o computador quando uma renderização termina, quando você escolhe isso.";
+"BananaV Project" = "Projeto do BananaV";

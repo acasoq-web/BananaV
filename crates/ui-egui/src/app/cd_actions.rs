@@ -228,12 +228,17 @@ impl BananaApp {
                     _ => ids,
                 };
                 let blends = self.psd_blend_modes(&ids);
-                // Each on the next track of its kinds, made when missing.
+                // Each on the next track of its kinds, made when missing;
+                // let go below the tracks, each on new tracks of its own.
+                let below = self.drop_tracks.is_some();
                 for (k, id) in ids.into_iter().enumerate() {
                     let kinds = [(video, TrackKind::Video), (audio, TrackKind::Audio)];
                     let mut target = track;
+                    if below {
+                        self.drop_tracks = Some(Default::default());
+                    }
                     for (on, kind) in kinds {
-                        if !on {
+                        if !on || below {
                             continue;
                         }
                         let first = track

@@ -48,6 +48,46 @@ with the user's prints and the graphics card's parity tests.
   a processor core in all. Measure with BananaV in front and nobody using
   the computer: with another window in front or the screen locked the same
   build gives 15–50 pictures a second.
+- **The performance guards: `cargo xtask perf`**, after any change to what
+  the interface does every frame, to the preview or to the compositor.
+  It builds an optimized copy of its own in `target/perf` (no link-time
+  optimization, line tables for `tools/stacks.cs`) and runs
+  `frame_budget` (`bv-ui-egui`): the demo project plays while each docked
+  window is shown in turn beside the preview, and every window's median
+  frame of the interface must stay within 6 ms (`BV_BUDGET_MS`), its 90th
+  percentile within half as much again. A debug build only prints. On the
+  reference computer every window takes 1.0–1.8 ms; with the LUT Filter's
+  presets written out at every frame again (the slowdown of 2026-11-10)
+  Color Grading took 12.7 ms and the test failed, as it should.
+  `BV_BUDGET_FILE=<video>` plays a file instead of the demo project.
+- With `BV_PLAY_FILE=<video>` set, `cargo xtask perf` also plays it in the
+  engine (`play_file` in `bv-engine`, without the interface): different
+  frames shown a second and the longest wait between two, the card's
+  kernels compiled first (`BV_PLAY_WARM`). `BV_PLAY_PROJECT=3840x2160@59.94`
+  (the project), `BV_PLAY_SIZE` (the size frames are drawn at: Auto's room
+  or, at Full, the project's), `BV_PLAY_ROOM=1280x720` (the screen's
+  pixels: frames drawn larger come back reduced), `BV_PLAY_EFFECTS=<ids>`
+  (stacked on the events), `BV_PLAY_TRANSITION=dissolve|<id>` (two events
+  of the file in a transition all along), `BV_PLAY_ANIMATE=1` (a Pan/Crop
+  zoom and turn). Reference (a 4K H.264 trailer at 70 Mbit/s with
+  keyframes up to 8 s apart, 4K 59.94 project at Best (Full) in a
+  1280×720 room): plain, Pan/Crop animated with Glow, and in a 1080p
+  project Push with Border and Gaussian Blur on both events, 59 frames a
+  second, the longest wait 34 ms; four effects stacked (Color Corrector,
+  Gaussian Blur, Glow, Vignette) 53–56; a 4K dissolve between two events
+  of the file about 40 (two 4K decoders and twice the card's work: the
+  card and the decoders are the limit, with no stalls); Push with Border
+  and Gaussian Blur on two 4K events about 19.
+- The whole program, as the user plays: `APPDATA`/`LOCALAPPDATA` on a
+  copy of the settings (with `"match_first_media": false` and a
+  `"new_project"` of the project wanted), `BV_FRAME_TRACE=1
+  BANANAV_OPEN=Transport.Play bananav <video>` for half a minute, then
+  the window's frames and the pictures shown a second worked out from
+  the trace. Reference, the 4K trailer in a 4K 59.94 project at Best
+  (Full): 59.9 pictures a second, the interface 3.4 ms a frame (before
+  this round: 53.2 and 10.7 ms); opened alone (a 4K 29.97 project), 29.9
+  pictures a second at 1.2 ms (before: 19.2 ms, the window at 44 frames
+  a second).
 - Against another program's files, none of them in the repository:
   `BV_VEG_SAMPLES=<first samples' folder> BV_VEG_SAMPLES2=<second samples'
   folder> BV_PANCROP_SAMPLES=<Pan/Crop cases' folder> cargo test -p bv-timeline
@@ -59,6 +99,13 @@ with the user's prints and the graphics card's parity tests.
   --test pan_crop_renders -- --ignored --nocapture > out.txt` draws its
   Pan/Crop cases and compares them with the program's renders, frame by
   frame (`BV_PANCROP_FRAMES=1` lists each frame).
+- macOS: `sh tools/mac_check.sh` runs clippy for Apple's chips from
+  Windows or Linux (`MAC_TARGET=x86_64-apple-darwin` for Intel Macs); the
+  kernels are checked against Metal there too
+  (`every_kernel_translates_to_metal` in `bv-gpu`: each one written in
+  Metal's language, within what Metal can do). The tests themselves run on
+  GitHub's Macs: `gh workflow run ci.yml -f macos=true` (both processors,
+  the interface's pictures drawn by Metal kept as the run's artifacts).
 - Media oracles: ffmpeg/ffprobe on PATH (development only; on Linux they
   test FFmpeg's backend too, and `bv-mf --test ffmpeg` checks it without
   them: a movie written and read back). Fixtures live in

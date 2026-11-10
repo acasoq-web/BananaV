@@ -21,10 +21,46 @@ use std::collections::BTreeSet;
 use bv_core::curve::{self, CurvePoint, Handles};
 use bv_ofx::ParamInfo;
 
-use crate::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use crate::cursors::{self, Cursor};
+use crate::egui::{self, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use crate::i18n::tr;
 use crate::menus;
 use crate::theme;
+
+/// How a point of a plug-in's graph — a curve's point or handle, a
+/// keyframe, an equalizer's band — is taken by the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grab {
+    /// Under it, to click or drag.
+    Over,
+    /// Dragged across only (a keyframe along the time).
+    Across,
+    /// Dragged both ways.
+    Free,
+}
+
+impl Grab {
+    /// Its pointer, as VEGAS's plug-ins' curves: their pointing hand over a
+    /// point (as on its keyframe rows); dragged, the system's ↔ across
+    /// only and its four arrows both ways.
+    pub(crate) fn show(self, ctx: &egui::Context) {
+        match self {
+            Grab::Over => cursors::set(ctx, Cursor::HandPoint),
+            Grab::Across => cursors::system(ctx, CursorIcon::ResizeHorizontal),
+            Grab::Free => cursors::system(ctx, CursorIcon::Move),
+        }
+    }
+}
+
+/// The curves' pointer: a point or a handle dragged goes both ways; else
+/// the hand over one.
+fn curve_grab(dragging: bool, over: bool) -> Option<Grab> {
+    if dragging {
+        Some(Grab::Free)
+    } else {
+        over.then_some(Grab::Over)
+    }
+}
 
 /// The curves' box, the white margin around it, the gap down to the bar
 /// and the bar.
@@ -722,8 +758,10 @@ pub fn editor(
     if !resp.dragged() {
         view.drag = None;
     }
-    if resp.hover_pos().and_then(hit).is_some() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    // A point or a handle dragged (both ways), or under the pointer.
+    let over = resp.hover_pos().and_then(hit).is_some();
+    if let Some(g) = curve_grab(view.drag.is_some(), over) {
+        g.show(ui.ctx());
     }
 
     // The box: white, framed, the curves in it.
@@ -1024,5 +1062,15 @@ mod tests {
         );
         let grading = ["Brightness", "Red", "Green", "Blue"].map(String::from);
         assert_eq!(all_label(&grading), tr("All"));
+    }
+
+    /// As VEGAS's plug-ins' curves: the hand over a point or a handle, the
+    /// four arrows while one is dragged (wherever the pointer went).
+    #[test]
+    fn a_point_shows_the_hand_and_dragged_the_four_arrows() {
+        assert_eq!(curve_grab(false, true), Some(Grab::Over));
+        assert_eq!(curve_grab(true, false), Some(Grab::Free));
+        assert_eq!(curve_grab(true, true), Some(Grab::Free));
+        assert_eq!(curve_grab(false, false), None);
     }
 }

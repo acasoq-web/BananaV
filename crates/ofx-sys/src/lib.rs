@@ -33,6 +33,11 @@ pub mod extensions {
     /// wheel) or waits under its triangle (0: a light's box), an integer.
     pub const kBananaVParamPropInteractOpen: &CStr = c"BananaVParamPropInteractOpen";
 
+    /// On a page (`kOfxParamTypePage`): the host shows it as a tab, its
+    /// children under it, the other tab pages beside it and the
+    /// parameters no tab page holds above them all, an integer (1: a tab).
+    pub const kBananaVParamPropTab: &CStr = c"BananaVParamPropTab";
+
     /// Among an overlay's actions' arguments: the keyboard's modifier keys
     /// held, an integer — 1 Shift, 2 Control, 4 Alt (OpenFX's pen actions
     /// say none; Mesh Warp's Shift keeps a drag to a point's neighbors).
@@ -52,6 +57,21 @@ pub mod extensions {
     /// effect counts its own time from the event's start; this is the
     /// project's (what a timecode burned into the picture shows).
     pub const kBananaVImageEffectPropTimelineTime: &CStr = c"BananaVImageEffectPropTimelineTime";
+
+    /// The project's pictures hold 8 bits a channel: an integer among a
+    /// render action's arguments, 1 then (0 or missing: floating point).
+    /// A generator then works each pixel out as an 8-bit editor's would,
+    /// its bytes rounded or cut where its math says, and writes those
+    /// bytes' values into the host's floating-point picture.
+    pub const kBananaVImageEffectPropEightBit: &CStr = c"BananaVImageEffectPropEightBit";
+
+    /// The shape of a generated media's pixels (their width over their
+    /// height), a double among a render action's arguments (missing:
+    /// square). The host draws generators in square pixels, its frame's
+    /// size in pixels; a generator whose patterns stand square on screen
+    /// (Checkerboard's Square) shapes them with this.
+    pub const kBananaVImageEffectPropMediaPixelAspect: &CStr =
+        c"BananaVImageEffectPropMediaPixelAspect";
 
     /// The picture a push button asks the host for, a string: when the
     /// button is pushed, the host connects that picture to the clip
@@ -143,7 +163,9 @@ pub mod extensions {
     /// parameter's value as text: a number, or a string without `;`, `=`
     /// or line breaks; later lines over earlier ones; several settings of
     /// one line apart by `;`). As the text is typed the host moves the
-    /// runs along with it.
+    /// runs along with it. The host draws it as a page: its name and clock
+    /// on a line, then the line of controls before it (its bar), then the
+    /// text across the whole width, dark on white, in its font and size.
     pub const kBananaVParamPropRichText: &CStr = c"BananaVParamPropRichText";
 
     /// On a push button: the host follows one of the effect's masks from
@@ -160,6 +182,34 @@ pub mod extensions {
     /// rest of its media needs played at the rate the double parameter
     /// this names holds, a string (Slow Motion's Adjust Event Length).
     pub const kBananaVParamPropEventLength: &CStr = c"BananaVParamPropEventLength";
+
+    /// On a boolean shown as a button on a line of controls (its short
+    /// label in it): how that label is written, a string — "bold" or
+    /// "italic", as a word processor's toggles.
+    pub const kBananaVParamPropButtonStyle: &CStr = c"BananaVParamPropButtonStyle";
+
+    /// On a choice: the host shows its options as a row of toggle buttons
+    /// with these pictures instead of a list, a string per option — names
+    /// the host knows ("alignLeft", "alignCenter", "alignRight"); the
+    /// options' labels are the buttons' tooltips.
+    pub const kBananaVParamPropOptionIcons: &CStr = c"BananaVParamPropOptionIcons";
+
+    /// On a double or an integer: values the host offers in a list beside
+    /// its box, doubles (a font's sizes); the box shows a whole number
+    /// without decimals.
+    pub const kBananaVParamPropSuggested: &CStr = c"BananaVParamPropSuggested";
+
+    /// On a push button: the host shows it as a small button with this
+    /// picture, a string naming one it knows ("transfer"), its label as
+    /// the tooltip; on a line of controls it stands at the line's end.
+    pub const kBananaVParamPropIcon: &CStr = c"BananaVParamPropIcon";
+
+    /// On a push button of a generator: the host gives the other events
+    /// of its event's track that the same plug-in makes this one's
+    /// settings, each keeping its own values of the parameters this names,
+    /// a string of names apart by spaces (Titles & Text's Transfer Text
+    /// Properties: their own text).
+    pub const kBananaVParamPropTransfer: &CStr = c"BananaVParamPropTransfer";
 }
 
 /// What every OFX function returns: `names::kOfxStatOK` and the others.

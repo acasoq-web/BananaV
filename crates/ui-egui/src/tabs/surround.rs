@@ -1159,7 +1159,7 @@ fn labeled_slider(
         return Some(default);
     }
     if resp.dragged() {
-        let fine = if ui.input(|i| i.modifiers.ctrl) {
+        let fine = if ui.input(|i| i.modifiers.command) {
             0.1
         } else {
             1.0
@@ -1197,7 +1197,7 @@ fn room_input(
     if resp.clicked()
         && let Some(c) = pointer.and_then(speaker_at)
     {
-        if modifiers.ctrl {
+        if modifiers.command {
             change(app, owner, |s| s.solo[c] = !s.solo[c]);
         } else {
             change(app, owner, |s| s.mute[c] = !s.mute[c]);
@@ -1218,7 +1218,7 @@ fn room_input(
     if resp.dragged()
         && let (Some((from, p0)), Some(p)) = (app.surround_view.drag, pointer)
     {
-        let fine = if modifiers.ctrl { 0.1 } else { 1.0 };
+        let fine = if modifiers.command { 0.1 } else { 1.0 };
         let d = (p - p0) * fine;
         let mut q = [
             from[0] + d.x / (room.room.width() / 2.0),
@@ -1251,7 +1251,7 @@ fn room_input(
         let n = app.surround_view.wheel.trunc();
         app.surround_view.wheel -= n;
         if n != 0.0 {
-            let step = if modifiers.ctrl { STEP * 0.1 } else { STEP };
+            let step = if modifiers.command { STEP * 0.1 } else { STEP };
             new = Some(if modifiers.alt {
                 let r = if modifiers.shift {
                     1.0
@@ -1353,7 +1353,7 @@ fn constrained(q: [f32; 2], from: [f32; 2], m: egui::Modifiers) -> [f32; 2] {
 /// puts it at a corner, an edge or the middle (with Ctrl, 1, 3, 7 and 9 at
 /// the largest circle's corners).
 fn keys_move(ui: &egui::Ui, point: [f32; 2], m: egui::Modifiers) -> Option<[f32; 2]> {
-    let step = if m.ctrl { STEP * 0.1 } else { STEP };
+    let step = if m.command { STEP * 0.1 } else { STEP };
     let page = step * 4.0;
     let pressed = |k: Key| ui.input(|i| i.key_pressed(k));
     let [x, y] = point;
@@ -1397,7 +1397,7 @@ fn keys_move(ui: &egui::Ui, point: [f32; 2], m: egui::Modifiers) -> Option<[f32;
     for (k, c, [px, py]) in pads {
         if pressed(k) && bv_platform::numpad_down(c) {
             let corner = px != 0.0 && py != 0.0;
-            let s = if m.ctrl && corner {
+            let s = if m.command && corner {
                 std::f32::consts::FRAC_1_SQRT_2
             } else {
                 1.0
@@ -1447,7 +1447,7 @@ pub(crate) fn mini_panner(
     }
     let mut new = None;
     if resp.dragged() {
-        let fine = if ui.input(|i| i.modifiers.ctrl) {
+        let fine = if ui.input(|i| i.modifiers.command) {
             0.1
         } else {
             1.0

@@ -103,11 +103,13 @@ mod black_and_white;
 mod black_bar_fill;
 mod border;
 pub mod brightness_contrast;
+mod checkerboard;
 mod classics;
 mod color_balance;
 mod color_corrector;
 mod color_corrector_secondary;
 mod color_curves;
+mod color_gradient;
 pub mod color_grading;
 mod color_match;
 mod colors;
@@ -125,6 +127,7 @@ mod generators;
 mod glow;
 mod glsl;
 mod gradient_map;
+mod gradient_page;
 mod gradient_wipe;
 pub mod grading;
 mod hsl_adjust;
@@ -139,6 +142,8 @@ mod lut_filter;
 mod mesh_warp;
 mod mirror;
 mod motion_blur;
+mod noise_tables;
+mod noise_texture;
 mod ofx;
 mod optical_flow;
 mod picture_in_picture;
@@ -157,8 +162,10 @@ pub mod stabilization_360;
 mod stabilize;
 mod stereo_adjust;
 mod stitching;
+mod test_pattern;
 mod text;
 mod timecode;
+mod title_animations;
 mod titles;
 mod transitions;
 mod unsharp_mask;
@@ -258,7 +265,8 @@ static PLUGINS: [Shared; 120] = [
         1,
         color_corrector_secondary::main,
     ),
-    plugin(titles::ID, 1, 0, titles::main),
+    // 2.0: VEGAS's units and defaults (`PluginFx::upgrade` converts).
+    plugin(titles::ID, 2, 0, titles::main),
     // 2.0: VEGAS's panels, presets and math (the transitions below too).
     plugin(c"org.bananav.LinearWipe", 2, 0, transitions::linear_wipe),
     plugin(c"org.bananav.ClockWipe", 2, 0, transitions::clock_wipe),
@@ -357,24 +365,27 @@ static PLUGINS: [Shared; 120] = [
     plugin(c"org.bananav.Denoise", 2, 0, filters::denoise),
     // 2.0: VEGAS's AutoLooks panel (None first, Strength).
     plugin(c"org.bananav.Looks", 2, 0, filters::looks),
-    // 2.0: VEGAS's settings (its groups, Grid offset in frames).
+    // 2.0: VEGAS's settings (its groups, Grid offset in frames); 2.1:
+    // their names VEGAS's (`PluginFx::upgrade` renames them).
     plugin(
         c"org.bananav.Checkerboard",
         2,
-        0,
+        1,
         generators::checkerboard_entry,
     ),
+    // 2.0: VEGAS's types, angle and up to nine color points on its axis.
     plugin(
         c"org.bananav.ColorGradient",
-        1,
+        2,
         0,
         generators::color_gradient_entry,
     ),
-    // 2.0: VEGAS's panel, styles and presets.
+    // 2.0: VEGAS's panel, styles and presets; 2.1: its parameters' names
+    // VEGAS's (`PluginFx::upgrade` renames them).
     plugin(
         c"org.bananav.NoiseTexture",
         2,
-        0,
+        1,
         generators::noise_texture_entry,
     ),
     plugin(
@@ -383,14 +394,16 @@ static PLUGINS: [Shared; 120] = [
         0,
         generators::solid_color_entry,
     ),
-    // 2.0: VEGAS's list of patterns.
+    // 2.0: VEGAS's list of patterns; 2.1: its parameter's name VEGAS's
+    // (`PluginFx::upgrade` renames it).
     plugin(
         c"org.bananav.TestPattern",
         2,
-        0,
+        1,
         generators::test_pattern_entry,
     ),
-    plugin(c"org.bananav.CreditRoll", 1, 0, credit_roll::main),
+    // 2.0: VEGAS's settings (its ways, displays, sizes and room).
+    plugin(c"org.bananav.CreditRoll", 2, 0, credit_roll::main),
     plugin(c"org.bananav.Blinds3D", 2, 0, transitions::blinds_3d),
     plugin(c"org.bananav.Cascade3D", 2, 0, transitions::cascade_3d),
     plugin(c"org.bananav.FlyInOut3D", 2, 0, transitions::fly_in_out_3d),
@@ -499,6 +512,22 @@ pub fn write_looks(dir: &std::path::Path) -> std::io::Result<()> {
 /// A preset's string with BananaV's looks in `dir`: their files' paths.
 pub fn resolve_looks(text: &str, dir: &std::path::Path) -> String {
     lut_filter::resolve(text, dir)
+}
+
+/// The computer's font face Titles & Text draws `family` with for `bold`
+/// and `italic` (another family where it is missing): its file and its
+/// place in the file's collection.
+pub fn font_face(family: &str, bold: bool, italic: bool) -> Option<(std::path::PathBuf, u32)> {
+    fonts::find(family, bold, italic).map(|(face, _, _)| (face.path.clone(), face.index))
+}
+
+pub use fonts::Cjk;
+
+/// The computer's faces the interface draws characters its own font lacks
+/// with (Chinese, Japanese and Korean, `first`'s first; one with many other
+/// scripts): their files and places in them.
+pub fn interface_fallbacks(first: Cjk) -> Vec<(std::path::PathBuf, u32)> {
+    fonts::interface_fallbacks(first)
 }
 
 /// The factory presets of the effect `id` (none for others').

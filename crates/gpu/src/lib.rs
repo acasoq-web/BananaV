@@ -13,10 +13,10 @@ mod compositor;
 mod kernels;
 mod shared;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub use compositor::{Compositor, Output, Rendered, draws};
+pub use compositor::{Compositor, Output, Rendered, draws, give_back, room_size};
 
 /// This thread gives way to the others: the work it does can wait.
 #[allow(unsafe_code)]
@@ -79,11 +79,41 @@ const BACKENDS: wgpu::Backends = wgpu::Backends::DX12
     .union(wgpu::Backends::METAL)
     .union(wgpu::Backends::GL);
 
-/// The interfaces tried: all, unless `WGPU_BACKEND` names some.
+/// The graphics interfaces cards are opened through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interfaces {
+    /// Each card through its best one (DirectX 12 or Metal first).
+    All,
+    /// Vulkan only: after a start that failed on DirectX 12.
+    Vulkan,
+    /// None: the processor composites (after starts that failed on both).
+    None,
+}
+
+/// [`Interfaces`] as set by [`set_interfaces`] (0 all, 1 Vulkan, 2 none).
+static INTERFACES: AtomicU8 = AtomicU8::new(0);
+
+/// Opens cards only through `interfaces` from now on (until the program
+/// ends). `WGPU_BACKEND` still wins when it is set.
+pub fn set_interfaces(interfaces: Interfaces) {
+    let n = match interfaces {
+        Interfaces::All => 0,
+        Interfaces::Vulkan => 1,
+        Interfaces::None => 2,
+    };
+    INTERFACES.store(n, Ordering::Relaxed);
+}
+
+/// The interfaces tried: all, unless `WGPU_BACKEND` names some or
+/// [`set_interfaces`] narrowed them.
 fn backends() -> wgpu::Backends {
     wgpu::Backends::from_env()
         .filter(|b| !b.is_empty())
-        .unwrap_or(BACKENDS)
+        .unwrap_or_else(|| match INTERFACES.load(Ordering::Relaxed) {
+            1 => wgpu::Backends::VULKAN,
+            2 => wgpu::Backends::empty(),
+            _ => BACKENDS,
+        })
 }
 
 fn instance() -> wgpu::Instance {
@@ -252,9 +282,19 @@ impl Gpu {
     pub fn warm_up(&self) -> Result<(), GpuError> {
         let trace = std::env::var_os("BV_GPU_TRACE").is_some();
         let next = AtomicUsize::new(0);
+        // The slowest to compile first: with them last, the transitions
+        // using them waited seconds more after the program opened.
+        let order: Vec<kernels::K> = kernels::K::SLOWEST
+            .into_iter()
+            .chain(
+                kernels::K::ALL
+                    .into_iter()
+                    .filter(|k| !kernels::K::SLOWEST.contains(k)),
+            )
+            .collect();
         let work = || -> Result<(), GpuError> {
             lower_priority();
-            while let Some(&k) = kernels::K::ALL.get(next.fetch_add(1, Ordering::Relaxed)) {
+            while let Some(&k) = order.get(next.fetch_add(1, Ordering::Relaxed)) {
                 let start = std::time::Instant::now();
                 let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
                 self.kernels.pipeline(&self.device, k);

@@ -444,7 +444,8 @@ pub(crate) fn has_frame([start, end]: [f64; 2], t: f64) -> bool {
 
 // Histogram smoothing.
 
-/// The levels a channel's histogram counts (VEGAS's for float pictures).
+/// The levels a channel's histogram counts (as VEGAS counts them in 32-bit
+/// projects).
 pub const LEVELS: usize = 1024;
 
 /// The level a channel's value `v` is counted in: VEGAS's — the value

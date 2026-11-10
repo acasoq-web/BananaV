@@ -41,6 +41,17 @@ fn dissolve(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[i] = lerp4(ta[i], tb[i], pf(0u));
 }
 
+// A crossfade with no transition: `a` times f[0] and `b` times f[1],
+// summed, each channel at most 1.
+@compute @workgroup_size(16, 16)
+fn crossfade(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = index(id);
+    if i < 0 {
+        return;
+    }
+    dst[i] = min(ta[i] * pf(0u) + tb[i] * pf(1u), vec4<f32>(1.0));
+}
+
 @compute @workgroup_size(16, 16)
 fn fade_through_black(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = index(id);

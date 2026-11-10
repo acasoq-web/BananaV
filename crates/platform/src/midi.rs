@@ -495,7 +495,306 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// macOS: Core MIDI. One client for the program; an output port sends to
+/// the destination of the name, an input port listens to the source of the
+/// name, each packet's messages handed over one by one.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod imp {
+    use std::ffi::c_void;
+    use std::sync::{Mutex, OnceLock};
+
+    use bv_apple::cf::{self, Owned, Ref};
+
+    use super::MidiHandler;
+
+    type ReadProc =
+        unsafe extern "C" fn(list: *const u8, port_ref: *mut c_void, source_ref: *mut c_void);
+
+    #[link(name = "CoreMIDI", kind = "framework")]
+    unsafe extern "C" {
+        fn MIDIClientCreate(
+            name: Ref,
+            notify: *const c_void,
+            notify_ref: *mut c_void,
+            client: *mut u32,
+        ) -> i32;
+        fn MIDIGetNumberOfSources() -> usize;
+        fn MIDIGetSource(index: usize) -> u32;
+        fn MIDIGetNumberOfDestinations() -> usize;
+        fn MIDIGetDestination(index: usize) -> u32;
+        fn MIDIObjectGetStringProperty(object: u32, property: Ref, out: *mut Ref) -> i32;
+        static kMIDIPropertyDisplayName: Ref;
+        fn MIDIOutputPortCreate(client: u32, name: Ref, port: *mut u32) -> i32;
+        fn MIDIInputPortCreate(
+            client: u32,
+            name: Ref,
+            read: ReadProc,
+            read_ref: *mut c_void,
+            port: *mut u32,
+        ) -> i32;
+        fn MIDIPortConnectSource(port: u32, source: u32, source_ref: *mut c_void) -> i32;
+        fn MIDIPortDisconnectSource(port: u32, source: u32) -> i32;
+        fn MIDIPortDispose(port: u32) -> i32;
+        fn MIDISend(port: u32, destination: u32, list: *const u8) -> i32;
+        fn MIDIPacketListInit(list: *mut u8) -> *mut u8;
+        fn MIDIPacketListAdd(
+            list: *mut u8,
+            size: usize,
+            current: *mut u8,
+            time: u64,
+            len: usize,
+            data: *const u8,
+        ) -> *mut u8;
+    }
+
+    /// The program's client, made once (`None` when Core MIDI refused).
+    fn client() -> Option<u32> {
+        static CLIENT: OnceLock<Option<u32>> = OnceLock::new();
+        *CLIENT.get_or_init(|| {
+            let name = cf::string("BananaV");
+            let mut client = 0u32;
+            // SAFETY: a name and the place for the client; no notifications.
+            let r = unsafe {
+                MIDIClientCreate(
+                    name.get(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    &mut client,
+                )
+            };
+            (r == 0).then_some(client)
+        })
+    }
+
+    /// An endpoint's name as the system shows it.
+    fn name_of(endpoint: u32) -> Option<String> {
+        let mut text: Ref = std::ptr::null();
+        // SAFETY: a property of a live endpoint; the string is the caller's.
+        unsafe {
+            if MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &mut text) != 0 {
+                return None;
+            }
+            let text = Owned::take(text)?;
+            cf::to_string(text.get())
+        }
+    }
+
+    fn sources() -> Vec<(String, u32)> {
+        // SAFETY: plain queries of the system's sources.
+        (0..unsafe { MIDIGetNumberOfSources() })
+            .map(|i| unsafe { MIDIGetSource(i) })
+            .filter(|&e| e != 0)
+            .filter_map(|e| Some((name_of(e)?, e)))
+            .collect()
+    }
+
+    fn destinations() -> Vec<(String, u32)> {
+        // SAFETY: plain queries of the system's destinations.
+        (0..unsafe { MIDIGetNumberOfDestinations() })
+            .map(|i| unsafe { MIDIGetDestination(i) })
+            .filter(|&e| e != 0)
+            .filter_map(|e| Some((name_of(e)?, e)))
+            .collect()
+    }
+
+    pub fn outputs() -> Vec<String> {
+        destinations().into_iter().map(|(n, _)| n).collect()
+    }
+
+    pub fn inputs() -> Vec<String> {
+        sources().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// How long the message beginning with `status` is (system-exclusive
+    /// ones run to their end, 0xF7).
+    fn message_len(status: u8) -> usize {
+        match status {
+            0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 3,
+            0xC0..=0xDF | 0xF1 | 0xF3 => 2,
+            _ => 1,
+        }
+    }
+
+    /// Each short message of `data` (one packet's bytes): system-exclusive
+    /// ones and stray data bytes are skipped.
+    pub(super) fn messages(data: &[u8], mut each: impl FnMut([u8; 3])) {
+        let mut i = 0;
+        while i < data.len() {
+            let status = data[i];
+            if status < 0x80 {
+                i += 1;
+                continue;
+            }
+            if status == 0xF0 {
+                i += data[i..]
+                    .iter()
+                    .position(|&b| b == 0xF7)
+                    .map_or(data.len() - i, |p| p + 1);
+                continue;
+            }
+            let len = message_len(status).min(data.len() - i);
+            let mut m = [0u8; 3];
+            m[..len].copy_from_slice(&data[i..i + len]);
+            each(m);
+            i += len;
+        }
+    }
+
+    /// Sends `bytes` (whole messages) in one packet.
+    fn send(port: u32, destination: u32, bytes: &[u8]) -> Result<(), String> {
+        // A packet list: its count, then the packet's time, length and data;
+        // kept on 8-byte boundaries.
+        let mut buf = vec![0u64; (bytes.len() + 64).div_ceil(8)];
+        let size = buf.len() * 8;
+        let list = buf.as_mut_ptr().cast::<u8>();
+        // SAFETY: a buffer of `size` bytes for the list; the data copied in
+        // by Core MIDI; a live port and destination.
+        unsafe {
+            let packet = MIDIPacketListInit(list);
+            let packet = MIDIPacketListAdd(list, size, packet, 0, bytes.len(), bytes.as_ptr());
+            if packet.is_null() {
+                return Err("the MIDI message is too long".into());
+            }
+            match MIDISend(port, destination, list) {
+                0 => Ok(()),
+                e => Err(format!("Core MIDI refused the message ({e})")),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Out {
+        port: u32,
+        destination: u32,
+    }
+
+    impl Out {
+        pub fn open(name: &str) -> Result<Out, String> {
+            let destination = destinations()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e)
+                .ok_or_else(|| format!("no MIDI output named {name}"))?;
+            let client = client().ok_or("Core MIDI is not available")?;
+            let mut port = 0u32;
+            let port_name = cf::string("BananaV out");
+            // SAFETY: a live client; the port is this object's.
+            match unsafe { MIDIOutputPortCreate(client, port_name.get(), &mut port) } {
+                0 => Ok(Out { port, destination }),
+                e => Err(format!("Core MIDI refused the output ({e})")),
+            }
+        }
+
+        pub fn short(&mut self, word: u32) {
+            let bytes = super::unpack(word);
+            let len = message_len(bytes[0]);
+            let _ = send(self.port, self.destination, &bytes[..len]);
+        }
+
+        pub fn long(&mut self, bytes: &[u8]) -> Result<(), String> {
+            send(self.port, self.destination, bytes)
+        }
+    }
+
+    impl Drop for Out {
+        fn drop(&mut self) {
+            // SAFETY: this object's port.
+            unsafe { MIDIPortDispose(self.port) };
+        }
+    }
+
+    /// The handler, reached from Core MIDI's thread through the port.
+    struct Handler(Mutex<MidiHandler>);
+
+    #[derive(Debug)]
+    pub struct In {
+        port: u32,
+        source: u32,
+        handler: *mut c_void,
+    }
+
+    // SAFETY: the port and source are numbers; the handler is shared with
+    // Core MIDI's thread behind its lock, and freed after the port is gone.
+    unsafe impl Send for In {}
+
+    /// Core MIDI's callback: each packet's messages to the handler.
+    unsafe extern "C" fn came_in(list: *const u8, port_ref: *mut c_void, _source_ref: *mut c_void) {
+        if list.is_null() || port_ref.is_null() {
+            return;
+        }
+        // SAFETY: the handler `In::open` gave the port (alive while it is);
+        // the packet list Core MIDI passes: a count, then packets of a time
+        // (8 bytes), a length (2) and their data, each after the last (on
+        // 4-byte boundaries on ARM).
+        unsafe {
+            let handler = &*port_ref.cast::<Handler>();
+            let Ok(mut handler) = handler.0.lock() else {
+                return;
+            };
+            let count = list.cast::<u32>().read_unaligned();
+            let mut packet = list.add(4);
+            for _ in 0..count {
+                let len = packet.add(8).cast::<u16>().read_unaligned() as usize;
+                let data = std::slice::from_raw_parts(packet.add(10), len);
+                messages(data, &mut *handler);
+                let next = packet.add(10 + len);
+                packet = if cfg!(target_arch = "aarch64") {
+                    next.add(next.align_offset(4))
+                } else {
+                    next
+                };
+            }
+        }
+    }
+
+    impl In {
+        pub fn open(name: &str, handler: MidiHandler) -> Result<In, String> {
+            let source = sources()
+                .into_iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e)
+                .ok_or_else(|| format!("no MIDI input named {name}"))?;
+            let client = client().ok_or("Core MIDI is not available")?;
+            let handler = Box::into_raw(Box::new(Handler(Mutex::new(handler)))).cast::<c_void>();
+            let mut port = 0u32;
+            let port_name = cf::string("BananaV in");
+            // SAFETY: a live client, the callback and its handler (freed in
+            // `drop`, after the port), a live source.
+            unsafe {
+                let r = MIDIInputPortCreate(client, port_name.get(), came_in, handler, &mut port);
+                if r != 0 {
+                    drop(Box::from_raw(handler.cast::<Handler>()));
+                    return Err(format!("Core MIDI refused the input ({r})"));
+                }
+                let r = MIDIPortConnectSource(port, source, std::ptr::null_mut());
+                if r != 0 {
+                    MIDIPortDispose(port);
+                    drop(Box::from_raw(handler.cast::<Handler>()));
+                    return Err(format!("Core MIDI refused the input ({r})"));
+                }
+            }
+            Ok(In {
+                port,
+                source,
+                handler,
+            })
+        }
+    }
+
+    impl Drop for In {
+        fn drop(&mut self) {
+            // SAFETY: this object's port, gone before its handler is freed.
+            unsafe {
+                MIDIPortDisconnectSource(self.port, self.source);
+                MIDIPortDispose(self.port);
+                drop(Box::from_raw(self.handler.cast::<Handler>()));
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     use super::MidiHandler;
 

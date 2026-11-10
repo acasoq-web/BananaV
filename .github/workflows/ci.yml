@@ -3,7 +3,9 @@
 # Every push to main: Linux x64 runs `cargo xtask ci` (rustfmt, layers,
 # clippy, tests, wasm). The full run — Linux ARM64 and Windows ARM64 too —
 # only when started by hand (Actions › CI › Run workflow), to spare the
-# account's minutes. Windows x64 is checked on the development computer.
+# account's minutes; macOS (Apple's chips and Intel) by hand too, with
+# `-f macos=true` (a private repository pays the most for its minutes; a
+# public one, nothing). Windows x64 is checked on the development computer.
 #
 # Started by hand with a crate's name (`gh workflow run ci.yml --ref <branch>
 # -f crate=bv-mf`), each machine checks and tests only that crate: quick
@@ -21,6 +23,10 @@ on:
         description: "Also check Linux ARM64 and Windows ARM64"
         type: boolean
         default: true
+      macos:
+        description: "Also check macOS, Apple's chips and Intel"
+        type: boolean
+        default: false
       crate:
         description: "Only this crate (bv-mf, bv-media…) instead of everything"
         type: string
@@ -143,3 +149,73 @@ jobs:
           if [ -n "$CRATE" ]; then set -- -p "$CRATE"; else set -- --workspace; fi
           cargo clippy "$@" --all-targets -- -D warnings
           cargo test "$@" --quiet --no-fail-fast
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    if: github.event_name == 'workflow_dispatch' && inputs.macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tools
+        run: brew install nasm meson ninja cmake pkgconf
+      - name: FFmpeg (kept)
+        # The packages' own (package.yml keeps it under the same key).
+        id: ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-lgpl
+          key: ffmpeg-macos-${{ matrix.arch }}-${{ hashFiles('packaging/macos/build_ffmpeg.sh') }}
+      - name: FFmpeg (built)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh packaging/macos/build_ffmpeg.sh "$PWD/ffmpeg-lgpl"
+      - name: The ffmpeg tool (media oracles)
+        if: inputs.ignored
+        run: brew install ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check and test
+        env:
+          CRATE: ${{ inputs.crate }}
+          IGNORED: ${{ inputs.ignored }}
+          TEST: ${{ inputs.test }}
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          export PKG_CONFIG_PATH="$PWD/ffmpeg-lgpl/lib/pkgconfig"
+          export DYLD_FALLBACK_LIBRARY_PATH="$PWD/ffmpeg-lgpl/lib"
+          if [ -n "$CRATE" ]; then set -- -p "$CRATE"; else set -- --workspace; fi
+          cargo clippy "$@" --all-targets -- -D warnings
+          if [ -n "$TEST" ]; then set -- "$@" --test "$TEST"; fi
+          if [ "$IGNORED" = "true" ]; then
+            cargo test "$@" --no-fail-fast -- --include-ignored --nocapture
+          else
+            cargo test "$@" --quiet --no-fail-fast
+          fi
+      - name: The interface's pictures
+        # What the screenshot tests draw (target/telas), drawn by Metal.
+        if: inputs.crate == '' || inputs.crate == 'bv-ui-egui'
+        continue-on-error: true
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          export PKG_CONFIG_PATH="$PWD/ffmpeg-lgpl/lib/pkgconfig"
+          export DYLD_FALLBACK_LIBRARY_PATH="$PWD/ffmpeg-lgpl/lib"
+          cargo test -p bv-ui-egui --test telas -- --ignored --quiet
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-${{ matrix.arch }}-telas
+          path: target/telas
+          retention-days: 7
+          if-no-files-found: ignore

@@ -183,7 +183,7 @@ fn row_ui(
     if resp.drag_started()
         && let Some(i) = hot
     {
-        let copy = ui.input(|i| i.modifiers.ctrl);
+        let copy = ui.input(|i| i.modifiers.command);
         view.surround_drag = Some(KeyDrag {
             owner,
             index: i,

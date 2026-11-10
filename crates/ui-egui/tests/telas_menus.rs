@@ -291,8 +291,12 @@ fn captura_menus() {
     // its ghost there meanwhile, a new video track for it when let go, as
     // VEGAS's.
     assert_eq!(h.state().tracks_for_review().len(), 2);
-    let from = h.state().timeline_spot_for_review(0, 12.0).expect("event");
-    let to = h.state().timeline_spot_for_review(1, 12.0).expect("track") + egui::vec2(0.0, 150.0);
+    // From its middle (the stretched sunset ends at 12 seconds).
+    let from = h.state().timeline_spot_for_review(0, 13.0).expect("event");
+    let to = h
+        .state()
+        .below_tracks_spot_for_review(13.0)
+        .expect("room below");
     h.event(egui::Event::PointerMoved(from));
     h.step();
     h.event(egui::Event::PointerButton {
@@ -324,6 +328,12 @@ fn captura_menus() {
     assert_eq!(tracks.len(), 3, "{tracks:?}");
     assert_eq!(tracks[2], (true, 1), "{tracks:?}");
     snap(&mut h, "nova_trilha");
+    // Transitions on fades — the bars' fade-in, the checkerboard's end —
+    // with their labels and Transition Properties buttons; the bars' red
+    // box below its label.
+    h.state_mut().fade_transitions_for_review();
+    settle(&mut h);
+    snap(&mut h, "transicoes_nos_fades");
 }
 
 #[test]

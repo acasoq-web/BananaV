@@ -245,6 +245,9 @@ pub struct VideoDecoder {
     last: Option<Tick>,
     /// The first frame decoded since the last seek.
     first: Option<Tick>,
+    /// The keyframes' times, when the file says (MP4, MOV): going on to a
+    /// later frame with no keyframe on the way beats a seek, however far.
+    keyframes: Option<std::sync::Arc<Vec<Tick>>>,
     eos: bool,
     /// Time (the stream's time base) of the first frame: everything is
     /// shifted for it to be zero, as on Windows (MPEG-TS times start
@@ -333,6 +336,7 @@ impl VideoDecoder {
             recent: VecDeque::new(),
             last: None,
             first: None,
+            keyframes: crate::mp4::video_keyframes_cached(path),
             eos: false,
             time_offset: 0,
             previous: None,
@@ -621,11 +625,20 @@ impl VideoDecoder {
         if let Some(f) = self.cached(t) {
             return Ok(f.clone());
         }
-        // Going on is much cheaper than seeking (normal playback).
+        // Going on is much cheaper than seeking (normal playback), and so
+        // is any later frame with no keyframe on the way (a seek would
+        // start at the keyframe before: a long-GOP 4K recording decodes
+        // hundreds of frames again).
+        let slack = Tick(self.rate.frame_duration().0 / 2);
         let ahead = !self.eos
-            && self
-                .last
-                .is_some_and(|last| t >= last && t < last + Tick::from_seconds(2));
+            && self.last.is_some_and(|last| {
+                t >= last
+                    && (t < last + Tick::from_seconds(2)
+                        || self
+                            .keyframes
+                            .as_deref()
+                            .is_some_and(|k| crate::mp4::same_group(k, last, t, slack)))
+            });
         if ahead && let Some(f) = self.decode_to(t, way)? {
             return Ok(f);
         }

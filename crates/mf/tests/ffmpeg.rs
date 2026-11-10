@@ -4,7 +4,7 @@
 //! (played on and sought), the sound lands on its sample and the video's
 //! packets come one per frame. A picture in an icon reads as a still.
 
-#![cfg(all(target_os = "linux", not(bv_no_ffmpeg)))]
+#![cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))]
 
 use std::fs::File;
 use std::io::BufWriter;

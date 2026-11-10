@@ -11,6 +11,7 @@ publish.workspace = true
 layer = 1
 
 [dependencies]
+bv-apple.workspace = true
 bv-core = { workspace = true, features = ["serde"] }
 bv-ofx-sys.workspace = true
 serde.workspace = true

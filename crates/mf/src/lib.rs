@@ -1,16 +1,21 @@
-//! The system's codecs: Media Foundation on Windows, FFmpeg on Linux.
+//! The system's codecs: Media Foundation on Windows, FFmpeg on Linux and
+//! macOS.
 //!
 //! Reads any file the system can open (MP4/MOV with H.264 or HEVC, AAC,
 //! MP3, WMV, AVI, MKV…), giving pictures as [`VideoFrame`]s (Y′CbCr planes
 //! of 8 or 10 bits) and sound as floats, decoded on the graphics card when
 //! it can; and encodes with the system's encoders, the processor's and the
 //! graphics cards' (NVENC, AMD, Quick Sync on Windows; x264, x265,
-//! SVT-AV1, NVENC and VA-API on Linux).
+//! SVT-AV1, NVENC and VA-API on Linux; VideoToolbox, the Mac's own, on
+//! macOS).
 //!
-//! Elsewhere, and on Linux built with `--cfg bv_no_ffmpeg`, every function
-//! returns [`Error::Unavailable`].
+//! Elsewhere, and on Linux or macOS built with `--cfg bv_no_ffmpeg`, every
+//! function returns [`Error::Unavailable`].
 
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 use bv_core::AudioBuffer;
 use bv_core::{FrameRate, SampleRate, Tick, VideoFrame};
 
@@ -294,6 +299,8 @@ pub enum Vendor {
     Intel,
     /// Qualcomm Adreno (Snapdragon computers).
     Qualcomm,
+    /// The Mac's own media engine (VideoToolbox).
+    Apple,
     OtherHardware,
 }
 
@@ -312,12 +319,12 @@ pub struct EncoderInfo {
 
 /// Samples the AAC encoder puts before the sound (its delay), skipped by
 /// the MP4 file's edit list: none with Windows' encoder.
-#[cfg(not(all(target_os = "linux", not(bv_no_ffmpeg))))]
+#[cfg(not(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))))]
 pub const AAC_PRIMING: u32 = 0;
 
 /// Samples the AAC encoder puts before the sound (its delay), skipped by
 /// the MP4 file's edit list: FFmpeg's encoder primes one frame.
-#[cfg(all(target_os = "linux", not(bv_no_ffmpeg)))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))]
 pub const AAC_PRIMING: u32 = 1024;
 
 /// A compressed frame or audio packet from an encoder.
@@ -380,10 +387,13 @@ pub struct AudioEncoderSettings {
 
 pub mod camera;
 
-#[cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#[cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 mod common;
 
-#[cfg(all(target_os = "linux", not(bv_no_ffmpeg)))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))]
 #[allow(unsafe_code)]
 mod ff;
 
@@ -511,11 +521,14 @@ pub fn decode_adapters() -> Vec<String> {
     {
         dxva::adapters()
     }
-    #[cfg(all(target_os = "linux", not(bv_no_ffmpeg)))]
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))]
     {
         ff::hw::adapters()
     }
-    #[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+    #[cfg(not(any(
+        windows,
+        all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+    )))]
     {
         Vec::new()
     }
@@ -540,33 +553,45 @@ pub use imp::{AudioDecoder, PacketReader, VideoDecoder, probe};
 #[cfg(windows)]
 pub use writer::AsfWriter;
 
-#[cfg(all(target_os = "linux", not(bv_no_ffmpeg)))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))]
 pub use ff::{
     AudioDecoder, AudioEncoder, PacketReader, VideoDecoder, VideoEncoder, encoders, probe,
     read_still, still_size,
 };
 
 /// Every encoder of the system: none without a media framework.
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 pub fn encoders() -> &'static [EncoderInfo] {
     &[]
 }
 
 /// The size of a picture the system reads (outside Windows, which reads
 /// them with its Imaging Component).
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 pub fn still_size(_path: &str) -> Result<(u32, u32)> {
     Err(Error::Unavailable)
 }
 
 /// A picture the system reads (outside Windows, which reads them with its
 /// Imaging Component).
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 pub fn read_still(_path: &str) -> Result<Still> {
     Err(Error::Unavailable)
 }
 
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 mod imp_stub {
     use super::*;
 
@@ -762,5 +787,8 @@ mod asf_stub {
 
 #[cfg(not(windows))]
 pub use asf_stub::AsfWriter;
-#[cfg(not(any(windows, all(target_os = "linux", not(bv_no_ffmpeg)))))]
+#[cfg(not(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+)))]
 pub use imp_stub::{AudioDecoder, AudioEncoder, PacketReader, VideoDecoder, VideoEncoder, probe};

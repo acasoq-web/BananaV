@@ -431,14 +431,22 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bananav"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-ui-egui",
 ]
 
 [[package]]
+name = "bananav-bridge32"
+version = "0.3.0"
+dependencies = [
+ "bv-vst2",
+ "bv-vst3",
+]
+
+[[package]]
 name = "bananav-ofx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-effects",
  "bv-ofx-sys",
@@ -527,25 +535,36 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bv-ac3"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-bitstream",
 ]
 
 [[package]]
+name = "bv-apple"
+version = "0.3.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "bv-bitstream"
-version = "0.2.0"
+version = "0.3.0"
+
+[[package]]
+name = "bv-bridge"
+version = "0.3.0"
 
 [[package]]
 name = "bv-color"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-core",
 ]
 
 [[package]]
 name = "bv-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -553,22 +572,22 @@ dependencies = [
 
 [[package]]
 name = "bv-cuda"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libloading",
 ]
 
 [[package]]
 name = "bv-deflate"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-dvd"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-effects"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-core",
  "bv-lut",
@@ -577,12 +596,13 @@ dependencies = [
  "bv-png",
  "bv-track",
  "naga",
+ "serde_json",
  "skrifa",
 ]
 
 [[package]]
 name = "bv-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-color",
  "bv-core",
@@ -613,14 +633,14 @@ dependencies = [
 
 [[package]]
 name = "bv-flac"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-bitstream",
 ]
 
 [[package]]
 name = "bv-gpu"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-color",
  "bv-core",
@@ -640,18 +660,18 @@ dependencies = [
 
 [[package]]
 name = "bv-image"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-deflate",
 ]
 
 [[package]]
 name = "bv-lut"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-ac3",
  "bv-color",
@@ -669,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "bv-mf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-bitstream",
  "bv-core",
@@ -683,11 +703,13 @@ dependencies = [
 
 [[package]]
 name = "bv-mixer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-core",
  "bv-media",
  "bv-timeline",
+ "bv-vst2",
+ "bv-vst2-testplug",
  "bv-vst3",
  "bv-vst3-sys",
  "bv-vst3-testplug",
@@ -695,26 +717,27 @@ dependencies = [
 
 [[package]]
 name = "bv-mp4"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-bitstream",
 ]
 
 [[package]]
 name = "bv-mpeg2"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-ocio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-lut",
 ]
 
 [[package]]
 name = "bv-ofx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "bv-apple",
  "bv-core",
  "bv-cuda",
  "bv-ofx-sys",
@@ -728,11 +751,11 @@ dependencies = [
 
 [[package]]
 name = "bv-ofx-sys"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-ofx-testplug"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-cuda",
  "bv-ofx-sys",
@@ -740,11 +763,16 @@ dependencies = [
 
 [[package]]
 name = "bv-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alsa",
+ "block2 0.6.2",
+ "bv-apple",
  "bv-core",
  "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "windows",
  "windows-core",
  "x11-dl",
@@ -752,14 +780,14 @@ dependencies = [
 
 [[package]]
 name = "bv-png"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-deflate",
 ]
 
 [[package]]
 name = "bv-prores"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-bitstream",
  "bv-mp4",
@@ -767,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "bv-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-color",
  "bv-core",
@@ -779,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "bv-timeline"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-color",
  "bv-core",
@@ -790,12 +818,13 @@ dependencies = [
 
 [[package]]
 name = "bv-track"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-ui-egui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "bv-bridge",
  "bv-core",
  "bv-engine",
  "bv-ofx",
@@ -804,9 +833,11 @@ dependencies = [
  "bv-png",
  "bv-render",
  "bv-timeline",
+ "bv-vst2",
  "bv-vst3",
  "bv-wav",
  "bv-zip",
+ "bytemuck",
  "eframe",
  "egui_dock",
  "egui_kittest",
@@ -818,39 +849,69 @@ dependencies = [
 ]
 
 [[package]]
-name = "bv-vst3"
-version = "0.2.0"
+name = "bv-vst2"
+version = "0.3.0"
 dependencies = [
+ "bv-apple",
+ "bv-bridge",
+ "bv-vst2-sys",
+ "bv-vst2-testplug",
+ "cc",
+ "libloading",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bv-vst2-sys"
+version = "0.3.0"
+
+[[package]]
+name = "bv-vst2-testplug"
+version = "0.3.0"
+dependencies = [
+ "bv-vst2-sys",
+]
+
+[[package]]
+name = "bv-vst3"
+version = "0.3.0"
+dependencies = [
+ "bv-apple",
+ "bv-bridge",
  "bv-vst3-sys",
  "bv-vst3-testplug",
+ "cc",
  "libloading",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "bv-vst3-sys"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-vst3-testplug"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-vst3-sys",
 ]
 
 [[package]]
 name = "bv-wav"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "bv-wic"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "bv-zip"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bv-deflate",
 ]
@@ -4577,7 +4638,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
 ]

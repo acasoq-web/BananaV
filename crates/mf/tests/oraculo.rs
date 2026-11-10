@@ -1,7 +1,10 @@
 //! Compara a decodificação da Media Foundation com a do ffmpeg (oráculo).
 //! Precisa do `ffmpeg` no PATH; rodar com `cargo test -p bv-mf -- --ignored`.
 
-#![cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#![cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 
 use std::path::PathBuf;
 use std::process::Command;

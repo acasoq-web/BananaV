@@ -146,6 +146,8 @@ pub mod iid {
     pub const PARAMETER_CHANGES: Tuid = uid(0xA477_9663, 0x0BB6_4A56, 0xB443_84A8, 0x466F_EB9D);
     pub const PLUG_VIEW: Tuid = uid(0x5BC3_2507, 0xD060_49EA, 0xA615_1B52, 0x2B75_5B29);
     pub const PLUG_FRAME: Tuid = uid(0x367F_AF01, 0xAFA9_4693, 0x8D4D_A2A0, 0xED08_82A3);
+    /// A controller's units and their program lists (`ivstunits.h`).
+    pub const UNIT_INFO: Tuid = uid(0x3D4B_D6B5, 0x913A_4FD2, 0xA886_E768, 0xA5EB_92C1);
     /// Linux's run loop (`Steinberg::Linux`), which the host gives through
     /// the editor's frame, and its handlers.
     pub const RUN_LOOP: Tuid = uid(0x18C3_5366, 0x9776_4F1A, 0x9C5B_8385, 0x7A87_1389);
@@ -209,8 +211,12 @@ pub mod restart {
 /// `ProcessContext::state`.
 pub mod context {
     pub const PLAYING: u32 = 1 << 1;
+    pub const CYCLE_ACTIVE: u32 = 1 << 2;
+    pub const SYSTEM_TIME_VALID: u32 = 1 << 8;
     pub const PROJECT_TIME_MUSIC_VALID: u32 = 1 << 9;
     pub const TEMPO_VALID: u32 = 1 << 10;
+    pub const BAR_POSITION_VALID: u32 = 1 << 11;
+    pub const CYCLE_VALID: u32 = 1 << 12;
     pub const TIME_SIG_VALID: u32 = 1 << 13;
     pub const CONT_TIME_VALID: u32 = 1 << 17;
 }
@@ -218,6 +224,17 @@ pub mod context {
 /// The window kinds a plug-in view can live in.
 pub const PLATFORM_HWND: &std::ffi::CStr = c"HWND";
 pub const PLATFORM_X11: &std::ffi::CStr = c"X11EmbedWindowID";
+/// macOS's kind of window for an editor: an `NSView` (Cocoa).
+pub const PLATFORM_NSVIEW: &std::ffi::CStr = c"NSView";
+/// This system's kind of window for an editor: Windows' HWND, macOS's
+/// NSView, X11's window elsewhere.
+pub const PLATFORM_NATIVE: &std::ffi::CStr = if cfg!(windows) {
+    PLATFORM_HWND
+} else if cfg!(target_os = "macos") {
+    PLATFORM_NSVIEW
+} else {
+    PLATFORM_X11
+};
 /// The one view type.
 pub const VIEW_EDITOR: &std::ffi::CStr = c"editor";
 
@@ -370,6 +387,34 @@ pub struct ParameterInfo {
     pub flags: i32,
 }
 
+/// The units' identifiers: the root unit (the plug-in itself), and no
+/// program list.
+pub const ROOT_UNIT: i32 = 0;
+pub const NO_PROGRAM_LIST: i32 = -1;
+
+/// A unit of a controller (`UnitInfo`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UnitInfo {
+    pub id: i32,
+    pub parent_unit_id: i32,
+    pub name: [u16; 128],
+    pub program_list_id: i32,
+}
+
+/// A program list (`ProgramListInfo`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ProgramListInfo {
+    pub id: i32,
+    pub name: [u16; 128],
+    pub program_count: i32,
+}
+
+/// `IAudioProcessor::getTailSamples`: none, and for ever.
+pub const NO_TAIL: u32 = 0;
+pub const INFINITE_TAIL: u32 = u32::MAX;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewRect {
@@ -499,6 +544,26 @@ pub struct IPlugViewVtbl {
     pub set_frame: unsafe extern "system" fn(Raw, Raw) -> TResult,
     pub can_resize: unsafe extern "system" fn(Raw) -> TResult,
     pub check_size_constraint: unsafe extern "system" fn(Raw, *mut ViewRect) -> TResult,
+}
+
+/// A controller's units: their program lists, a program's name and data.
+#[repr(C)]
+#[derive(Debug)]
+pub struct IUnitInfoVtbl {
+    pub unknown: FUnknownVtbl,
+    pub get_unit_count: unsafe extern "system" fn(Raw) -> i32,
+    pub get_unit_info: unsafe extern "system" fn(Raw, i32, *mut UnitInfo) -> TResult,
+    pub get_program_list_count: unsafe extern "system" fn(Raw) -> i32,
+    pub get_program_list_info: unsafe extern "system" fn(Raw, i32, *mut ProgramListInfo) -> TResult,
+    pub get_program_name: unsafe extern "system" fn(Raw, i32, i32, *mut u16) -> TResult,
+    pub get_program_info:
+        unsafe extern "system" fn(Raw, i32, i32, *const c_char, *mut u16) -> TResult,
+    pub has_program_pitch_names: unsafe extern "system" fn(Raw, i32, i32) -> TResult,
+    pub get_program_pitch_name: unsafe extern "system" fn(Raw, i32, i32, i16, *mut u16) -> TResult,
+    pub get_selected_unit: unsafe extern "system" fn(Raw) -> i32,
+    pub select_unit: unsafe extern "system" fn(Raw, i32) -> TResult,
+    pub get_unit_by_bus: unsafe extern "system" fn(Raw, i32, i32, i32, i32, *mut i32) -> TResult,
+    pub set_unit_program_data: unsafe extern "system" fn(Raw, i32, i32, Raw) -> TResult,
 }
 
 /// The tables of the interfaces the host implements.
@@ -696,6 +761,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<ProcessSetup>(), 24);
         assert_eq!(std::mem::size_of::<ProcessContext>(), 112);
         assert_eq!(std::mem::size_of::<ViewRect>(), 16);
+        assert_eq!(std::mem::size_of::<UnitInfo>(), 268);
+        assert_eq!(std::mem::size_of::<ProgramListInfo>(), 264);
         assert_eq!(std::mem::size_of::<PClassInfo>(), 116);
         assert_eq!(std::mem::size_of::<PClassInfo2>(), 440);
         assert_eq!(std::mem::size_of::<PFactoryInfo>(), 452);

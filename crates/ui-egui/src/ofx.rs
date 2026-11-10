@@ -202,6 +202,14 @@ pub struct OfxUi {
     mask_track: Option<crate::mask_tracking::MaskTrackAsk>,
     /// An event length a button asked for, for the app to set.
     length: Option<LengthAsk>,
+    /// Settings a button asked to give the track's other events, for the
+    /// app to give.
+    transfer: Option<TransferAsk>,
+    /// The fonts text boxes show their text in, added to the interface's:
+    /// by family, bold and italic, their name there (none: the computer
+    /// has no face for it) and the frame they were added in (usable from
+    /// the next).
+    text_fonts: HashMap<(String, bool, bool), (Option<String>, u64)>,
     /// The keyframe controllers' state, by effect.
     keys: HashMap<EditorKey, KeyView>,
     /// The keyframes copied in a keyframe controller (their parameters,
@@ -267,6 +275,8 @@ impl Default for OfxUi {
             analysis: None,
             mask_track: None,
             length: None,
+            transfer: None,
+            text_fonts: HashMap::new(),
             keys: HashMap::new(),
             key_clip: Vec::new(),
             curve_views: HashMap::new(),
@@ -460,8 +470,9 @@ impl OfxUi {
 pub enum EditorOwner {
     /// An effect of an FX chain.
     Fx(FxTarget),
-    /// The transition an event comes in with.
-    Transition(ClipId),
+    /// The transition an event comes in with (`true`: the one it goes out
+    /// with).
+    Transition(ClipId, bool),
     /// Media a plug-in generates.
     Generator(MediaId),
     /// A video track's compositor (its Custom Compositing Mode's, or with
@@ -474,7 +485,7 @@ impl EditorOwner {
     fn context(self, info: &PluginInfo) -> Context {
         match self {
             EditorOwner::Fx(_) => filter_context(info).unwrap_or(Context::Filter),
-            EditorOwner::Transition(_) => Context::Transition,
+            EditorOwner::Transition(..) => Context::Transition,
             EditorOwner::Generator(_) => Context::Generator,
             EditorOwner::Compositor(..) => Context::General,
         }
@@ -498,7 +509,8 @@ impl EditorKey {
             EditorOwner::Fx(FxTarget::Media(id, false)) => FxOwner::Media(id),
             EditorOwner::Fx(FxTarget::Track(id)) => FxOwner::Track(id),
             EditorOwner::Fx(FxTarget::VideoOutput) => FxOwner::Output,
-            EditorOwner::Transition(id) => FxOwner::Transition(id),
+            EditorOwner::Transition(id, false) => FxOwner::Transition(id),
+            EditorOwner::Transition(id, true) => FxOwner::TransitionOut(id),
             EditorOwner::Compositor(id, parent) => FxOwner::Compositor(id, parent),
             _ => return None,
         };
@@ -859,6 +871,7 @@ pub fn params(
     let mut touched: Vec<String> = Vec::new();
     // In `columns` columns side by side (the FX window's Columns buttons),
     // in order, about as many rows in each.
+    let columns = columns.max(1);
     let rows_width = {
         let mut ctx = Rows {
             ofx: &mut *ofx,
@@ -869,30 +882,93 @@ pub fn params(
             touched: &mut touched,
             own,
             depth: 0,
+            span: (width - 18.0 * (columns - 1) as f32) / columns as f32,
         };
         let units = ctx.shown("");
-        let weights: Vec<usize> = units.iter().map(|i| ctx.weight(i, 0)).collect();
-        let parts = split_columns(&weights, columns);
-        let grids = ui.horizontal_top(|ui| {
-            let mut first = 0;
-            for (c, &n) in parts.iter().enumerate() {
-                if c > 0 {
-                    ui.add_space(18.0);
-                }
-                ui.vertical(|ui| {
-                    egui::Grid::new(("ofx-params", &key.id, key.index, c))
-                        .num_columns(4)
-                        .spacing([10.0, 6.0])
-                        .show(ui, |ui| {
-                            for info in &units[first..first + n] {
-                                ctx.unit(ui, info, 0);
-                            }
-                        });
+        // Pages shown as tabs (BananaV's extension): the parameters no tab
+        // holds above, the tabs' strip, the chosen tab's parameters under
+        // it (Credit Roll's Properties and Styles).
+        let tabs: Vec<&ParamInfo> = infos
+            .iter()
+            .filter(|i| i.ty == ParamType::Page && i.tab && !i.secret)
+            .collect();
+        if !tabs.is_empty() {
+            let in_tabs = |name: &str| tabs.iter().any(|t| t.children.iter().any(|c| c == name));
+            let above: Vec<&ParamInfo> = units
+                .iter()
+                .copied()
+                .filter(|i| !in_tabs(&i.name))
+                .collect();
+            let tab_id = egui::Id::new(("ofx-tab", &key.id, key.index));
+            let mut chosen: usize = ui
+                .data(|d| d.get_temp(tab_id))
+                .unwrap_or(0)
+                .min(tabs.len() - 1);
+            let grids = ui.vertical(|ui| {
+                egui::Grid::new(("ofx-params", &key.id, key.index, "above"))
+                    .num_columns(4)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        for info in &above {
+                            ctx.unit(ui, info, 0);
+                        }
+                    });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    for (i, t) in tabs.iter().enumerate() {
+                        let label = say(own, &t.label);
+                        if ui
+                            .add(egui::Button::selectable(
+                                i == chosen,
+                                RichText::new(label).strong(),
+                            ))
+                            .clicked()
+                        {
+                            chosen = i;
+                        }
+                    }
                 });
-                first += n;
-            }
-        });
-        grids.response.rect.width().ceil()
+                ui.separator();
+                let inside: Vec<&ParamInfo> = tabs[chosen]
+                    .children
+                    .iter()
+                    .filter_map(|c| units.iter().copied().find(|u| &u.name == c))
+                    .collect();
+                egui::Grid::new(("ofx-params", &key.id, key.index, "tab", chosen))
+                    .num_columns(4)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        for info in &inside {
+                            ctx.unit(ui, info, 0);
+                        }
+                    });
+            });
+            ui.data_mut(|d| d.insert_temp(tab_id, chosen));
+            grids.response.rect.width().ceil()
+        } else {
+            let weights: Vec<usize> = units.iter().map(|i| ctx.weight(i, 0)).collect();
+            let parts = split_columns(&weights, columns);
+            let grids = ui.horizontal_top(|ui| {
+                let mut first = 0;
+                for (c, &n) in parts.iter().enumerate() {
+                    if c > 0 {
+                        ui.add_space(18.0);
+                    }
+                    ui.vertical(|ui| {
+                        egui::Grid::new(("ofx-params", &key.id, key.index, c))
+                            .num_columns(4)
+                            .spacing([10.0, 6.0])
+                            .show(ui, |ui| {
+                                for info in &units[first..first + n] {
+                                    ctx.unit(ui, info, 0);
+                                }
+                            });
+                    });
+                    first += n;
+                }
+            });
+            grids.response.rect.width().ceil()
+        }
     };
     if (rows_width - width).abs() > 0.5 {
         ui.data_mut(|d| d.insert_temp(width_id, rows_width));
@@ -902,6 +978,18 @@ pub fn params(
         return (new != *fx).then_some(new);
     }
     rich_text(ui, &key, &infos, fx, &mut new, &touched);
+    // A button giving these settings to the track's other events
+    // (BananaV's extension): the app gives them.
+    if let Some(info) = infos
+        .iter()
+        .find(|i| !i.transfer.is_empty() && touched.contains(&i.name))
+    {
+        ofx.transfer = Some(TransferAsk {
+            owner: key.owner,
+            fx: new.clone(),
+            keep: info.transfer.split_whitespace().map(String::from).collect(),
+        });
+    }
     // The plug-in hears of the change, and may change others in turn —
     // reading, if it wants, the picture the preview gave it last.
     let e = ofx.editors.get_mut(&key)?;
@@ -1167,6 +1255,17 @@ pub(crate) struct LengthAsk {
     pub rate: f64,
 }
 
+/// Settings a push button asked to give the other events of its event's
+/// track that the same plug-in makes (BananaV's
+/// `kBananaVParamPropTransfer`): whose settings they are, the settings,
+/// and the parameters each of the others keeps.
+#[derive(Clone, Debug)]
+pub(crate) struct TransferAsk {
+    pub owner: EditorOwner,
+    pub fx: PluginFx,
+    pub keep: Vec<String>,
+}
+
 impl OfxUi {
     /// The analysis a button asked for since last asked.
     pub(crate) fn take_analysis(&mut self) -> Option<AnalysisAsk> {
@@ -1182,11 +1281,63 @@ impl OfxUi {
     pub(crate) fn take_length(&mut self) -> Option<LengthAsk> {
         self.length.take()
     }
+
+    /// The settings a button asked to give since last asked.
+    pub(crate) fn take_transfer(&mut self) -> Option<TransferAsk> {
+        self.transfer.take()
+    }
 }
 
 /// OpenFX's layout hint that puts the next parameter on a parameter's
 /// line (`kOfxParamPropLayoutHintNoNewLine`).
 const NO_NEW_LINE: i32 = 2;
+
+/// A page's bar's and text's heights, and how far a switch's box stands
+/// in where a number goes.
+const BAR_H: f32 = 26.0;
+const PAGE_H: f32 = 136.0;
+const SWITCH_IN: f32 = 32.0;
+
+/// A push button shown with its label (one with a picture sits among
+/// controls, BananaV's `kBananaVParamPropIcon`).
+fn is_button(info: &ParamInfo) -> bool {
+    info.ty == ParamType::PushButton && info.icon.is_empty()
+}
+
+/// The picture a plug-in names for a button or an option (BananaV's
+/// `kBananaVParamPropIcon`, `kBananaVParamPropOptionIcons`).
+fn icon_named(name: &str) -> Option<crate::icons::Icon> {
+    use crate::icons::Icon;
+    Some(match name {
+        "alignLeft" => Icon::AlignLeft,
+        "alignCenter" => Icon::AlignCenter,
+        "alignRight" => Icon::AlignRight,
+        "transfer" => Icon::Transfer,
+        _ => return None,
+    })
+}
+
+/// How a page's text looks (see `Rows::page_look`).
+#[derive(Clone, Debug)]
+struct PageLook {
+    family: String,
+    size: f64,
+    bold: bool,
+    italic: bool,
+    align: egui::Align,
+}
+
+impl Default for PageLook {
+    fn default() -> PageLook {
+        PageLook {
+            family: String::new(),
+            size: 0.0,
+            bold: false,
+            italic: false,
+            align: egui::Align::Min,
+        }
+    }
+}
 
 /// Where a push button stands among buttons laid on one line.
 enum ButtonRun<'a> {
@@ -1449,13 +1600,16 @@ struct Rows<'a> {
     own: bool,
     /// How deep in groups the rows being drawn are (their names step in).
     depth: usize,
+    /// How wide a row may be across its column (measured last frame): a
+    /// text drawn as a page spans it.
+    span: f32,
 }
 
 impl<'a> Rows<'a> {
     /// The parameters shown under `parent`.
     fn shown(&self, parent: &str) -> Vec<&'a ParamInfo> {
         // A transition's progress is the host's to set.
-        let transition = matches!(self.key.owner, EditorOwner::Transition(_));
+        let transition = matches!(self.key.owner, EditorOwner::Transition(..));
         let infos: &'a [ParamInfo] = self.infos;
         infos
             .iter()
@@ -1490,11 +1644,21 @@ impl<'a> Rows<'a> {
     /// and the triangle that opens or closes it — and, open, its
     /// parameters' rows, their names stepped in.
     fn unit(&mut self, ui: &mut Ui, info: &ParamInfo, depth: usize) {
-        if info.ty == ParamType::PushButton {
+        // A text drawn as a page goes with its bar (see `page`).
+        if self.barred(info) {
+            return;
+        }
+        if info.ty != ParamType::Group {
             match self.button_run(info) {
                 ButtonRun::Inside => return,
                 ButtonRun::Starts(run) if run.len() > 1 => {
-                    self.buttons_row(ui, &run);
+                    if is_button(info) {
+                        self.buttons_row(ui, &run);
+                    } else if let Some(text) = self.page_after(&run) {
+                        self.page(ui, &run, text);
+                    } else {
+                        self.line_row(ui, &run);
+                    }
                     return;
                 }
                 ButtonRun::Starts(_) => {}
@@ -1552,27 +1716,508 @@ impl<'a> Rows<'a> {
         }
     }
 
-    /// Where push button `info` stands among buttons laid on one line
-    /// (OpenFX's no-new-line layout hint: the next one on its line).
+    /// Where parameter `info` stands among those laid on one line
+    /// (OpenFX's no-new-line layout hint: the next one on its line) —
+    /// push buttons among buttons, other controls among controls (a text
+    /// box's bar of its font, size, bold, italic and justification).
     fn button_run(&self, info: &ParamInfo) -> ButtonRun<'a> {
         let siblings = self.shown(&info.parent);
         let Some(i) = siblings.iter().position(|s| s.name == info.name) else {
             return ButtonRun::Starts(Vec::new());
         };
-        let joins = |s: &ParamInfo| s.ty == ParamType::PushButton && s.layout_hint == NO_NEW_LINE;
+        let button = |s: &ParamInfo| is_button(s);
+        let alike = |s: &ParamInfo| s.ty != ParamType::Group && button(s) == button(info);
+        let joins = |s: &ParamInfo| alike(s) && s.layout_hint == NO_NEW_LINE;
         if i > 0 && joins(siblings[i - 1]) {
             return ButtonRun::Inside;
         }
         let mut run = vec![siblings[i]];
         let mut j = i;
-        while joins(siblings[j])
-            && j + 1 < siblings.len()
-            && siblings[j + 1].ty == ParamType::PushButton
-        {
+        while joins(siblings[j]) && j + 1 < siblings.len() && alike(siblings[j + 1]) {
             j += 1;
             run.push(siblings[j]);
         }
         ButtonRun::Starts(run)
+    }
+
+    /// Controls on one line: a row of their own, side by side where a
+    /// control goes, each without its name before it (its tooltip says
+    /// it) nor its clock — a toggle a button showing its short label, a
+    /// choice its list, a number its box.
+    fn line_row(&mut self, ui: &mut Ui, run: &[&ParamInfo]) {
+        ui.label("");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for info in run {
+                self.compact(ui, info);
+            }
+        });
+        ui.label("");
+        ui.label("");
+        ui.end_row();
+    }
+
+    /// The rich text right after the line of controls `run`, drawn as a
+    /// page under it (BananaV's `kBananaVParamPropRichText`): its bar.
+    fn page_after(&self, run: &[&ParamInfo]) -> Option<&'a ParamInfo> {
+        let last = run.last()?;
+        let siblings = self.shown(&last.parent);
+        let i = siblings.iter().position(|s| s.name == last.name)?;
+        siblings
+            .get(i + 1)
+            .copied()
+            .filter(|t| t.ty == ParamType::String && !t.rich_text.is_empty())
+    }
+
+    /// Whether `info` is a rich text drawn as a page under the line of
+    /// controls before it (with it, by [`Self::page`]).
+    fn barred(&self, info: &ParamInfo) -> bool {
+        if info.ty != ParamType::String || info.rich_text.is_empty() {
+            return false;
+        }
+        let siblings = self.shown(&info.parent);
+        let Some(i) = siblings.iter().position(|s| s.name == info.name) else {
+            return false;
+        };
+        let control = |s: &ParamInfo| s.ty != ParamType::Group && !is_button(s);
+        if i == 0 || !control(siblings[i - 1]) {
+            return false;
+        }
+        let mut start = i - 1;
+        while start > 0
+            && control(siblings[start - 1])
+            && siblings[start - 1].layout_hint == NO_NEW_LINE
+        {
+            start -= 1;
+        }
+        match self.button_run(siblings[start]) {
+            ButtonRun::Starts(run) => {
+                run.len() > 1 && run.last().is_some_and(|l| l.name == siblings[i - 1].name)
+            }
+            ButtonRun::Inside => false,
+        }
+    }
+
+    /// A rich text drawn as a page, as VEGAS draws its text: its name and
+    /// clock on a line, its bar — the line of controls `run`, pictures'
+    /// buttons at its end — across the whole width, then its text across
+    /// the whole width, dark on white, in the bar's font, size, bold,
+    /// italic and justification.
+    fn page(&mut self, ui: &mut Ui, run: &[&ParamInfo], text: &ParamInfo) {
+        let own = self.own;
+        let label = say(own, &text.label);
+        let id = egui::Id::new(("ofx-param", &self.key.id, self.key.index, &text.name));
+        let indent = INDENT * self.depth as f32;
+        let name = ui
+            .horizontal(|ui| {
+                ui.add_space(indent);
+                ui.add_enabled_ui(text.enabled, |ui| {
+                    ui.add(egui::Label::new(format!("{label}:")).selectable(false));
+                });
+            })
+            .response;
+        if !text.hint.is_empty() {
+            name.on_hover_text(say(own, &text.hint));
+        }
+        ui.label("");
+        ui.label("");
+        self.clock(ui, text);
+        ui.end_row();
+        // The bar, across the width.
+        let width = (self.span - 2.0).max(240.0);
+        let (cell, _) = ui.allocate_exact_size(vec2(1.0, BAR_H), Sense::hover());
+        let mut bar = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(
+                    pos2(cell.min.x + indent, cell.min.y),
+                    vec2(width - indent, BAR_H),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        bar.spacing_mut().item_spacing.x = 4.0;
+        let (pictures, controls): (Vec<&ParamInfo>, Vec<&ParamInfo>) = run
+            .iter()
+            .copied()
+            .partition(|i| i.ty == ParamType::PushButton);
+        for info in &controls {
+            self.compact(&mut bar, info);
+        }
+        bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for info in pictures.iter().rev() {
+                self.compact(ui, info);
+            }
+        });
+        ui.label("");
+        ui.label("");
+        ui.label("");
+        ui.end_row();
+        // The text, across the width.
+        let (cell, _) = ui.allocate_exact_size(vec2(1.0, PAGE_H), Sense::hover());
+        let rect = Rect::from_min_size(
+            pos2(cell.min.x + indent, cell.min.y),
+            vec2(width - indent, PAGE_H),
+        );
+        let look = self.page_look(run);
+        if let Some(v) = self.page_text(ui, text, id, rect, &look) {
+            set_now(text, self.fx, self.place, v);
+            self.touched.push(text.name.clone());
+        }
+        ui.label("");
+        ui.label("");
+        ui.label("");
+        ui.end_row();
+    }
+
+    /// How a page's text looks, from its bar `run`: the family its string
+    /// list picks, the size its number holds, bold and italic as its
+    /// styled toggles say, the justification its pictured choice picks.
+    fn page_look(&self, run: &[&ParamInfo]) -> PageLook {
+        let mut look = PageLook::default();
+        for info in run {
+            let now = value_now(info, self.fx, self.place);
+            match info.ty {
+                ParamType::StrChoice if look.family.is_empty() => {
+                    look.family = now.text().to_string();
+                }
+                ParamType::Double | ParamType::Integer if look.size == 0.0 => {
+                    look.size = now.num(0);
+                }
+                ParamType::Boolean if info.button_style == "bold" => look.bold = now.num(0) != 0.0,
+                ParamType::Boolean if info.button_style == "italic" => {
+                    look.italic = now.num(0) != 0.0;
+                }
+                ParamType::Choice if !info.option_icons.is_empty() => {
+                    let i = now.num(0).round().max(0.0) as usize;
+                    look.align = match info.option_icons.get(i).map(String::as_str) {
+                        Some("alignCenter") => egui::Align::Center,
+                        Some("alignRight") => egui::Align::Max,
+                        _ => egui::Align::Min,
+                    };
+                }
+                _ => {}
+            }
+        }
+        look
+    }
+
+    /// The font family a page shows its text in: the computer's face for
+    /// `family`, bold and italic, added to the interface's fonts the first
+    /// time (usable from the next frame: until then, and where the
+    /// computer has none, the interface's own).
+    fn page_font(&mut self, ctx: &egui::Context, look: &PageLook) -> egui::FontFamily {
+        let key = (look.family.clone(), look.bold, look.italic);
+        let frame = ctx.cumulative_frame_nr();
+        let (name, added) = self
+            .ofx
+            .text_fonts
+            .entry(key)
+            .or_insert_with(|| {
+                let name = bv_engine::plugins::font_face(&look.family, look.bold, look.italic)
+                    .and_then(|(path, index)| {
+                        let bytes = std::fs::read(&path).ok()?;
+                        let name = format!(
+                            "bv-page:{}:{}:{}",
+                            look.family, look.bold as u8, look.italic as u8
+                        );
+                        let mut data = egui::FontData::from_owned(bytes);
+                        data.index = index;
+                        ctx.add_font(egui::epaint::text::FontInsert::new(
+                            &name,
+                            data,
+                            vec![egui::epaint::text::InsertFontFamily {
+                                family: egui::FontFamily::Name(name.clone().into()),
+                                priority: egui::epaint::text::FontPriority::Highest,
+                            }],
+                        ));
+                        Some(name)
+                    });
+                ctx.request_repaint();
+                (name, frame)
+            })
+            .clone();
+        let family = name
+            .filter(|_| frame > added)
+            .map(|n| egui::FontFamily::Name(n.into()))
+            .filter(|f| ctx.fonts(|fonts| fonts.families().contains(f)));
+        family.unwrap_or(egui::FontFamily::Proportional)
+    }
+
+    /// A page's text box in `rect`: dark on white in `look`'s font, as big
+    /// as its size in points shows (96 dots an inch). The new text when it
+    /// was typed; the part selected kept for the bar's settings (see
+    /// `rich_text`).
+    fn page_text(
+        &mut self,
+        ui: &mut Ui,
+        info: &ParamInfo,
+        id: egui::Id,
+        rect: Rect,
+        look: &PageLook,
+    ) -> Option<Value> {
+        let mut s = value_now(info, self.fx, self.place).text().to_string();
+        let family = self.page_font(ui.ctx(), look);
+        let size = (look.size.max(1.0) * 96.0 / 72.0).clamp(6.0, 400.0) as f32;
+        let font = egui::FontId::new(size, family);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        if !info.enabled {
+            child.disable();
+        }
+        let paper = egui::Color32::from_rgb(0xF0, 0xF0, 0xF0);
+        let ink = egui::Color32::from_rgb(0x10, 0x10, 0x10);
+        let mut changed = false;
+        egui::Frame::new()
+            .fill(paper)
+            .stroke(Stroke::new(1.0, theme::panel_dark()))
+            .inner_margin(egui::Margin::same(4))
+            .show(&mut child, |ui| {
+                ui.set_min_size(rect.size() - vec2(8.0, 8.0));
+                egui::ScrollArea::vertical()
+                    .id_salt(id.with("page-scroll"))
+                    .max_height(rect.height() - 8.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let out = egui::TextEdit::multiline(&mut s)
+                            .id(id.with("page"))
+                            .font(font)
+                            .text_color(ink)
+                            .background_color(paper)
+                            .frame(egui::Frame::NONE)
+                            .horizontal_align(look.align)
+                            .desired_width(f32::INFINITY)
+                            .lock_focus(true)
+                            .show(ui);
+                        changed = out.response.changed();
+                        if out.response.has_focus() {
+                            let picked = out
+                                .cursor_range
+                                .map(|r| {
+                                    let (a, b) = (r.primary.index.0, r.secondary.index.0);
+                                    (a.min(b), a.max(b))
+                                })
+                                .filter(|(a, b)| a < b);
+                            let key = id.with("selection");
+                            ui.data_mut(|d| match picked {
+                                Some(x) => {
+                                    d.insert_temp(key, x);
+                                }
+                                None => d.remove::<(usize, usize)>(key),
+                            });
+                        }
+                    });
+            });
+        changed.then_some(Value::Text(s))
+    }
+
+    /// A parameter's clock: animate it, or stop (empty where it does not
+    /// animate).
+    fn clock(&mut self, ui: &mut Ui, info: &ParamInfo) {
+        let animated = self
+            .fx
+            .params
+            .get(&info.name)
+            .is_some_and(|p| !p.keys.is_empty());
+        if info.animates && info.ty.has_value() {
+            let tip = if animated {
+                tr("Animated: changes set keyframes. Click to stop animating.")
+            } else {
+                tr("Animate")
+            };
+            let r = ui
+                .add_enabled_ui(info.enabled, |ui| {
+                    crate::ofx_controls::animate(ui, animated, tip).on_hover_text(tip)
+                })
+                .inner;
+            if r.clicked() {
+                toggle_animation(info, self.fx, self.place);
+                self.touched.push(info.name.clone());
+            }
+        } else {
+            ui.label("");
+        }
+    }
+
+    /// One control of a line of them ([`Self::line_row`]).
+    fn compact(&mut self, ui: &mut Ui, info: &ParamInfo) {
+        use crate::ofx_controls::field;
+        let label = say(self.own, &info.label);
+        let id = egui::Id::new(("ofx-param", &self.key.id, self.key.index, &info.name));
+        let now = value_now(info, self.fx, self.place);
+        let tip = if info.hint.is_empty() {
+            label.clone()
+        } else {
+            format!("{label}: {}", say(self.own, &info.hint))
+        };
+        let own = self.own;
+        let mut picked: Option<Value> = None;
+        ui.add_enabled_ui(info.enabled, |ui| match info.ty {
+            // A picture's button (Transfer Text Properties).
+            ParamType::PushButton => {
+                let icon = icon_named(&info.icon).unwrap_or(crate::icons::Icon::More);
+                if crate::widgets::icon_button_ex(ui, icon, &tip, false, true).clicked() {
+                    picked = Some(Value::None);
+                }
+            }
+            // A word processor's toggle: its letter bold or slanted.
+            ParamType::Boolean if !info.button_style.is_empty() => {
+                let on = now.num(0) != 0.0;
+                let text = if info.short_label.is_empty() {
+                    label.clone()
+                } else {
+                    say(own, &info.short_label)
+                };
+                let letter = match info.button_style.as_str() {
+                    "bold" => RichText::new(text).size(14.0).strong(),
+                    "italic" => RichText::new(text).size(14.0).italics(),
+                    _ => RichText::new(text).size(14.0),
+                };
+                let r = ui
+                    .add(
+                        egui::Button::new(letter)
+                            .selected(on)
+                            .min_size(vec2(24.0, 22.0))
+                            .corner_radius(3.0),
+                    )
+                    .on_hover_text(&tip);
+                r.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, &label)
+                });
+                if r.clicked() {
+                    picked = Some(Value::Num(vec![if on { 0.0 } else { 1.0 }]));
+                }
+            }
+            // Its options as pictures' toggles (the justification's).
+            ParamType::Choice if !info.option_icons.is_empty() => {
+                let i = now.num(0).round().max(0.0) as usize;
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (j, name) in info.option_icons.iter().enumerate() {
+                    let icon = icon_named(name).unwrap_or(crate::icons::Icon::More);
+                    let option = info.options.get(j).map(|o| say(own, o)).unwrap_or_default();
+                    let r = crate::widgets::icon_button_ex(ui, icon, &option, i == j, true);
+                    if r.clicked() && i != j {
+                        picked = Some(Value::Num(vec![j as f64]));
+                    }
+                }
+            }
+            // A number with values offered beside it (a font's sizes).
+            ParamType::Double | ParamType::Integer if !info.suggested.is_empty() => {
+                let x = now.num(0);
+                let whole = (x - x.round()).abs() < 1e-9;
+                let digits = if whole {
+                    0
+                } else {
+                    info.digits.clamp(0, 6) as usize
+                };
+                let text = crate::fmt::num(x, digits);
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if let Some(t) = field(ui, id.with("number"), &text, 36.0, &label)
+                    && let Some(typed) = crate::fmt::parse(&t)
+                {
+                    picked = Some(Value::Num(vec![typed]));
+                }
+                let list = crate::generated_media::list_button(ui);
+                egui::Popup::menu(&list).show(|ui| {
+                    for &v in &info.suggested {
+                        let name = crate::fmt::num(v, 0);
+                        if crate::menus::check_item(ui, &name, (v - x).abs() < 1e-9, true, "") {
+                            picked = Some(Value::Num(vec![v]));
+                        }
+                    }
+                });
+                if let Some(Value::Num(v)) = &mut picked {
+                    let lo = info.min.first().copied().unwrap_or(f64::MIN);
+                    let hi = info.max.first().copied().unwrap_or(f64::MAX);
+                    v[0] = v[0].clamp(lo.min(hi), hi.max(lo));
+                }
+            }
+            ParamType::Boolean => {
+                let on = now.num(0) != 0.0;
+                let text = if info.short_label.is_empty() {
+                    label.clone()
+                } else {
+                    say(own, &info.short_label)
+                };
+                let r = ui
+                    .add(egui::Button::selectable(on, RichText::new(text).strong()))
+                    .on_hover_text(&tip);
+                r.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, &label)
+                });
+                if r.clicked() {
+                    picked = Some(Value::Num(vec![if on { 0.0 } else { 1.0 }]));
+                }
+            }
+            ParamType::Choice => {
+                let mut i = now.num(0).round().max(0.0) as usize;
+                let before = i;
+                let text = info.options.get(i).map(|o| say(own, o)).unwrap_or_default();
+                egui::ComboBox::from_id_salt(id.with("choice"))
+                    .width(84.0)
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        for (j, o) in info.options.iter().enumerate() {
+                            ui.selectable_value(&mut i, j, say(own, o));
+                        }
+                    })
+                    .response
+                    .on_hover_text(&tip);
+                if i != before {
+                    picked = Some(Value::Num(vec![i as f64]));
+                }
+            }
+            ParamType::StrChoice => {
+                let current = now.text().to_string();
+                let mut chosen = current.clone();
+                let shown = info
+                    .option_values
+                    .iter()
+                    .position(|o| *o == current)
+                    .and_then(|j| info.options.get(j))
+                    .map(|o| say(own, o))
+                    .unwrap_or(current.clone());
+                egui::ComboBox::from_id_salt(id.with("strchoice"))
+                    .width(150.0)
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (j, o) in info.options.iter().enumerate() {
+                            let value = info.option_values.get(j).unwrap_or(o);
+                            ui.selectable_value(&mut chosen, value.clone(), say(own, o));
+                        }
+                    })
+                    .response
+                    .on_hover_text(&tip);
+                if chosen != current {
+                    picked = Some(Value::Text(chosen));
+                }
+            }
+            ParamType::Double | ParamType::Integer => {
+                let int = info.ty == ParamType::Integer;
+                let digits = if int {
+                    0
+                } else {
+                    info.digits.clamp(0, 6) as usize
+                };
+                let text = crate::fmt::num(now.num(0), digits);
+                if let Some(t) = field(ui, id.with("number"), &text, 48.0, &label)
+                    && let Some(x) = crate::fmt::parse(&t)
+                {
+                    let lo = info.min.first().copied().unwrap_or(f64::MIN);
+                    let hi = info.max.first().copied().unwrap_or(f64::MAX);
+                    let x = x.clamp(lo.min(hi), hi.max(lo));
+                    picked = Some(Value::Num(vec![if int { x.round() } else { x }]));
+                }
+            }
+            _ => {
+                ui.label(&label);
+            }
+        });
+        if let Some(v) = picked {
+            set_now(info, self.fx, self.place, v);
+            self.touched.push(info.name.clone());
+        }
     }
 
     /// Push buttons on one line: a row of their own, side by side where a
@@ -1605,9 +2250,19 @@ impl<'a> Rows<'a> {
     /// How many rows a parameter takes: a group, its heading's and its
     /// parameters'.
     fn weight(&self, info: &ParamInfo, depth: usize) -> usize {
-        // A button on an earlier one's line takes none.
-        if info.ty == ParamType::PushButton && matches!(self.button_run(info), ButtonRun::Inside) {
+        // A control on an earlier one's line takes none, nor a text drawn
+        // with its bar; the bar takes the page's rows.
+        if self.barred(info) {
             return 0;
+        }
+        if info.ty != ParamType::Group {
+            match self.button_run(info) {
+                ButtonRun::Inside => return 0,
+                ButtonRun::Starts(run) if run.len() > 1 && self.page_after(&run).is_some() => {
+                    return 2 + (PAGE_H / 30.0).round() as usize;
+                }
+                ButtonRun::Starts(_) => {}
+            }
         }
         if info.ty == ParamType::Parametric {
             return 10;
@@ -1699,29 +2354,7 @@ impl<'a> Rows<'a> {
             self.touched.push(info.name.clone());
         }
         // The clock.
-        let animated = self
-            .fx
-            .params
-            .get(&info.name)
-            .is_some_and(|p| !p.keys.is_empty());
-        if info.animates && info.ty.has_value() {
-            let tip = if animated {
-                tr("Animated: changes set keyframes. Click to stop animating.")
-            } else {
-                tr("Animate")
-            };
-            let r = ui
-                .add_enabled_ui(info.enabled, |ui| {
-                    crate::ofx_controls::animate(ui, animated, tip).on_hover_text(tip)
-                })
-                .inner;
-            if r.clicked() {
-                toggle_animation(info, self.fx, self.place);
-                self.touched.push(info.name.clone());
-            }
-        } else {
-            ui.label("");
-        }
+        self.clock(ui, info);
         ui.end_row();
         if position && open {
             ui.label("");
@@ -1991,13 +2624,17 @@ impl<'a> Rows<'a> {
                 })
             }
             ParamType::Boolean => {
+                // Its box where a number goes, as VEGAS draws a switch.
                 let mut on = v.num(0) != 0.0;
-                ui.add_enabled_ui(enabled, |ui| {
-                    if crate::widgets::checkbox(ui, &mut on, "").changed() {
-                        new = Some(Value::Num(vec![on as i32 as f64]));
-                    }
-                });
                 empty(ui);
+                ui.add_enabled_ui(enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(SWITCH_IN);
+                        if crate::widgets::checkbox(ui, &mut on, "").changed() {
+                            new = Some(Value::Num(vec![on as i32 as f64]));
+                        }
+                    });
+                });
                 new
             }
             ParamType::Choice => {
@@ -2239,6 +2876,15 @@ impl<'a> Rows<'a> {
                 });
                 picked.map(Value::Text)
             }
+            ParamType::PushButton if !info.icon.is_empty() => {
+                let icon = icon_named(&info.icon).unwrap_or(crate::icons::Icon::More);
+                let mut pushed = false;
+                ui.add_enabled_ui(enabled, |ui| {
+                    pushed = crate::widgets::icon_button_ex(ui, icon, label, false, true).clicked();
+                });
+                empty(ui);
+                pushed.then_some(Value::None)
+            }
             ParamType::PushButton => {
                 // A push: no value, the plug-in hears it. One asking for a
                 // picture BananaV cannot give yet waits greyed.
@@ -2267,8 +2913,8 @@ impl<'a> Rows<'a> {
 
 /// Where the effects of `target` work, at the cursor.
 pub fn place_of(target: FxTarget, p: &bv_timeline::Project, cursor: Tick) -> FxPlace {
-    if let FxTarget::Transition(clip) = target
-        && let Some(place) = transition_place(p, clip, cursor)
+    if let FxTarget::Transition(clip, out) = target
+        && let Some(place) = transition_place(p, clip, out, cursor)
     {
         return place;
     }
@@ -2323,7 +2969,7 @@ pub fn place_of(target: FxTarget, p: &bv_timeline::Project, cursor: Tick) -> FxP
         | FxTarget::InputBus(_)
         | FxTarget::Master
         | FxTarget::NewChain
-        | FxTarget::Transition(_) => {
+        | FxTarget::Transition(..) => {
             origin = Some(Tick::ZERO);
             (cursor, p.duration(), frame, whole)
         }
@@ -2341,24 +2987,28 @@ pub fn place_of(target: FxTarget, p: &bv_timeline::Project, cursor: Tick) -> FxP
 
 /// Where the transition event `clip` comes in with works: its time at the
 /// cursor (from the transition's start) and its length.
-pub fn transition_place(p: &Project, clip: ClipId, cursor: Tick) -> Option<FxPlace> {
+pub fn transition_place(p: &Project, clip: ClipId, out: bool, cursor: Tick) -> Option<FxPlace> {
     let c = p.clip(clip)?;
     let track = p.clip_track(clip)?;
-    let (fade_in, _) = track.effective_fades(c, p.auto_crossfade);
-    let length = if fade_in > Tick::ZERO {
-        fade_in
+    let (fade_in, fade_out) = track.effective_fades(c, p.auto_crossfade);
+    // The exit's over its fade-out, the entrance's over its fade-in (or
+    // its crossfade).
+    let (begins, length) = if out {
+        (c.end() - fade_out, fade_out)
+    } else if fade_in > Tick::ZERO {
+        (c.start, fade_in)
     } else {
-        c.fade_in
+        (c.start, c.fade_in)
     };
     let s = &p.settings;
     Some(FxPlace {
         rate: s.frame_rate,
-        time: (cursor - c.start).clamp(Tick::ZERO, length),
+        time: (cursor - begins).clamp(Tick::ZERO, length),
         duration: length,
         size: (s.width, s.height),
         map: frame_map(s.width, s.height),
         span: (Tick::ZERO, length),
-        origin: Some(c.start),
+        origin: Some(begins),
     })
 }
 
@@ -2704,7 +3354,7 @@ fn keys_range(p: &PluginParam, d: usize) -> (f64, f64) {
 fn current_fx(p: &Project, key: &EditorKey) -> Option<PluginFx> {
     match key.owner {
         EditorOwner::Fx(target) => target.chain(p)?.get(key.index)?.plugin.as_deref().cloned(),
-        EditorOwner::Transition(clip) => p.clip(clip)?.transition_fx.as_deref().cloned(),
+        EditorOwner::Transition(clip, out) => p.clip(clip)?.transition_plugin(out).0.cloned(),
         EditorOwner::Generator(media) => match &p.media(media)?.source {
             MediaSource::Generated(Generator::Plugin(fx)) => Some((**fx).clone()),
             _ => None,
@@ -2741,9 +3391,10 @@ fn set_fx(app: &mut BananaApp, key: &EditorKey, fx: PluginFx) {
                 move |p, c| target.set_chain(p, c),
             );
         }
-        EditorOwner::Transition(clip) => app.modify_merged(id, |p| {
+        EditorOwner::Transition(clip, out) => app.modify_merged(id, |p| {
             if let Some(c) = p.clip_mut(clip) {
-                c.transition_fx = Some(Box::new(fx));
+                let off = c.transition_plugin(out).1;
+                c.set_transition_plugin(out, Some(fx), off);
             }
         }),
         EditorOwner::Generator(media) => app.modify_merged(id, |p| {
@@ -3162,6 +3813,11 @@ fn position_handles(
         } else {
             None
         };
+        // A point to take: the open hand, the closed one once taken (the
+        // hands VEGAS's own video plug-ins show).
+        if app.ofx.position_hover.is_some() && app.ofx.position_drag.is_none() {
+            crate::cursors::set(ui.ctx(), crate::cursors::Cursor::HandOpen);
+        }
         if down && let Some((name, grip)) = app.ofx.position_drag.clone() {
             if let Some(p) = positions.iter().find(|p| p.name == name) {
                 let c = to_canonical(q - grip);
@@ -3175,7 +3831,7 @@ fn position_handles(
                     set_fx(app, key, fx);
                 }
             }
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            crate::cursors::set(ui.ctx(), crate::cursors::Cursor::HandClosed);
             ui.ctx().request_repaint();
         }
     }
@@ -3285,7 +3941,7 @@ pub fn overlay_ui(ui: &Ui, app: &mut BananaApp, nav: &egui::Response, frame: Rec
     // The keys held, which overlays hear with the pen (Mesh Warp's Shift).
     bv_ofx::interact::set_modifiers(
         (u32::from(keys.shift) * bv_ofx::interact::SHIFT)
-            | (u32::from(keys.ctrl) * bv_ofx::interact::CONTROL)
+            | (u32::from(keys.command) * bv_ofx::interact::CONTROL)
             | (u32::from(keys.alt) * bv_ofx::interact::ALT),
     );
     let mut answer = None;
@@ -3338,8 +3994,10 @@ pub fn overlay_ui(ui: &Ui, app: &mut BananaApp, nav: &egui::Response, frame: Rec
         }
         ui.ctx().request_repaint();
     }
+    // The plug-in took the pen: what it holds is dragged (the closed hand
+    // VEGAS's own video plug-ins show).
     if app.ofx.pen {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::HandClosed);
     }
     // Drawn again only when what it shows changes — the view, the
     // settings, the pen, the plug-in asking — and while playing, for a new

@@ -1,7 +1,7 @@
 //! Motion Blur: VEGAS's. What moves blurred along the frame's motion, as
 //! a camera's shutter would.
 //!
-//! VEGAS's math: the motion from the frame to the next (the last frame:
+//! As VEGAS's renders show: the motion from the frame to the next (the last frame:
 //! from the one before), each pixel's by the optical flow; the pixels
 //! moving more than Motion Threshold (min) and no more than (max) — parts
 //! of the frame's width a frame — make the mask. Their mean direction

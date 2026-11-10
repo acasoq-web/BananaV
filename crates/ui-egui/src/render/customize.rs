@@ -88,6 +88,7 @@ fn encoder_label(e: Encoder) -> &'static str {
         Encoder::Amd => "AMD VCE/AMF",
         Encoder::Intel => "Intel Quick Sync Video",
         Encoder::Qualcomm => "Qualcomm Adreno",
+        Encoder::Apple => "Apple VideoToolbox",
     }
 }
 

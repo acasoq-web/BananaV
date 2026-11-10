@@ -243,12 +243,19 @@ fn event_span(project: &Project, clip: &Clip, kind: EnvelopeKind) -> Tick {
         .clamp(Tick::ZERO, clip.duration)
 }
 
+/// Where `value` is drawn in the lane `r`, as VEGAS's: its top a pixel
+/// below the lane's top, its bottom a pixel above the lane's bottom.
 pub(crate) fn y_of(r: Rect, kind: EnvelopeKind, value: f32) -> f32 {
-    r.bottom() - kind.to_unit(value) * r.height()
+    r.bottom() - 1.0 - kind.to_unit(value) * (r.height() - 2.0).max(0.0)
 }
 
+/// The value at height `y` of the lane `r`, as VEGAS's (measured: a
+/// stroke painted on a 67-pixel lane gave each value this way, to the last
+/// bit): the rows counted up from the one above the bottom's, each a
+/// (height − 2)th of the range.
 pub(crate) fn value_at_y(r: Rect, kind: EnvelopeKind, y: f32) -> f32 {
-    kind.from_unit((r.bottom() - y) / r.height().max(1.0))
+    let step = 1.0 / (r.height() - 2.0).max(1.0);
+    kind.from_unit((r.bottom() - y - 1.0) * step)
 }
 
 /// The lane rect where `track`'s envelopes are drawn.
@@ -281,8 +288,9 @@ pub(crate) struct StripHit {
     pub value: f32,
 }
 
-/// A bus track's envelope under `pos` in its lane `r`: a point within 6
-/// pixels, else the line within 4.
+/// A bus track's envelope under `pos` in its lane `r`: a point within its
+/// reach, else the line within its own (Options › Envelope Appearance…;
+/// 6 and 4 points as VEGAS's).
 pub(crate) fn strip_hit(
     view: &TimelineView,
     l: &Layout,
@@ -290,7 +298,7 @@ pub(crate) fn strip_hit(
     envelopes: &[Envelope],
     pos: Pos2,
 ) -> Option<StripHit> {
-    if !r.expand(6.0).contains(pos) {
+    if !r.expand(point_reach()).contains(pos) {
         return None;
     }
     let mut best: Option<(f32, StripHit)> = None;
@@ -302,7 +310,7 @@ pub(crate) fn strip_hit(
     for env in envelopes.iter().filter(|e| visible(view, e.kind)) {
         for (i, p) in env.points.iter().enumerate() {
             let d = (pos2(view.x_of(l, p.at), y_of(r, env.kind, p.value)) - pos).length();
-            if d <= 6.0 {
+            if d <= point_reach() {
                 keep(
                     &mut best,
                     d,
@@ -321,7 +329,7 @@ pub(crate) fn strip_hit(
         for env in envelopes.iter().filter(|e| visible(view, e.kind)) {
             let v = env.value_at(at);
             let d = (y_of(r, env.kind, v) - pos.y).abs();
-            if d <= 4.0 {
+            if d <= line_reach() {
                 keep(
                     &mut best,
                     d + 10.0,
@@ -358,7 +366,7 @@ fn event_hit(
     let mut best: Option<(f32, EnvHit)> = None;
     for clip in &track.clips {
         let r = event_lane(view, l, row, clip);
-        if !r.expand(6.0).contains(pos) {
+        if !r.expand(point_reach()).contains(pos) {
             continue;
         }
         for env in clip.envelopes.iter().filter(|e| visible(view, e.kind)) {
@@ -366,7 +374,7 @@ fn event_hit(
             for (i, p) in env.points.iter().enumerate() {
                 let at = pos2(view.x_of(l, clip.start + p.at), y_of(r, env.kind, p.value));
                 let d = (at - pos).length();
-                if d <= 6.0 {
+                if d <= point_reach() {
                     nearer(
                         &mut best,
                         d,
@@ -390,7 +398,7 @@ fn event_hit(
             }
             let v = env.value_at(at - clip.start);
             let d = (y_of(r, env.kind, v) - pos.y).abs();
-            if d <= 4.0 {
+            if d <= line_reach() {
                 nearer(
                     &mut best,
                     d + 10.0,
@@ -409,6 +417,17 @@ fn event_hit(
     best.map(|b| b.1)
 }
 
+/// How near a point the pointer takes it (Options › Envelope
+/// Appearance…).
+fn point_reach() -> f32 {
+    crate::envelope_look::get().point_reach()
+}
+
+/// How near a line the pointer takes it.
+fn line_reach() -> f32 {
+    crate::envelope_look::get().line_reach()
+}
+
 pub(crate) fn hit(view: &TimelineView, l: &Layout, project: &Project, pos: Pos2) -> Option<EnvHit> {
     if !l.lanes.contains(pos) {
         return None;
@@ -424,7 +443,7 @@ pub(crate) fn hit(view: &TimelineView, l: &Layout, project: &Project, pos: Pos2)
     for env in track.envelopes.iter().filter(|e| visible(view, e.kind)) {
         for (i, p) in env.points.iter().enumerate() {
             let d = (pos2(view.x_of(l, p.at), y_of(r, env.kind, p.value)) - pos).length();
-            if d <= 6.0 {
+            if d <= point_reach() {
                 nearer(
                     &mut best,
                     d,
@@ -447,7 +466,7 @@ pub(crate) fn hit(view: &TimelineView, l: &Layout, project: &Project, pos: Pos2)
     for env in track.envelopes.iter().filter(|e| visible(view, e.kind)) {
         let v = env.value_at(at);
         let d = (y_of(r, env.kind, v) - pos.y).abs();
-        if d <= 4.0 {
+        if d <= line_reach() {
             nearer(
                 &mut best,
                 d,
@@ -530,7 +549,8 @@ struct Place {
 
 /// An envelope's line and points, as VEGAS draws them (measured on the
 /// user's prints): the line two points wide, a little darker either side;
-/// the points diamonds of its color edged dark.
+/// the points diamonds of its color edged dark — widths, sizes and shape as
+/// Options › Envelope Appearance… sets them.
 fn paint_one(
     p: &egui::Painter,
     view: &TimelineView,
@@ -539,32 +559,27 @@ fn paint_one(
     env: &Envelope,
     c: Color32,
 ) {
+    let look = crate::envelope_look::get();
     let Place { r, origin, span } = place;
     let line = polyline(view, l, r, env, origin, span);
     p.add(Shape::line(
         line.clone(),
-        Stroke::new(4.0, Color32::from_black_alpha(64)),
+        Stroke::new(look.line + 2.0, Color32::from_black_alpha(64)),
     ));
-    p.add(Shape::line(line, Stroke::new(2.0, c)));
+    p.add(Shape::line(line, Stroke::new(look.line, c)));
     for pt in &env.points {
         let at = pos2(view.x_of(l, origin + pt.at), y_of(r, env.kind, pt.value));
         p.add(Shape::convex_polygon(
-            diamond(at, 5.0),
+            look.point_shape(at, look.point + 1.0),
             Color32::from_gray(30),
             Stroke::NONE,
         ));
-        p.add(Shape::convex_polygon(diamond(at, 4.0), c, Stroke::NONE));
+        p.add(Shape::convex_polygon(
+            look.point_shape(at, look.point),
+            c,
+            Stroke::NONE,
+        ));
     }
-}
-
-/// A diamond around `at`, `r` from its middle to its corners.
-fn diamond(at: Pos2, r: f32) -> Vec<Pos2> {
-    vec![
-        pos2(at.x, at.y - r),
-        pos2(at.x + r, at.y),
-        pos2(at.x, at.y + r),
-        pos2(at.x - r, at.y),
-    ]
 }
 
 /// A bus's or a chain's envelopes in its bus track's lane `r`.
@@ -729,11 +744,12 @@ fn paint_tooltip(painter: &egui::Painter, at: Pos2, text: String) {
 }
 
 /// The envelope point under the pointer (or dragged), as VEGAS shows it: a
-/// white diamond edged grey and dark.
+/// white diamond edged grey and dark (its size and shape as the points').
 pub(crate) fn paint_hot_point(painter: &egui::Painter, at: Pos2) {
-    for (r, gray) in [(6.0, 30), (5.0, 176), (4.0, 240)] {
+    let look = crate::envelope_look::get();
+    for (grow, gray) in [(2.0, 30), (1.0, 176), (0.0, 240)] {
         painter.add(Shape::convex_polygon(
-            diamond(at, r),
+            look.point_shape(at, look.point + grow),
             Color32::from_gray(gray),
             Stroke::NONE,
         ));
@@ -1037,6 +1053,26 @@ impl BananaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lane as VEGAS's, measured with a painted stroke: on 67 pixels the
+    /// values go a 65th a row, the top one a pixel below the lane's top and
+    /// the bottom one a pixel above its bottom; what is drawn reads back.
+    #[test]
+    fn a_lane_maps_rows_to_values_as_vegas_does() {
+        let r = Rect::from_min_size(pos2(0.0, 100.0), vec2(300.0, 67.0));
+        let c = EnvelopeKind::CompositeLevel;
+        assert_eq!(y_of(r, c, 1.0), 101.0);
+        assert_eq!(y_of(r, c, 0.0), 166.0);
+        for k in 0..=65 {
+            let y = r.bottom() - 1.0 - k as f32;
+            let v = value_at_y(r, c, y);
+            assert_eq!(v, k as f32 * (1.0f32 / 65.0), "row {k}");
+            assert!((y_of(r, c, v) - y).abs() < 1e-3);
+        }
+        // Past the ends, the ends.
+        assert_eq!(value_at_y(r, c, 90.0), 1.0);
+        assert_eq!(value_at_y(r, c, 180.0), 0.0);
+    }
 
     /// Set To… reads what it shows and what is typed: percentages, dB,
     /// pans; nothing for a mute's.

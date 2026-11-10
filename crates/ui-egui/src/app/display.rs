@@ -36,12 +36,24 @@ impl BananaApp {
     /// scaling" off, one screen pixel per point, as on a 100 % display).
     pub(super) fn apply_look(&mut self, ctx: &egui::Context) {
         let p = &self.settings.prefs;
+        crate::envelope_look::set(p.envelope_look);
         theme::set_button_highlight(p.button_highlight);
         theme::set_icon_strength(p.icon_strength);
-        if self.look_applied != Some(p.interface) || theme::interface() != p.interface {
+        // The brightness the Preferences window shows while it is open (its
+        // slider's), else the one kept.
+        let brightness = self
+            .look_preview
+            .unwrap_or(p.interface_brightness)
+            .clamp(-40, 40);
+        let look = (p.interface, brightness);
+        if self.look_applied != Some(look)
+            || theme::interface() != p.interface
+            || theme::brightness() != brightness
+        {
             theme::set_interface(p.interface);
+            theme::set_brightness(brightness);
             theme::apply_kind(ctx, p.interface);
-            self.look_applied = Some(p.interface);
+            self.look_applied = Some(look);
         }
         let native = ctx
             .input(|i| i.viewport().native_pixels_per_point)

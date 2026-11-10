@@ -1,7 +1,8 @@
 //! Encoding through FFmpeg: the processor's encoders (x264, x265, SVT-AV1,
 //! libvpx; FFmpeg's own AAC, AC-3, FLAC and ALAC; LAME for MP3; Opus) and
 //! the graphics cards' (NVENC on NVIDIA cards, VA-API on AMD and Intel
-//! ones), giving packets for BananaV's own MP4/MOV writer.
+//! ones, VideoToolbox on a Mac), giving packets for BananaV's own MP4/MOV
+//! writer.
 //!
 //! As on Windows, video frames come packed 4:2:0 (NV12, or P010 for 10
 //! bits) and go out in display order (no B-frames), with the parameter sets
@@ -31,10 +32,12 @@ enum Family {
     Nvenc,
     /// AMD's and Intel's cards: frames copied to the card's surfaces.
     Vaapi,
+    /// The Mac's media engine (the encoder takes the frames from memory).
+    VideoToolbox,
 }
 
 /// FFmpeg's video encoders BananaV uses, by format, the preferred first.
-const VIDEO: [(Codec, Family, &str); 13] = [
+const VIDEO: [(Codec, Family, &str); 15] = [
     (Codec::H264, Family::Software, "libx264"),
     (Codec::H264, Family::Software, "libopenh264"),
     (Codec::Hevc, Family::Software, "libx265"),
@@ -48,6 +51,8 @@ const VIDEO: [(Codec, Family, &str); 13] = [
     (Codec::Hevc, Family::Vaapi, "hevc_vaapi"),
     (Codec::Av1, Family::Vaapi, "av1_vaapi"),
     (Codec::Vp9, Family::Vaapi, "vp9_vaapi"),
+    (Codec::H264, Family::VideoToolbox, "h264_videotoolbox"),
+    (Codec::Hevc, Family::VideoToolbox, "hevc_videotoolbox"),
 ];
 
 /// FFmpeg's audio encoders BananaV uses.
@@ -105,11 +110,12 @@ fn software_name(encoder: &str, codec: Codec) -> String {
 }
 
 /// The name of a card's encoder ("NVIDIA NVENC HEVC", "AMD Radeon RX 6600
-/// H.264 (VA-API)").
+/// H.264 (VA-API)", "Apple VideoToolbox H.264").
 fn card_name(family: Family, card: Option<usize>, codec: Codec) -> String {
     match (family, card.and_then(|i| hw::cards().get(i))) {
         (Family::Vaapi, Some(c)) => format!("{} {} (VA-API)", c.name, label(codec)),
         (Family::Vaapi, None) => format!("VA-API {}", label(codec)),
+        (Family::VideoToolbox, _) => format!("Apple VideoToolbox {}", label(codec)),
         _ => format!("NVIDIA NVENC {}", label(codec)),
     }
 }
@@ -152,13 +158,14 @@ fn list() -> Vec<EncoderInfo> {
         }
     }
     // The graphics cards, each encoder tried once: FFmpeg has NVENC and
-    // VA-API whatever cards the computer has.
+    // VA-API whatever cards the computer has (VideoToolbox on a Mac).
     let nvidia = hw::cards().iter().position(|c| c.vendor == Vendor::Nvidia);
     for (i, card) in hw::cards().iter().enumerate() {
         for &(codec, family, enc) in &VIDEO {
             let fits = match family {
                 Family::Nvenc => Some(i) == nvidia,
                 Family::Vaapi => matches!(card.vendor, Vendor::Amd | Vendor::Intel),
+                Family::VideoToolbox => card.vendor == Vendor::Apple,
                 Family::Software => false,
             };
             let known = out
@@ -333,6 +340,25 @@ unsafe fn tune(
                     (None, false) => o.set("rc", "vbr"),
                 }
             }
+            e if e.ends_with("_videotoolbox") => {
+                // The engine's software stands in on a Mac without it for
+                // the format (HEVC on older Intel Macs).
+                o.set("allow_sw", "1");
+                if s.ten_bit && e.starts_with("hevc") {
+                    o.set("profile", "main10");
+                }
+                match quality {
+                    // Constant quality (0–100) on Apple's chips only.
+                    Some(q) if cfg!(target_arch = "aarch64") => {
+                        (*ctx).flags |= ff::AV_CODEC_FLAG_QSCALE as c_int;
+                        (*ctx).global_quality = (q.max(1.0) * ff::FF_QP2LAMBDA as f64) as c_int;
+                        (*ctx).bit_rate = 0;
+                    }
+                    // Elsewhere the average rate the settings name.
+                    Some(_) => (*ctx).bit_rate = s.bitrate.max(1) as i64,
+                    None => {}
+                }
+            }
             e if e.ends_with("_vaapi") => match quality {
                 Some(q) => {
                     o.set("rc_mode", "CQP");
@@ -441,11 +467,17 @@ impl VideoEncoder {
                 (Family::Nvenc, Vendor::Nvidia | Vendor::OtherHardware) => {
                     vec![cards.iter().position(|c| c.vendor == Vendor::Nvidia)]
                 }
-                (Family::Vaapi, v) if v != Vendor::Software && v != Vendor::Nvidia => (0..cards
-                    .len())
-                    .filter(|&i| v == Vendor::OtherHardware || cards[i].vendor == v)
-                    .map(Some)
-                    .collect(),
+                (Family::Vaapi, v)
+                    if v != Vendor::Software && v != Vendor::Nvidia && v != Vendor::Apple =>
+                {
+                    (0..cards.len())
+                        .filter(|&i| v == Vendor::OtherHardware || cards[i].vendor == v)
+                        .map(Some)
+                        .collect()
+                }
+                (Family::VideoToolbox, Vendor::Apple | Vendor::OtherHardware) => {
+                    vec![cards.iter().position(|c| c.vendor == Vendor::Apple)]
+                }
                 _ => Vec::new(),
             };
             for card in on {

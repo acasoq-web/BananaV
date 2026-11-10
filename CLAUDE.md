@@ -1,8 +1,9 @@
 # BananaV — instructions for agents
 
 BananaV is a free, open-source, clean-room video editor written in Rust,
-for Windows and Linux (x64 and ARM64). Its workflow and layout follow
-VEGAS Pro; everything the user sees is BananaV's own.
+for Windows and Linux (x64 and ARM64) and macOS (Apple's chips and
+Intel, one app). Its workflow and layout follow VEGAS Pro; everything the
+user sees is BananaV's own.
 
 ## Start every session here
 
@@ -37,7 +38,12 @@ VEGAS Pro; everything the user sees is BananaV's own.
   `teclado.json`, serde names, file names, egui ids). Numbers shown go
   through `crate::fmt`; layouts measure their texts (Portuguese runs a
   third longer). A new language is a catalog module and a line of
-  `languages!` in `i18n/mod.rs`.
+  `languages!` in `i18n/mod.rs`. The eighteen partial languages
+  (`zh_cn.rs`, `ru.rs`, `es_es.rs`, `de.rs`, `ja.rs`, `fr.rs`, `pl.rs`,
+  `ko.rs`, `tr_tr.rs`, `zh_tw.rs`, `es_419.rs`, `th.rs`, `uk.rs`,
+  `it.rs`, `cs.rs`, `hu.rs`, `pt_pt.rs`, `sv.rs`) are not kept up with
+  new texts — the maintainer's decision: those show in English there;
+  only pt-BR gets every new text.
 - **VEGAS is the spec, never the source.** The maintainer's VEGAS
   screenshots ("the user's prints" in the docs) give each window's layout;
   VEGAS's public Help gives the behaviour: read it first and name the
@@ -74,6 +80,14 @@ VEGAS Pro; everything the user sees is BananaV's own.
   headlessly, never by driving the user's mouse or keyboard, and tests
   never press OK or Apply on a settings window (that would write the
   user's settings).
+- **Performance:** nothing heavy is worked out at every frame of the
+  interface — keep it, or work it out when it changes (the LUT looks'
+  tables written out every frame took a 4K playback from 60 frames a
+  second to 40). After changing what the interface does every frame, the
+  preview, the engine's playback or the compositor, `cargo xtask perf`
+  passes (the frame budget of every docked window while the preview
+  plays; with `BV_PLAY_FILE=<video>`, the engine playing it), and its
+  numbers are compared with [docs/testing.md](docs/testing.md)'s.
 - **Commits** say in English what changed, on green states only.
 
 ## Running and looking at the app
@@ -88,5 +102,8 @@ VEGAS Pro; everything the user sees is BananaV's own.
   `BV_OFX_TRACE=1` and `BV_EFFECTS_TRACE=1` print what the preview, the
   interface, the kernels' compiler, the plug-in host and BananaV's effects
   do; `tools/stacks.cs` samples where a running BananaV spends its time.
-- From Windows, `sh tools/linux_check.sh` runs clippy for Linux; `gh
-  workflow run package.yml` makes the packages.
+- From Windows, `sh tools/linux_check.sh` runs clippy for Linux and `sh
+  tools/mac_check.sh` for macOS (`MAC_TARGET=x86_64-apple-darwin` for
+  Intel Macs); `gh workflow run package.yml` makes the packages (macOS's
+  on GitHub's Macs), `gh workflow run ci.yml -f macos=true` checks and
+  tests on them.

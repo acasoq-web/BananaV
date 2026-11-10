@@ -1917,7 +1917,7 @@ fn kit_glow_apply(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[o] = p + (to - p) * k;
 }
 
-// Mirror (`bv-effects`' `mirror::Layout`, VEGAS's floats): a pixel of
+// Mirror (`bv-effects`' `mirror::Layout`): a pixel of
 // the picture (`src`), columns from the left, rows from the top.
 fn mirror_at(c: i32, r: i32) -> vec4<f32> {
     return src[u32(r) * P.w + u32(c)];
@@ -2042,7 +2042,7 @@ fn kit_mirror(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[o] = mix(upper, lower, fy);
 }
 
-// VEGAS's Gaussian blur (`recursive_gauss`): Deriche's filter along a line
+// The Gaussian blur (`recursive_gauss`, as VEGAS blurs): Deriche's filter along a line
 // of `n` pixels from `base`, `step` apart, as its two oscillations side by
 // side — f 0–7 the first's numbers, 8–15 the second's: its complex pole,
 // its weight, and what its causal and anticausal passes settle to per unit
@@ -2456,9 +2456,9 @@ fn kit_smart_enhance(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // AI Smoothen and AI Sharpen. The small copy (`P.w` × `P.h`) of the
 // picture (`P.sw` × `P.sh`, rows from the top) framed by a margin of
-// `i.x` pixels reflected as OpenCV's, taken as `(x + 0.1 f1) f0`, read as
-// `cv::resize` reads it (half-pixel centers, between four pixels): f2 and
-// f3 the framed size.
+// `i.x` pixels reflected about its edges, taken as `(x + 0.1 f1) f0`,
+// read at half-pixel centers between four pixels: f2 and f3 the framed
+// size.
 fn guided_reflect(i: i32, n: i32) -> i32 {
     var k = i;
     for (var t = 0; t < 8; t = t + 1) {
@@ -2596,4 +2596,255 @@ fn kit_dehaze_dark(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     dst[id.y * P.w + id.x] = vec4<f32>(d, 0.0, 0.0, 0.0);
+}
+
+// Checkerboard (`bv-effects`' `checkerboard::Board::table`): `src` holds a
+// row of numbers for each of the `P.w` columns — its tile's parity and how
+// much of the tile before it shows there (65536ths), whole numbers in the
+// floats' bits —, then three for each row from the top: its even tiles'
+// color, its odd tiles' and whether its first tile is odd. `j.x`: an 8-bit
+// project's bytes (the colors whole numbers too, mixed as whole numbers),
+// else floats.
+@compute @workgroup_size(16, 16)
+fn kit_checkerboard(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    let col = bitcast<vec4<u32>>(src[id.x]);
+    let r = P.w + 3u * id.y;
+    let odd = ((bitcast<u32>(src[r + 2u].x) ^ col.x) & 1u) == 1u;
+    var here = src[r];
+    var before = src[r + 1u];
+    if odd {
+        here = src[r + 1u];
+        before = src[r];
+    }
+    let w = min(col.y, 65536u);
+    if P.j.x == 1u {
+        let a = bitcast<vec4<u32>>(here);
+        let b = bitcast<vec4<u32>>(before);
+        let m = (a * (65536u - w) + b * w) >> vec4<u32>(16u);
+        dst[o] = vec4<f32>(m) / 255.0;
+    } else {
+        let t = f32(w) / 65536.0;
+        dst[o] = here + (before - here) * t;
+    }
+}
+
+// Test Pattern (`bv-effects`' `test_pattern::Pattern::table`): `src` holds
+// four rows of numbers for each of the `P.w` columns — its colors in the
+// bottom, middle and top bands of rows and which channels the row's color
+// brings (1) —, then two for each row from the top: its band and whether
+// it is all border, then its color.
+@compute @workgroup_size(16, 16)
+fn kit_test_pattern(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    let c = 4u * id.x;
+    let r = 4u * P.w + 2u * id.y;
+    let info = src[r];
+    let row = src[r + 1u];
+    if info.y > 0.5 {
+        dst[o] = row;
+        return;
+    }
+    var band = src[c];
+    if info.x > 1.5 {
+        band = src[c + 2u];
+    } else if info.x > 0.5 {
+        band = src[c + 1u];
+    }
+    dst[o] = select(band, row, src[c + 3u] > vec4<f32>(0.5));
+}
+
+// Noise Texture (`bv-effects`' `noise_texture::Noise::plan`): `src` holds
+// the lattice's 256 gradients (x, y, z) with the permutation (w), then each
+// of the `j.z` layers' place in the third dimension (its cell, its part
+// past it, the smoother step of that) and strength, each layer's place
+// across every column (cell, part), down every row (cell, part, step) and
+// each row's veins' term. f: the colors at the noise's low and high ends
+// (0-3, 4-7), the 16-bit steps' scale and start (8, 9), the smooth styles'
+// (10, 11), the veins' (12, 13) and the rings' (14, 15); j.x the style's
+// kind (0 straight, 1 veins, 2 rings), j.y each layer counted as its size,
+// j.w an 8-bit project's bytes.
+fn nt_perm(i: u32) -> u32 {
+    return u32(src[i & 255u].w);
+}
+
+fn nt_fade(t: f32) -> f32 {
+    return ((t * 6.0 - 15.0) * t + 10.0) * ((t * t) * t);
+}
+
+fn nt_lerp(a: f32, b: f32, s: f32) -> f32 {
+    return (b - a) * s + a;
+}
+
+fn nt_dot(g: vec4<f32>, x: f32, y: f32, z: f32) -> f32 {
+    return (g.y * y + g.x * x) + g.z * z;
+}
+
+@compute @workgroup_size(16, 16)
+fn kit_noise_texture(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    let layers = P.j.z;
+    let cols = 256u + layers;
+    let rows = cols + layers * P.w;
+    var f = 0.0;
+    for (var k = 0u; k < layers; k = k + 1u) {
+        let zl = src[256u + k];
+        let col = src[cols + k * P.w + id.x];
+        let row = src[rows + k * P.h + id.y];
+        let x0 = u32(col.x);
+        let x1 = (x0 + 1u) & 255u;
+        let y0 = u32(row.x);
+        let y1 = (y0 + 1u) & 255u;
+        let z0 = u32(zl.x);
+        let z1 = (z0 + 1u) & 255u;
+        let fx = col.y;
+        let fy = row.y;
+        let fz = zl.y;
+        let a00 = nt_perm(nt_perm(z0) + y0);
+        let a01 = nt_perm(nt_perm(z1) + y0);
+        let a10 = nt_perm(nt_perm(z0) + y1);
+        let a11 = nt_perm(nt_perm(z1) + y1);
+        let l = nt_lerp(
+            nt_lerp(
+                nt_dot(src[nt_perm(a00 + x0)], fx, fy, fz),
+                nt_dot(src[nt_perm(a01 + x0)], fx, fy, fz - 1.0),
+                zl.z,
+            ),
+            nt_lerp(
+                nt_dot(src[nt_perm(a10 + x0)], fx, fy - 1.0, fz),
+                nt_dot(src[nt_perm(a11 + x0)], fx, fy - 1.0, fz - 1.0),
+                zl.z,
+            ),
+            row.z,
+        );
+        let gx = fx - 1.0;
+        let r = nt_lerp(
+            nt_lerp(
+                nt_dot(src[nt_perm(a00 + x1)], gx, fy, fz),
+                nt_dot(src[nt_perm(a01 + x1)], gx, fy, fz - 1.0),
+                zl.z,
+            ),
+            nt_lerp(
+                nt_dot(src[nt_perm(a10 + x1)], gx, fy - 1.0, fz),
+                nt_dot(src[nt_perm(a11 + x1)], gx, fy - 1.0, fz - 1.0),
+                zl.z,
+            ),
+            row.z,
+        );
+        var val = (nt_fade(fx) * (r - l) + l) * zl.w;
+        if P.j.y == 1u {
+            val = abs(val);
+        }
+        f = f + val;
+    }
+    var v = 0.0;
+    if P.j.x == 0u {
+        v = round(pf(10u) * f + pf(11u));
+    } else if P.j.x == 1u {
+        let c = src[rows + layers * P.h + id.y].x;
+        let u0 = (pf(12u) * f + f32(id.x) * pf(13u)) + c;
+        let u = u0 - floor(u0);
+        let s = (u + u) - 1.0;
+        v = round((1.0 - s * s) * pf(8u) + pf(9u));
+    } else {
+        let u0 = (f + 2.0) * pf(14u);
+        let u = u0 - floor(u0);
+        var ring = 0.0;
+        if 0.5 > u {
+            let t = 4.0 * u - 1.0;
+            ring = 2.0 - t * t;
+        } else {
+            let t = 4.0 * u - 3.0;
+            ring = t * t;
+        }
+        v = round(ring * pf(15u) + pf(9u));
+    }
+    let t = clamp(v, 0.0, 65536.0) / 65536.0;
+    let low = vec4<f32>(pf(0u), pf(1u), pf(2u), pf(3u));
+    let high = vec4<f32>(pf(4u), pf(5u), pf(6u), pf(7u));
+    var c = high * t + low * (1.0 - t);
+    if P.j.w == 1u {
+        if P.j.x == 0u {
+            c = floor(c * 255.0 + 0.5) / 255.0;
+        } else {
+            c = floor(c * 255.0) / 255.0;
+        }
+    }
+    dst[o] = c;
+}
+
+// Color Gradient (`bv-effects`' `color_gradient::Gradient::plan`): `src`
+// holds two rows of numbers for each of the `j.y` color points — its
+// distance (a linear gradient's from the center's) and its color,
+// straight —, a solid gradient's color first. f: the center (0, 1), the
+// linear gradient's direction or the others' slope (2, 3); j.x the shape
+// (0 linear, 1 elliptical, 2 rectangular, 3 one color), j.z an 8-bit
+// project's bytes.
+fn cg_byte(v: f32) -> f32 {
+    return floor(v * 255.0 + 0.5) / 255.0;
+}
+
+@compute @workgroup_size(16, 16)
+fn kit_color_gradient(@builtin(global_invocation_id) id: vec3<u32>) {
+    let o = out_index(id);
+    if o < 0 {
+        return;
+    }
+    if P.j.x == 3u {
+        dst[o] = src[0];
+        return;
+    }
+    let a = f32(id.x) / f32(P.w) - pf(0u);
+    let b = f32(id.y) / f32(P.h) - pf(1u);
+    var t = a * pf(2u) + b * pf(3u);
+    if P.j.x == 1u {
+        let k = a * pf(2u);
+        t = sqrt(k * k + b * b);
+    } else if P.j.x == 2u {
+        t = max(abs(a * pf(2u)), abs(b));
+    }
+    // The points around t: the farthest below it, the nearest at or above
+    // it (the first of equals).
+    var lo = -1;
+    var hi = -1;
+    var dl = 0.0;
+    var dh = 0.0;
+    for (var i = 0u; i < P.j.y; i = i + 1u) {
+        let d = src[2u * i].x;
+        if d < t && (lo < 0 || d > dl) {
+            lo = i32(i);
+            dl = d;
+        }
+        if d >= t && (hi < 0 || d < dh) {
+            hi = i32(i);
+            dh = d;
+        }
+    }
+    var c = vec4<f32>(0.0);
+    if lo >= 0 && hi >= 0 {
+        let cl = src[2u * u32(lo) + 1u];
+        let ch = src[2u * u32(hi) + 1u];
+        let wl = ((dh - t) / (dh - dl)) * cl.w;
+        let wh = ((t - dl) / (dh - dl)) * ch.w;
+        let alpha = wl + wh;
+        if alpha > 0.0 {
+            c = vec4<f32>(cl.xyz * wl + ch.xyz * wh, alpha);
+        }
+    } else if lo >= 0 || hi >= 0 {
+        let one = src[2u * u32(max(lo, hi)) + 1u];
+        c = vec4<f32>(one.xyz * one.w, one.w);
+    }
+    if P.j.z == 1u {
+        c = vec4<f32>(cg_byte(c.x), cg_byte(c.y), cg_byte(c.z), cg_byte(c.w));
+    }
+    dst[o] = c;
 }

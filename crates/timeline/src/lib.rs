@@ -21,6 +21,7 @@ pub mod commands;
 pub mod ducking;
 mod edit;
 pub mod envelope;
+pub mod envelope_paint;
 pub mod fcp_import;
 pub mod fx;
 pub mod fx_automation;
@@ -50,6 +51,7 @@ pub mod takes;
 pub mod track_groups;
 pub mod veg;
 pub mod video_bus;
+pub mod vst_id;
 pub mod xmeml;
 mod xml;
 
@@ -70,7 +72,7 @@ pub use envelope::{Envelope, EnvelopeKind, EnvelopeOwner, EnvelopePoint};
 pub use fx::{
     Direction, Effect, EffectKind, FadeCurve, Graph, KeyCurve, KeyHandles, ParamKind, ParamSpec,
     PluginFx, PluginKey, PluginParam, PluginValue, Show, Transform, TransformKey, Transition,
-    VstFx,
+    VstFormat, VstFx,
 };
 pub use history::{Gesture, History};
 pub use input_busses::{InputBus, InputBusId, InputMonitor, MAX_INPUT_BUSSES};
@@ -78,10 +80,10 @@ pub use model::{
     AlphaChannel, AudioCd, AudioQuality, AudioStreamInfo, AutomationMode, ChannelMap, Clip, ClipId,
     CompositeMode, CompositingGamma, DeinterlaceMethod, Generator, GroupId, ImageSequence, Marker,
     MarkerId, MasterBus, MediaId, MediaInfo, MediaMarker, MediaReel, MediaRotation, MediaSource,
-    NewEvents, OutputRotation, PanMode, PixelAspect, PixelFormat, Project, ProjectSettings,
-    RecordInput, Region, RenderQuality, ResampleMode, RulerFormat, SAME_PAIRS, SMART_THRESHOLDS,
-    Summary, SyncLink, TRACK_PALETTE, Tempo, Track, TrackAutomation, TrackId, TrackKind,
-    VideoLayer, VideoReading, VideoStreamInfo, markers_from_json, markers_to_json,
+    NewEvents, OutTransition, OutputRotation, PanMode, PixelAspect, PixelFormat, Project,
+    ProjectSettings, RecordInput, Region, RenderQuality, ResampleMode, RulerFormat, SAME_PAIRS,
+    SMART_THRESHOLDS, Summary, SyncLink, TRACK_PALETTE, Tempo, Track, TrackAutomation, TrackId,
+    TrackKind, VideoLayer, VideoReading, VideoStreamInfo, markers_from_json, markers_to_json,
 };
 pub use motion::{Halo, HaloKey, HaloLook, MotionAt, TrackMotion};
 pub use motion_tracks::{MotionTrack, TrackKey};
@@ -96,3 +98,4 @@ pub use tags::{
 pub use takes::Take;
 pub use track_groups::{TrackGroup, TrackGroupId};
 pub use video_bus::{MotionBlurType, VideoBus};
+pub use vst_id::VstWanted;

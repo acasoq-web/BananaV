@@ -750,6 +750,52 @@ pub(super) fn layers(icon: Icon) -> Vec<Layer> {
             line(d("M3 17C8 17 9 7 12 7 15 7 16 17 21 17")),
             solid(d("M13.6 7A1.6 1.6 0 1 1 10.4 7 1.6 1.6 0 1 1 13.6 7Z")),
         ],
+        // Lines lined up on the left.
+        Icon::AlignLeft => vec![
+            line(d("M4 6H20M4 10H14M4 14H20M4 18H14")),
+        ],
+        // Lines lined up in the middle.
+        Icon::AlignCenter => vec![
+            line(d("M4 6H20M7 10H17M4 14H20M7 18H17")),
+        ],
+        // Lines lined up on the right.
+        Icon::AlignRight => vec![
+            line(d("M4 6H20M10 10H20M4 14H20M10 18H20")),
+        ],
+        // A brush, its handle, and two arrows passing the look on.
+        Icon::Transfer => vec![
+            body(d("M3.5 15.5L9.5 9.5 13.5 13.5 7.5 19.5A1.5 1.5 0 0 1 5.4 19.5L3.5 17.6A1.5 1.5 0 0 1 3.5 15.5Z")),
+            line(d("M11.5 11.5L18 5")),
+            line(d("M15 15.5L17 17.5 15 19.5M18.5 15.5L20.5 17.5 18.5 19.5")).dim(),
+        ],
+        // The letters f and x, and a plus below them.
+        Icon::FxAdd => vec![
+            line(d("M6 17V9A3 3 0 0 1 9 6H10M3.5 11H9.5M11 11L15.5 17M15.5 11L11 17")),
+            line(d("M18.5 15V22M15 18.5H22")),
+        ],
+        // A frame of film with an arrow both ways across it.
+        Icon::FitLength => vec![
+            body(d("M5 4H19A2 2 0 0 1 21 6V18A2 2 0 0 1 19 20H5A2 2 0 0 1 3 18V6A2 2 0 0 1 5 4Z")),
+            line(d("M3 7.5H21M3 16.5H21")).dim(),
+            line(d("M6.5 12H17.5M9 9.8L6.5 12 9 14.2M15 9.8L17.5 12 15 14.2")),
+        ],
+        // A question mark in a ring.
+        Icon::Help => vec![
+            line(d("M21 12A9 9 0 1 1 3 12 9 9 0 1 1 21 12Z")),
+            line(d("M9.5 9.5A2.5 2.5 0 1 1 13 11.8C12.4 12.1 12 12.7 12 13.4V14")),
+            solid(d("M12.9 17A0.9 0.9 0 1 1 11.1 17 0.9 0.9 0 1 1 12.9 17Z")),
+        ],
+        // A folder in front of another.
+        Icon::OpenBank => vec![
+            line(d("M7 6V5A2 2 0 0 1 9 3H11.3L12.8 4.5H19A2 2 0 0 1 21 6.5V13A2 2 0 0 1 19 15H18.5")).dim(),
+            body(d("M3 10A2 2 0 0 1 5 8H7.3L8.8 9.5H15A2 2 0 0 1 17 11.5V18A2 2 0 0 1 15 20H5A2 2 0 0 1 3 18Z")),
+        ],
+        // A disk in front of a page.
+        Icon::SaveBank => vec![
+            line(d("M9 6V5A2 2 0 0 1 11 3H16L20 7V15A2 2 0 0 1 18 17H17.5")).dim(),
+            body(d("M5 9H12.5L16 12.5V19A2 2 0 0 1 14 21H5A2 2 0 0 1 3 19V11A2 2 0 0 1 5 9Z")),
+            line(d("M6.5 9V11.5A0.8 0.8 0 0 0 7.3 12.3H11A0.8 0.8 0 0 0 11.8 11.5V9")).dim(),
+        ],
         Icon::Phase => vec![
             line(d("M3 5H6C10 5 14 19 18 19H21")),
             line(d("M3 19H6C10 19 14 5 18 5H21")),
@@ -819,7 +865,7 @@ impl Layer {
 }
 
 #[cfg(test)]
-pub(super) const ALL: [Icon; 133] = [
+pub(super) const ALL: [Icon; 142] = [
     Icon::New,
     Icon::Open,
     Icon::Save,
@@ -952,5 +998,14 @@ pub(super) const ALL: [Icon; 133] = [
     Icon::ShapeScope,
     Icon::ScopesWhilePlaying,
     Icon::Automation,
+    Icon::AlignLeft,
+    Icon::AlignCenter,
+    Icon::AlignRight,
+    Icon::Transfer,
+    Icon::FxAdd,
+    Icon::FitLength,
+    Icon::Help,
+    Icon::OpenBank,
+    Icon::SaveBank,
     Icon::Phase,
 ];

@@ -655,6 +655,22 @@ fn track_layer(
                 _ => transition::apply(*kind, &img_a, &img_b, *progress),
             }
         }
+        TrackContent::Crossfade {
+            from,
+            to,
+            out,
+            into,
+        } => {
+            let mut img = event_layer(scene, from, pool, below);
+            let b = event_layer(scene, to, pool, below);
+            let w = img.width as usize;
+            let (out, into) = (*out, *into);
+            par::for_each_pixel(&mut img.data, w, |x, y, px| {
+                let q = b.data[y * w + x];
+                *px = std::array::from_fn(|c| (px[c] * out + q[c] * into).min(1.0));
+            });
+            img
+        }
     }
 }
 
@@ -780,7 +796,7 @@ fn media_layer(
     let mut img = layer::place_box(&src, scene.width, scene.height, &m.placement, m.quality);
     // Reduce Interlace Flicker: on the framed picture, before the event's
     // effects.
-    if m.clip.reduce_flicker {
+    if m.reduce_flicker {
         layer::flicker_filter(&mut img);
     }
     // Its Pan/Crop masks, framed as the picture is: they cut what shows of

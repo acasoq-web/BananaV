@@ -18,7 +18,7 @@ BananaV today: **Done** · **Partly** · **Greyed** (shown as "Coming soon") ·
 | Standard | Terms | BananaV today |
 |---|---|---|
 | **OpenFX (OFX) 1.5** — video effects, transitions and generators from other makers (Boris FX, Neat Video, NewBlue, RE:Vision…). Also hosted by DaVinci Resolve/Fusion, Nuke, Natron and Baselight; not by Premiere/After Effects (Adobe's own SDK), Final Cut (FxPlug) or Avid (AVX). VEGAS 23 adds timeline envelopes for OFX effects (beta). | BSD-3-Clause, hosted by the Academy Software Foundation. No fees. | **Done** on the processor: effects (event, media, track, output), transitions and generators; parameters with keyframes and presets; overlays (draw suite); temporal clip access. Tested with Natron's free plug-ins (openfx-misc, openfx-io, CImg, G'MIC, Arena, Shadertoy). BananaV's own effects are OFX plug-ins too (Crop, Color Curves, Color Corrector, Cookie Cutter, Layer Dimensionality, Pixelate), also built as a `BananaV.ofx` bundle for other hosts; BananaV draws them on the graphics card itself. OFX 1.5's CUDA render on Windows with NVIDIA cards: plug-ins that render with CUDA (Sapphire) draw on the card's own pictures, Direct3D 12 buffers shared with CUDA. Overlays that draw with OpenGL themselves are shown (Windows). Not yet: OpenGL, OpenCL and Metal render, CUDA on Linux, parameters' own interacts, Nuke's and Natron's multi-plane and multi-view extensions, "Show OFX Effect Envelopes" (greyed). |
-| **VST3 3.8** — audio effects and instruments. | MIT since October 2025 (it was proprietary or GPLv3 before). No fees. | **Partly** (awaiting the user's review): audio effects hosted (`bv-vst3`, written from the MIT headers; notice shipped): run in the mixer's chains, their parameters and states kept in projects, BananaV's generic editor and the plug-in's own window on Windows. Still to come: the plug-in's window on Linux (X11 embedding), instruments, presets through BananaV's preset bar, parameter automation. |
+| **VST3 3.8** — audio effects and instruments. | MIT since October 2025 (it was proprietary or GPLv3 before). No fees. | **Partly** (awaiting the user's review): audio effects hosted (`bv-vst3`, written from the MIT headers; notice shipped): each module tried in a process of its own (cached, several at once), calls behind a crash guard, run in the mixer's chains with the timeline's place, tempo and meter and sample-accurate automation, kept across seeks and asleep in silence; parameters and states kept in projects; programs and the standard `.vstpreset` file; BananaV's generic editor and the plug-in's own window (Windows; Linux's untried); other editors' projects bring their VST 3 effects; 32-bit modules run in BananaV's 32-bit bridge, a process of their own; the plug-in's editor inside the FX window (Windows), as VEGAS shows it. Still to come: instruments, sidechain. |
 
 What hosting OFX takes (and how BananaV does it):
 
@@ -56,7 +56,7 @@ What hosting OFX takes (and how BananaV does it):
   render; the 360° ones (Scene Rotation, Dual-Fish-Eye Stitching, 360°
   Video Stabilization) say the host is not supported and leave the
   picture as it was, and Smart Zoom and Smart Upscale, which render
-  through VEGAS's private OpenCL suite, leave it black.
+  through a host suite only VEGAS offers, leave it black.
 - Free plug-ins to test with: the OFX SDK's examples and Natron's
   (openfx-misc, openfx-io).
 - BananaV's own effects are written as OFX plug-ins (`crates/effects`),
@@ -126,6 +126,7 @@ section 2.
 |---|---|---|
 | **Direct3D 12, Vulkan, Metal** (BananaV draws through wgpu; VEGAS 23 uses DirectX 11/12). | Part of the systems and drivers. | **Done**. |
 | **NVENC/NVDEC, AMD AMF, Intel Quick Sync** (oneVPL). | Free SDKs from the card makers. | **Done** (through Media Foundation on Windows, FFmpeg on Linux). |
+| **VideoToolbox** (macOS's codecs on the Mac's media engine). | Part of macOS (Apple licenses its codecs). | **Done** (through FFmpeg on macOS: H.264 and HEVC decoded and encoded on the media engine; awaiting the maintainer's review, checked on GitHub's Macs only). |
 
 ## 2. Standards with licenses, fees or restrictions
 
@@ -142,7 +143,7 @@ section 2.
 | **HDR10+** | Royalty-free, but through a license agreement with HDR10+ Technologies (yearly administration fee for device makers and services; terms for editing software to confirm). | Not yet. | HDR10, HLG. |
 | **Dolby Vision, Dolby Atmos** | Dolby's licensed formats. | Not planned. | HDR10/HLG; 5.1/7.1 and Ambisonics (free). |
 | **ASIO** (low-latency audio drivers, Windows) | Steinberg: its proprietary license (signed agreement) or, since October 2025, GPLv3 — which would make BananaV's own code GPLv3. | Drivers listed from the registry; **Greyed**. | **WASAPI** exclusive mode (part of Windows, low latency); ALSA/PipeWire on Linux. Or ASIO under Steinberg's proprietary license. |
-| **VST2** | Steinberg stopped signing new VST2 licenses in 2018; hosts that had one keep it. | Not planned. | **VST3** (MIT), **CLAP** (MIT). |
+| **VST2** | Steinberg stopped signing new VST2 licenses in 2018; hosts that had one keep it. The SDK's code and headers stay Steinberg's; "VST" is its trademark. | **BananaV's own compatibility** (awaiting the user's review): `bv-vst2` declares the plug-ins' binary interface from how plug-ins behave — no Steinberg code, header or text —, runs 64-bit plug-ins behind a crash guard and 32-bit ones in BananaV's 32-bit bridge (a process of its own); the name is used only to say what it works with, with no logo (see TRADEMARKS.md). A lawyer's review before selling BananaV. | **VST3** (MIT), **CLAP** (MIT). |
 | **AAF** (VEGAS imports and exports it) | The AAF SDK has its own "Public Source License" (not MIT/BSD; using the "AAF" name has an adopters' agreement). | **Greyed** (AAF export settings). | Write AAF from the published object specification (Microsoft's compound file format is an open specification); or **OpenTimelineIO**. |
 | **Blu-ray and DVD discs** | Blu-ray: the One-Blue patent pool and the Blu-ray Disc Association's format and logo licenses (authoring is costly). DVD: format and logo licensing. | Renders MPEG-2 and AC-3 "for DVD and Blu-ray authoring"; disc burning **Greyed**. | Render disc-ready files and leave authoring to other programs; data discs. |
 | **GPL libraries** (x264, x265, FFmpeg's GPL parts) | Copyleft: linking them makes BananaV GPL; x264/x265 also leave the H.264/HEVC patents to BananaV. | Left out: Linux packages carry an FFmpeg built under the LGPL. | Hardware encoders; OpenH264; AV1 encoders **SVT-AV1** and **rav1e** (BSD). |
@@ -170,6 +171,9 @@ section 2.
 4. **The Linux AppImage** carries FFmpeg's H.264, HEVC and AAC decoders:
    distributing it (above all for sale) may owe those pools; options are
    using the system's FFmpeg, OpenH264 for H.264, or the cards' decoders.
+   The macOS package carries them too (VideoToolbox decodes and encodes
+   H.264 and HEVC first; FFmpeg's decoders take what it cannot), with
+   FFmpeg's AAC encoder.
 5. **Codecs in pure Rust** (roadmap): writing H.264, HEVC or AAC ourselves
    makes BananaV the one the pools license; prefer AV1, VP9, Opus and FLAC,
    and leave the patented ones to the systems and the cards.
@@ -181,8 +185,9 @@ section 2.
    commercial plug-ins' trial versions (Sapphire's **done**); OFX 1.5's
    CUDA render on Windows (**done**); then OpenGL, OpenCL and Metal render
    and CUDA on Linux.
-2. VST3 hosting for audio (**effects done**, awaiting review; next its window on Linux,
-   instruments and automation), then CLAP.
+2. VST3 hosting for audio (**effects done**, awaiting review: scanned apart,
+   crash-guarded, programs and preset files, sample-accurate automation;
+   next instruments and sidechain), then CLAP.
 3. OpenColorIO + ACES + `.cube` LUTs (**done**: ACES 1.3 for SDR; next, HDR and each media's color space).
 4. OpenTimelineIO (**done**), then AAF.
 5. HDR output (PQ/HLG with HDR10 metadata), 360° metadata (**done**, awaiting

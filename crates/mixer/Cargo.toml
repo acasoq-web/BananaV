@@ -18,10 +18,12 @@ bv-media.workspace = true
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bv-vst3.workspace = true
+bv-vst2.workspace = true
 
 [dev-dependencies]
 bv-vst3-sys.workspace = true
 bv-vst3-testplug = { path = "../vst3-testplug" }
+bv-vst2-testplug = { path = "../vst2-testplug" }
 
 [lints]
 workspace = true

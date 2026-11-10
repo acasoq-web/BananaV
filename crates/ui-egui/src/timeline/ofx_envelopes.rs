@@ -27,6 +27,7 @@ use bv_timeline::{
 
 use super::{Layout, TimelineView};
 use crate::app::BananaApp;
+use crate::cursors::{self, Cursor};
 use crate::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use crate::i18n::tr;
 use crate::theme;
@@ -121,6 +122,46 @@ pub(crate) enum OfxDrag {
 pub(crate) enum AreaRow {
     Effect(usize),
     Motion,
+}
+
+/// What the pointer is on among the keyframes areas and the envelopes, or
+/// what of theirs is being dragged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OfxSpot {
+    /// A keyframe on a keyframes area's line.
+    Key,
+    /// Such a keyframe, its time being dragged across.
+    KeyDragged,
+    /// An envelope's point, one of its handles, or its line.
+    Envelope,
+    /// An envelope's point or handle being dragged.
+    PointDragged,
+}
+
+/// The pointer at `spot` (`None`: the arrow), as VEGAS's: the pointing
+/// hand on a keyframe of a track's effect keyframes lane, ↔ while its
+/// time is dragged across; the arrow over an envelope's point and line
+/// (a line here moves nothing when dragged, and Shift adds no point), the
+/// hand with four arrows while a point moves. VEGAS's hand with + for
+/// Shift over a lane shows only while its effect envelopes are off, and
+/// these areas show only while they are on: the arrow there too.
+fn spot_pointer(spot: OfxSpot) -> Option<Cursor> {
+    match spot {
+        OfxSpot::Key => Some(Cursor::HandPoint),
+        OfxSpot::KeyDragged => Some(Cursor::ResizeEw),
+        OfxSpot::Envelope => None,
+        OfxSpot::PointDragged => Some(Cursor::HandMove),
+    }
+}
+
+/// Shows the pointer [`interact`] found, over the one the tracks under it
+/// asked for (they come after it, the press being these areas').
+pub(crate) fn show_pointer(view: &TimelineView, ui: &egui::Ui) {
+    match view.ofx_spot.map(spot_pointer) {
+        Some(Some(c)) => cursors::set(ui.ctx(), c),
+        Some(None) => cursors::system(ui.ctx(), egui::CursorIcon::Default),
+        None => {}
+    }
 }
 
 /// "Set to…": a point's value being typed, and where.
@@ -559,8 +600,15 @@ pub(crate) fn hit(
     p: Pos2,
 ) -> Option<OfxHit> {
     let all = lines(view, l, project, prefs);
-    let near = |a: Pos2| (a.x - p.x).abs() <= 5.0 && (a.y - p.y).abs() <= 5.0;
-    for line in all.iter().filter(|line| line.area.expand(4.0).contains(p)) {
+    // Their reach (Options › Envelope Appearance…): 5 and 4 points by
+    // default.
+    let look = crate::envelope_look::get();
+    let (point_reach, line_reach) = (look.point_reach() - 1.0, look.line_reach());
+    let near = |a: Pos2| (a.x - p.x).abs() <= point_reach && (a.y - p.y).abs() <= point_reach;
+    for line in all
+        .iter()
+        .filter(|line| line.area.expand(line_reach).contains(p))
+    {
         let keys = param_of(project, line).map_or(&[][..], |p| &p.keys[..]);
         for (i, k) in keys.iter().enumerate() {
             if let Some(v) = num(&k.value, line.component)
@@ -600,7 +648,7 @@ pub(crate) fn hit(
     for line in all.iter().filter(|line| line.area.contains(p)) {
         let at = view.time_at(l, p.x) - line.origin;
         if let Some(v) = value_at(project, line, at)
-            && (y_of(line, v) - p.y).abs() <= 4.0
+            && (y_of(line, v) - p.y).abs() <= line_reach
         {
             return Some(OfxHit {
                 line: line.clone(),
@@ -624,6 +672,7 @@ pub(crate) fn interact(
     app: &mut BananaApp,
     l: &Layout,
 ) {
+    view.ofx_spot = None;
     if !view.show_ofx_envelopes {
         view.ofx_drag = None;
         view.ofx_set_to = None;
@@ -633,14 +682,10 @@ pub(crate) fn interact(
     let project = app.project().clone();
     let rate = project.settings.frame_rate;
     let pointer = ui.input(|i| i.pointer.latest_pos());
-    let (pressed, down, double) = ui.input(|i| {
-        (
-            i.pointer.primary_pressed(),
-            i.pointer.primary_down(),
-            i.pointer
-                .button_double_clicked(egui::PointerButton::Primary),
-        )
-    });
+    let (pressed, down) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
+    // Clicks counted in pairs: a second double-click soon after a first
+    // (another point) is one too.
+    let double = crate::widgets::double_click_here(ui);
     if let Some(d) = view.ofx_drag.clone() {
         match pointer.filter(|_| down) {
             Some(p) => drag_to(view, ui, app, l, d, p),
@@ -651,9 +696,18 @@ pub(crate) fn interact(
     let Some(p) = pointer.filter(|p| l.lanes.contains(*p)) else {
         return;
     };
+    // Their pointer, unless something else holds the mouse (a drag begun
+    // elsewhere, the wheel's scrolling, media brought in) or covers the
+    // tracks there.
+    let free = ui.rect_contains_pointer(l.lanes)
+        && (pressed || !ui.input(|i| i.pointer.any_down()))
+        && view.autoscroll.is_none()
+        && app.media_drag.is_none();
     // A keyframes area line's keyframe: its time dragged, its values kept.
     if let Some((track, row, at)) = area_key_at(view, l, &project, p) {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        if free {
+            view.ofx_spot = Some(OfxSpot::Key);
+        }
         if pressed {
             view.ignore_press = true;
             view.ofx_drags += 1;
@@ -670,11 +724,9 @@ pub(crate) fn interact(
     let Some(h) = hit(view, l, &project, &prefs, p) else {
         return;
     };
-    ui.ctx().set_cursor_icon(if h.key.is_some() {
-        egui::CursorIcon::Grab
-    } else {
-        egui::CursorIcon::PointingHand
-    });
+    if free {
+        view.ofx_spot = Some(OfxSpot::Envelope);
+    }
     // The value under the pointer, unless a menu covers it.
     if !egui::Popup::is_any_open(ui.ctx()) {
         view.ofx_hover = Some((h.line.label.clone(), param_text(&h.line, h.value), p));
@@ -721,7 +773,7 @@ fn drag_to(
             let at = (on_frame(rate, view.time_at(l, p.x)) - line.origin).max(Tick::ZERO);
             let value = v_of(&line, p.y);
             app.modify_merged(undo, |pr| move_key(pr, &line, key, at, value));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            view.ofx_spot = Some(OfxSpot::PointDragged);
         }
         OfxDrag::Point {
             line,
@@ -732,7 +784,7 @@ fn drag_to(
             let at = view.time_at(l, p.x) - line.origin;
             let value = v_free(&line, p.y);
             app.modify_merged(undo, |pr| move_handle(pr, &line, key, after, at, value));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            view.ofx_spot = Some(OfxSpot::PointDragged);
         }
         OfxDrag::Times {
             track,
@@ -745,7 +797,7 @@ fn drag_to(
             if let Some(OfxDrag::Times { from, .. }) = &mut view.ofx_drag {
                 *from = now;
             }
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            view.ofx_spot = Some(OfxSpot::KeyDragged);
         }
     }
 }
@@ -879,7 +931,13 @@ pub(crate) fn paint(
             }
             x += 3.0;
         }
-        painter.add(egui::Shape::line(pts, Stroke::new(1.5, line.color)));
+        // Widths and sizes as Options › Envelope Appearance… sets them (1.5
+        // and 6 points by default: three quarters of the track envelopes').
+        let look = crate::envelope_look::get();
+        painter.add(egui::Shape::line(
+            pts,
+            Stroke::new(look.line * 0.75, line.color),
+        ));
         let Some(p) = param_of(project, &line) else {
             continue;
         };
@@ -895,7 +953,8 @@ pub(crate) fn paint(
                     painter.circle_filled(h, 3.0, dim);
                 }
             }
-            let r = Rect::from_center_size(c, vec2(6.0, 6.0));
+            let side = (look.point * 1.5).round().max(4.0);
+            let r = Rect::from_center_size(c, vec2(side, side));
             painter.rect_filled(r, 0.0, line.color);
             painter.rect_stroke(
                 r,
@@ -1539,5 +1598,117 @@ mod tests {
         let param = param_of(&p, &line).unwrap();
         let k = param.keys.iter().position(|k| k.at == cursor).unwrap();
         assert!((value(&p, &line, k).1 - there).abs() < 1e-9);
+    }
+
+    /// The pointers, as VEGAS's: the pointing hand on a keyframe of a
+    /// keyframes area's line, ↔ while its time is dragged; the arrow over
+    /// an envelope, the hand with four arrows while its point moves.
+    #[test]
+    fn keyframes_and_envelopes_point_as_vegas_does() {
+        assert_eq!(spot_pointer(OfxSpot::Key), Some(Cursor::HandPoint));
+        assert_eq!(spot_pointer(OfxSpot::KeyDragged), Some(Cursor::ResizeEw));
+        assert_eq!(spot_pointer(OfxSpot::Envelope), None);
+        assert_eq!(spot_pointer(OfxSpot::PointDragged), Some(Cursor::HandMove));
+    }
+
+    /// Over the tracks, which come after them, a keyframes area's keyframe
+    /// and an envelope's point keep their own pointers: hovered, and while
+    /// they are dragged (the keyframe's time and the point move too).
+    #[test]
+    fn their_pointers_show_over_the_tracks() {
+        use crate::egui::{Event, Modifiers, PointerButton};
+        use egui_kittest::Harness;
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        assert!(app.ofx_envelopes_for_review());
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        // BananaV's pointer the last frame asked for (`None`: the system's).
+        let shown = |h: &Harness<'_, BananaApp>| {
+            let img = h.output().platform_output.cursor_image.clone()?;
+            Cursor::ALL
+                .into_iter()
+                .find(|&c| std::sync::Arc::ptr_eq(&img.rgba, &cursors::image(c, img.size[0]).rgba))
+        };
+        let button = |h: &mut Harness<'_, BananaApp>, at: Pos2, pressed: bool| {
+            h.event(Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::default(),
+            });
+            h.step();
+        };
+        let rate = h.state().project().settings.frame_rate;
+        let key_at = rate.frame_start(150);
+        // The effect's line's keyframe at frame 150.
+        let key = {
+            let app = h.state();
+            let view = &app.timeline;
+            let l = view.layout(view.last_rect, app.project());
+            let row = l.rows.iter().find(|r| r.keys > 0.0).expect("its area");
+            let area = row.keys_rect(l.lanes.left(), l.lanes.right());
+            pos2(view.x_of(&l, key_at), area.top() + LINE_H / 2.0)
+        };
+        h.event(Event::PointerMoved(key));
+        h.run_steps(2);
+        assert_eq!(shown(&h), Some(Cursor::HandPoint), "on the keyframe");
+        button(&mut h, key, true);
+        let to = key + vec2(40.0, 0.0);
+        h.event(Event::PointerMoved(to));
+        h.run_steps(2);
+        assert_eq!(shown(&h), Some(Cursor::ResizeEw), "its time dragged");
+        button(&mut h, to, false);
+        h.run_steps(2);
+        let times = |h: &Harness<'_, BananaApp>| {
+            let p = h.state().project();
+            let t = p
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Video)
+                .unwrap();
+            area_rows(t).remove(0).1
+        };
+        assert!(
+            !times(&h).contains(&key_at),
+            "the keyframe moved: {:?}",
+            times(&h)
+        );
+        // The brightness envelope's middle point (where the keyframe went),
+        // under the area's lines.
+        let point = h
+            .state()
+            .ofx_point_for_review(1)
+            .expect("the envelope drawn");
+        h.event(Event::PointerMoved(point));
+        h.run_steps(2);
+        assert_eq!(shown(&h), None, "the arrow over a point");
+        assert_eq!(
+            h.output().platform_output.cursor_icon,
+            egui::CursorIcon::Default
+        );
+        button(&mut h, point, true);
+        let to = point + vec2(-20.0, 10.0);
+        h.event(Event::PointerMoved(to));
+        h.run_steps(2);
+        assert_eq!(shown(&h), Some(Cursor::HandMove), "the point dragged");
+        button(&mut h, to, false);
+        h.run_steps(2);
+        assert_ne!(
+            h.state().ofx_point_for_review(1),
+            Some(point),
+            "the point moved"
+        );
     }
 }

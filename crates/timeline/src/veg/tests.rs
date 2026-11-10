@@ -153,6 +153,7 @@ fn options() -> WriteOptions<'static> {
         path: "C:\\projects\\test.veg".into(),
         documents: "C:\\Users\\someone\\Documents".into(),
         effect: &|_| None,
+        generator: &|_| None,
     }
 }
 
@@ -362,7 +363,7 @@ fn vegas_samples_read_and_write_back() {
     let (_, d) = open("13_evento_video");
     let e = &d.tracks[0].events[0];
     assert_eq!((e.start, e.length), (s(1.0), s(2.0)));
-    assert_eq!(e.curves, [4, 4]);
+    assert_eq!(e.curves[..2], [4, 4]);
     let (_, d) = open("17_take_offset");
     assert_eq!(d.tracks[0].events[0].takes[0].offset, s(0.25));
     let (_, d) = open("18_nomes");
@@ -374,7 +375,7 @@ fn vegas_samples_read_and_write_back() {
     let (_, d) = open("19_fades");
     let e = &d.tracks[0].events[0];
     assert_eq!(
-        (e.fade_in, e.fade_out, e.curves),
+        (e.fade_in, e.fade_out, [e.curves[0], e.curves[1]]),
         (s(0.5), s(0.75), [2, -2])
     );
     assert!(open("20_evento_mudo").1.tracks[0].events[0].muted);
@@ -567,13 +568,13 @@ fn vegas_samples_read_and_write_back() {
                 // A CD index's name: BananaV's indices have none.
                 let cd_index = g == MARKER && x.first() == Some(&0x30);
                 // What is not written: the chains' place in their owners,
-                // the transitions at events' ends (and what the plug-ins'
-                // settings are in another order), a track's pan up and down.
+                // the plug-ins' settings in another order (in a video event's
+                // transitions), a track's pan up and down.
                 // A point keeps only its start: after it, what its memory had.
                 let ignored = |i: usize| match what {
                     "audio track" => (0x304..0x308).contains(&i) || (0x14..0x1C).contains(&i),
                     "audio event" => (0x24..0x28).contains(&i),
-                    "video event" => i >= 0x90 || (0x74..0x78).contains(&i),
+                    "video event" => i >= 0x90,
                     "envelope" => i >= 0x4C && (i - 0x4C) % 0x38 >= 0x10,
                     _ => false,
                 };
@@ -942,7 +943,11 @@ fn edits_read_as_the_samples_say() {
     let c = m.project.clips().next().unwrap().1;
     assert!(c.transition_fx.is_some(), "58");
     assert_eq!(m.transitions_left, 0, "58");
-    assert_eq!(open("59_transicao_out").transitions_left, 1, "59");
+    // At the fade out: the transition the event goes out with.
+    let m = open("59_transicao_out");
+    assert_eq!(m.transitions_left, 0, "59");
+    let c = m.project.clips().next().unwrap().1;
+    assert!(c.has_exit_transition(), "59");
     let d = doc("62_transicao_parametro");
     let t = d
         .tracks
@@ -1278,4 +1283,229 @@ fn pan_crop_chunks_read_and_write_back() {
     }
     eprintln!("{written} chunks");
     assert!(written >= 40, "{written} chunks");
+}
+
+/// The generated media of another program's projects (`BV_MG_SAMPLES`, the
+/// folder of `g_*.veg`, `p_*.veg`, `m*.veg`, `k*.veg` and `l_*.veg`): each
+/// read with its generator — its name, length, picture's size and the
+/// plug-in drawing it —, as the cases say.
+#[test]
+#[ignore = "needs VEGAS's sample projects"]
+fn generated_media_read() {
+    let dir = std::path::PathBuf::from(std::env::var("BV_MG_SAMPLES").expect("the folder"));
+    let read_case = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).expect(name);
+        read(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    let mut all = 0;
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("folder")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".veg"))
+        .collect();
+    names.sort();
+    for name in &names {
+        let doc = read_case(name);
+        for m in doc.media.iter().filter(|m| m.generated) {
+            let g = m
+                .generator
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} {}: no generator", m.path));
+            assert!(g.width >= 8 && g.height >= 8, "{name} {g:?}");
+            let fx = g
+                .effects
+                .first()
+                .unwrap_or_else(|| panic!("{name}: no plug-in"));
+            assert!(
+                fx.generator || fx.native.is_some(),
+                "{name}: {} is no generator",
+                fx.plugin
+            );
+            all += 1;
+        }
+    }
+    eprintln!("{all} generated media in {} files", names.len());
+    assert!(all >= 160, "{all}");
+    // A length of 7 seconds, a 320×240 size, a pixel aspect of 10/11 (its
+    // pixels as many as the asked width's), upper field first, no alpha,
+    // premultiplied alpha, turned 90°.
+    let first = |name: &str| {
+        read_case(name)
+            .media
+            .into_iter()
+            .find_map(|m| m.generator)
+            .expect(name)
+    };
+    assert_eq!(first("m01_duracao_7s.veg").duration, 70_000_000);
+    let g = first("m02_tamanho_320x240.veg");
+    assert_eq!((g.width, g.height), (320, 240));
+    let g = first("m03_par_0_9091.veg");
+    assert_eq!((g.width, g.asked.0), (582, 640));
+    assert!(
+        (g.pixel_aspect - 10.0 / 11.0).abs() < 1e-9,
+        "{}",
+        g.pixel_aspect
+    );
+    assert_eq!(first("m04_campos_superior.veg").field_order, 1);
+    assert_eq!(first("m05_alfa_nenhum.veg").alpha, 0);
+    assert_eq!(first("m06_alfa_premultiplicado.veg").alpha, 2);
+    assert_eq!(first("m07_rotacao_90.veg").rotation, 1);
+    // The Solid Color's color and its keyframes; the Gradient's record.
+    let g = first("k02_solidcolor_kf.veg");
+    assert_eq!(g.name, "VEGAS Solid Color");
+    let fx = &g.effects[0];
+    assert_eq!(fx.plugin, "com.vegascreativesoftware:solidcolor");
+    let keys = &fx.keys.iter().find(|(n, _)| n == "Color").expect("keys").1;
+    assert_eq!(
+        keys.iter().map(|k| k.frame).collect::<Vec<_>>(),
+        [0.0, 30.0, 60.0]
+    );
+    let g = first("g_gradiente_de_cor.veg");
+    let fx = &g.effects[0];
+    assert_eq!(fx.native_data.len(), 336, "{}", fx.preset);
+    assert_eq!(fx.native_keys.len(), 1);
+    let g = first("g_lista_de_cr_ditos.veg");
+    assert_eq!(g.effects[0].native_data.len(), 892);
+}
+
+/// Bytes as the 6-bit letters the states are kept in, the lowest first.
+fn state_letters(bytes: &[u8]) -> String {
+    const LETTERS: &[u8] = b".ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+";
+    let bits = bytes.len() * 8;
+    (0..bits.div_ceil(6))
+        .map(|k| {
+            let mut v = 0usize;
+            for b in 0..6 {
+                let bit = k * 6 + b;
+                if bit < bits && bytes[bit >> 3] >> (bit & 7) & 1 != 0 {
+                    v |= 1 << b;
+                }
+            }
+            LETTERS[v] as char
+        })
+        .collect()
+}
+
+/// A VST 3 plug-in of a chain that is not BananaV's own comes in as
+/// BananaV's VST 3 effect: its states (the component's, the
+/// controller's) decoded, its name without the kind's note, and what its
+/// class says to find it among the plug-ins installed. A VST 2 plug-in's
+/// class is left out.
+#[test]
+fn other_vst3_plug_ins_come_with_their_states() {
+    let component = b"the component's state \x00\x01\x02\xFF".to_vec();
+    let controller = b"view".to_vec();
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<VST3PluginState><IComponent>{}.{}</IComponent><IEditController>{}.{}</IEditController></VST3PluginState>",
+        component.len(),
+        state_letters(&component),
+        controller.len(),
+        state_letters(&controller)
+    );
+    // As the chain's record keeps them (its program before them), and
+    // after the program.
+    let mut settings = b"VC2!".to_vec();
+    settings.extend_from_slice(&(xml.len() as u32 + 1).to_le_bytes());
+    settings.extend_from_slice(xml.as_bytes());
+    settings.push(0);
+    let mut after = 7u32.to_le_bytes().to_vec();
+    after.extend_from_slice(&settings);
+    let class = riff::Guid::parse("F6A7FB77-7DD2-857C-034A-0007E95D36FA");
+    let e = audio::vst3(class, "Echo\t(VST3, 64 Bit)", &settings).expect("a VST 3 effect");
+    let v = e.vst.as_deref().expect("its plug-in");
+    assert_eq!(v.name, "Echo");
+    assert_eq!(v.state, component);
+    assert_eq!(v.controller_state, controller);
+    let e = audio::vst3(class, "Echo (VST3, 64 Bit)", &after).expect("a VST 3 effect");
+    let w = e.vst.as_deref().expect("its plug-in");
+    assert_eq!((w.name.as_str(), &w.state), ("Echo", &component));
+    assert!(v.path.as_os_str().is_empty() && v.class_id.is_empty());
+    let wanted = v.wanted.expect("to be found");
+    assert_eq!(
+        (wanted.number, wanted.file, wanted.name),
+        (0xF6A7_FB77, 0x7DD2, 0x857C)
+    );
+    assert_eq!(
+        wanted.score(
+            "ABCDEF019182FAEB4D4147584D584645",
+            "Modern Equalizer",
+            "APU_modernEQ_x64.vst3"
+        ),
+        Some(2)
+    );
+    // A VST 2 plug-in's class (its kind byte without the VST 3 bit).
+    let vst2 = riff::Guid::parse("4D583231-8A7A-478E-024A-0007E95D36FA");
+    assert!(audio::vst3(vst2, "eFX", &settings).is_none());
+    // A class of no VST plug-in.
+    let other = riff::Guid::parse("00000000-1111-2222-3333-444444444444");
+    assert!(audio::vst3(other, "Elsewhere", &settings).is_none());
+}
+
+/// The measured VST 3 projects (`BV_VST3_SAMPLES`, the folder of
+/// `v01_preset_0.veg` …): each equalizer's state decodes whole — the
+/// plug-in's own state, then its wrapper's private data — the same bytes
+/// on the track and on the event, with the effect bypassed or not.
+#[test]
+#[ignore = "needs the measured VST 3 projects"]
+fn vst3_samples_decode_their_states() {
+    let dir = std::path::PathBuf::from(std::env::var("BV_VST3_SAMPLES").expect("BV_VST3_SAMPLES"));
+    let state = |name: &str| -> Vec<Vec<u8>> {
+        let bytes = std::fs::read(dir.join(name)).expect(name);
+        let doc = read(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let all: Vec<&super::read::DocAudioFx> = doc
+            .tracks
+            .iter()
+            .flat_map(|t| {
+                t.audio_fx
+                    .iter()
+                    .chain(t.events.iter().flat_map(|e| e.audio_fx.iter()))
+            })
+            .collect();
+        all.iter()
+            .filter_map(|x| audio::vst3(x.class, &x.name, &x.settings))
+            .map(|e| e.vst.expect("a VST 3 effect").state)
+            .collect()
+    };
+    let first = state("v01_preset_0.veg");
+    assert_eq!(first.len(), 1, "one equalizer");
+    let s = &first[0];
+    assert!(s.len() > 1000, "{} bytes", s.len());
+    assert!(s.ends_with(b"JUCEPrivateData"), "the wrapper's tail");
+    // Bypassed: the same state.
+    assert_eq!(state("v05_bypass.veg"), state("v04_preset_ultimo.veg"));
+    // Two on a track: two states.
+    assert_eq!(state("v07_dois.veg").len(), 2);
+}
+
+/// A VST 2 plug-in of a chain that BananaV has no effect of its own for
+/// comes in as BananaV's VST 2 effect: its program (the preset file the
+/// settings keep) as its state, its own number to find it by.
+#[test]
+fn other_vst2_plug_ins_come_with_their_program() {
+    let mut fxp = b"CcnK".to_vec();
+    let mut rest = b"FxCk".to_vec();
+    rest.extend_from_slice(&1i32.to_be_bytes());
+    rest.extend_from_slice(b"BvG2");
+    rest.extend_from_slice(&1000i32.to_be_bytes());
+    rest.extend_from_slice(&1i32.to_be_bytes());
+    rest.extend_from_slice(&[0u8; 28]);
+    rest.extend_from_slice(&0.25f32.to_be_bytes());
+    fxp.extend_from_slice(&(rest.len() as i32).to_be_bytes());
+    fxp.extend_from_slice(&rest);
+    // After the program, with what the record keeps after it.
+    let mut settings = 3u32.to_le_bytes().to_vec();
+    settings.extend_from_slice(&fxp);
+    settings.extend_from_slice(&[9, 9, 9, 9]);
+    let class = riff::Guid::parse("42764732-1111-2222-024A-0007E95D36FA");
+    let e = audio::vst2(class, "Gain 2\t(VST2, 64 Bit)", &settings).expect("a VST 2 effect");
+    let v = e.vst.as_deref().expect("its plug-in");
+    assert_eq!(v.format, crate::fx::VstFormat::Vst2);
+    assert_eq!(v.name, "Gain 2");
+    assert_eq!(v.state, fxp, "the preset file, whole and alone");
+    let wanted = v.wanted.expect("to be found");
+    assert_eq!(wanted.number, 0x4276_4732);
+    assert_eq!(wanted.score_number(0x4276_4732, "x", "y"), Some(0));
+    // A VST 3 plug-in's class is not a VST 2 one.
+    let vst3 = riff::Guid::parse("F6A7FB77-7DD2-857C-034A-0007E95D36FA");
+    assert!(audio::vst2(vst3, "Modern", &settings).is_none());
 }

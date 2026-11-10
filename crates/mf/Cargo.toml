@@ -1,6 +1,6 @@
 [package]
 name = "bv-mf"
-description = "The system's codecs: Media Foundation on Windows, FFmpeg on Linux. Decoding of H.264, HEVC, AAC, MP3 and more, and the encoders of the processor and the graphics cards, hardware-accelerated when available."
+description = "The system's codecs: Media Foundation on Windows, FFmpeg on Linux and macOS. Decoding of H.264, HEVC, AAC, MP3 and more, and the encoders of the processor and the graphics cards, hardware-accelerated when available."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,11 +34,13 @@ windows = { version = "0.62", features = [
 ] }
 
 # FFmpeg's libraries (libavcodec, libavformat, libswscale, libswresample)
-# on Linux. Building needs their development files, pkg-config and libclang
-# (Ubuntu: libavcodec-dev libavformat-dev libswscale-dev libswresample-dev
-# pkg-config libclang-dev). `--cfg bv_no_ffmpeg` builds without them (no
-# media on Linux): for checking the code from a computer without them.
-[target.'cfg(all(target_os = "linux", not(bv_no_ffmpeg)))'.dependencies]
+# on Linux and macOS. Building needs their development files, pkg-config
+# and libclang (Ubuntu: libavcodec-dev libavformat-dev libswscale-dev
+# libswresample-dev pkg-config libclang-dev; macOS: the FFmpeg that
+# packaging/macos/build_ffmpeg.sh builds, or Homebrew's, and Xcode's
+# command-line tools). `--cfg bv_no_ffmpeg` builds without them (no media
+# there): for checking the code from a computer without them.
+[target.'cfg(all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg)))'.dependencies]
 ffmpeg-sys-next = { version = "9", default-features = false, features = [
     "avcodec",
     "avformat",

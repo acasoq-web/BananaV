@@ -399,6 +399,14 @@ fn transitions_fades_and_levels() {
             TOL,
         );
     }
+    // A crossfade with no transition: the two summed, the coming event by
+    // its fade-in's curve, the going one by its reciprocal (each channel at
+    // most 1).
+    let (mut p, _, b) = bars_and_gradient();
+    let coming = p.clip_mut(b).unwrap();
+    coming.fade_in_curve = FadeCurve::Fast;
+    coming.fade_in_reciprocal = Some(FadeCurve::Slow);
+    check(&mut c, "crossfade summed", &p, s(4), TOL);
     let (mut p, a, b) = bars_and_gradient();
     p.set_fades(a, Some(s(1)), None).unwrap();
     p.set_fades(b, None, Some(s(2))).unwrap();
@@ -564,8 +572,12 @@ fn framing_and_qualities() {
         Tick::ZERO,
         TOL,
     );
-    // Reduce Interlace Flicker, under a moved picture's edges.
-    let mut p = Project::new(linear());
+    // Reduce Interlace Flicker (an interlaced project's), under a moved
+    // picture's edges.
+    let mut p = Project::new(ProjectSettings {
+        field_order: bv_core::FieldOrder::UpperFirst,
+        ..linear()
+    });
     let v = p.tracks[0].id;
     let bars = media(&mut p, Generator::Checkerboard { size: 3 });
     let id = p.insert_media(bars, Tick::ZERO, Some(v), None).unwrap()[0];
@@ -1005,4 +1017,82 @@ fn encoder_bytes() {
             assert!(worst <= 1, "{w}x{h} ten_bit {ten_bit}: {worst}");
         }
     }
+}
+
+/// A frame for a smaller screen ([`Output::DisplayIn`]) comes back at
+/// `room_size`, each pixel the average of the frame's under it (a
+/// gradient: no edges for the bicubic's last step to sharpen); the room as
+/// large as the frame changes nothing.
+#[test]
+fn frames_reduced_for_the_screen() {
+    use bv_gpu::room_size;
+    assert_eq!(room_size((1920, 1080), (960, 540)), (960, 540));
+    assert_eq!(room_size((3840, 2160), (1280, 720)), (1440, 810));
+    assert_eq!(room_size((3840, 2160), (0, 0)), (3840, 2160));
+    assert_eq!(room_size((1280, 720), (1300, 700)), (1280, 720));
+    assert_eq!(room_size((1280, 720), (1250, 700)), (1280, 720));
+    assert_eq!(room_size((1280, 720), (1100, 600)), (1120, 630));
+    let Some(mut c) = gpu() else {
+        return;
+    };
+    let mut p = Project::new(linear());
+    let v = p.tracks[0].id;
+    let grad = media(
+        &mut p,
+        Generator::Gradient {
+            from: [0.9, 0.2, 0.1, 1.0],
+            to: [0.1, 0.3, 0.8, 1.0],
+            angle_deg: 30.0,
+        },
+    );
+    p.insert_media(grad, Tick::ZERO, Some(v), None).unwrap();
+    let (w, h) = (640, 360);
+    let scene = bv_timeline::scene::frame_scene(&p, Tick::ZERO, w, h);
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let tc = TransferCharacteristic::Bt709;
+    let mut draw = |output: Output| {
+        let mut pool = VideoPool::new();
+        match c
+            .render(&scene, p.settings.rotation, &mut pool, black, output)
+            .expect("the card draws")
+        {
+            Rendered::Display {
+                width,
+                height,
+                rgba,
+            } => (width, height, rgba),
+            other => unreachable!("{other:?}"),
+        }
+    };
+    let (fw, fh, full) = draw(Output::Display(tc));
+    assert_eq!((fw, fh), (w, h));
+    let same = draw(Output::DisplayIn(tc, (w, h)));
+    assert_eq!(
+        (same.0, same.1, &same.2),
+        (fw, fh, &full),
+        "a room as large"
+    );
+    let (rw, rh, small) = draw(Output::DisplayIn(tc, (200, 120)));
+    assert_eq!((rw, rh), room_size((w, h), (200, 120)));
+    // Each reduced pixel against the average of the frame's under it.
+    let (kx, ky) = (w as f32 / rw as f32, h as f32 / rh as f32);
+    let mut worst = 0.0f32;
+    for y in 1..rh - 1 {
+        for x in 1..rw - 1 {
+            let (x0, x1) = ((x as f32 * kx) as u32, ((x + 1) as f32 * kx) as u32);
+            let (y0, y1) = ((y as f32 * ky) as u32, ((y + 1) as f32 * ky) as u32);
+            for ch in 0..3 {
+                let mut sum = 0.0;
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        sum += f32::from(full[((sy * w + sx) * 4 + ch) as usize]);
+                    }
+                }
+                let mean = sum / ((x1 - x0) * (y1 - y0)) as f32;
+                let got = f32::from(small[((y * rw + x) * 4 + ch) as usize]);
+                worst = worst.max((got - mean).abs());
+            }
+        }
+    }
+    assert!(worst <= 3.0, "reduced pixels {worst} off the average");
 }

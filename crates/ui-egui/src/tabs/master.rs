@@ -192,6 +192,14 @@ pub(crate) fn meter_gradient(
     painter.add(egui::Shape::mesh(mesh));
 }
 
+/// The pointer over a meter whose click clears its clip lights and peaks:
+/// the hand, as VEGAS's meters.
+pub(crate) fn reset_pointer(ui: &egui::Ui, meter: &egui::Response) {
+    if meter.hovered() {
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::HandPoint);
+    }
+}
+
 /// A meter as VEGAS's Master Bus draws it: framed, dim down its height,
 /// lit from the bottom up to `db`; the peak held as a line.
 fn vegas_meter(painter: &egui::Painter, rect: Rect, db: f32, hold: f32) {
@@ -327,15 +335,15 @@ pub(crate) fn preview_strip(ui: &mut egui::Ui, app: &mut BananaApp) {
             pos2(lanes[1].left() - 1.0, bottom),
         ),
     );
-    if ui
+    let r = ui
         .interact(
             lanes[0].union(lanes[1]),
             ui.id().with("preview-clip-reset"),
             Sense::click(),
         )
-        .on_hover_text(tr("Click to clear the clip lights"))
-        .clicked()
-    {
+        .on_hover_text(tr("Click to clear the clip lights"));
+    reset_pointer(ui, &r);
+    if r.clicked() {
         meters.clipped.iter_mut().for_each(|c| *c = false);
     }
     let row = Rect::from_min_size(
@@ -493,11 +501,11 @@ pub(crate) fn master_strip(ui: &mut egui::Ui, app: &mut BananaApp) {
     };
     vegas_scale(painter, scale);
     let meters = lanes.iter().fold(lanes[0], |all, lane| all.union(*lane));
-    if ui
+    let r = ui
         .interact(meters, ui.id().with("clip-reset"), Sense::click())
-        .on_hover_text(tr("Click to clear the clip lights"))
-        .clicked()
-    {
+        .on_hover_text(tr("Click to clear the clip lights"));
+    reset_pointer(ui, &r);
+    if r.clicked() {
         app.meters.clipped.iter_mut().for_each(|c| *c = false);
     }
     // The lock under the fader, each channel's peak under its meter.

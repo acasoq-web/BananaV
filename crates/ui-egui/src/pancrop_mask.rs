@@ -17,6 +17,7 @@ use crate::egui::{
 use bv_core::Tick;
 use bv_timeline::mask::{self, MaskAnchor, MaskFeather, MaskMode, MaskPath, PanCropMask};
 
+use crate::cursors::{self, Cursor};
 use crate::fx_window::{
     Glyph, Space, glyph_button, prop, prop_choice, prop_grid, prop_name, prop_value, prop_yes_no,
     section,
@@ -32,6 +33,60 @@ pub(crate) enum MaskTool {
     SplitTangent,
     Rectangle,
     Oval,
+}
+
+/// What a press of the Mask row's tool takes at a point (each tool's
+/// press looks for its own things, in its own order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaskSpot {
+    /// The picked path's box's turning handle.
+    Rotate,
+    /// A corner of the picked path's box: of the falling diagonal (top
+    /// left, bottom right) or of the rising one.
+    Corner { falling: bool },
+    /// A picked anchor's tangent's end.
+    Tangent,
+    /// An anchor.
+    Anchor,
+    /// A path's line.
+    Segment,
+    /// Inside a path.
+    Inside,
+    /// Nothing of the paths: the press makes something new (an anchor, a
+    /// rectangle, an oval) or picks with a rectangle, or does nothing.
+    Free,
+}
+
+/// The pointer a Mask row's tool shows where its press would take `spot`,
+/// as VEGAS's (none: the system's arrow). The rectangle and oval tools,
+/// the crosshair wherever; a tangent's end, the pen dragging a tangent,
+/// whatever the tool; an anchor: the Anchor Creation tool's pen dragging
+/// its tangents (a click turns it a corner or curved), the Split Tangent
+/// tool's, the Anchor Deletion tool's, the Normal tool's arrow; a line:
+/// the pen adding an anchor there (Anchor Creation and Split Tangent),
+/// the Normal tool's arrow; elsewhere the Anchor Creation tool's pen making
+/// an anchor (a new path, the one drawn going on, closed on its first
+/// anchor). The Normal tool's path box: its corners' arrows, the turning
+/// handle's; inside a path, the path moved (the frame's pointer).
+pub(crate) fn mask_cursor(tool: MaskTool, spot: MaskSpot) -> Option<Cursor> {
+    use MaskSpot::*;
+    Some(match (tool, spot) {
+        (MaskTool::Rectangle | MaskTool::Oval, _) => Cursor::Crosshair,
+        (_, Rotate) => Cursor::Rotate,
+        (_, Corner { falling }) => {
+            let way = if falling { (1.0, 1.0) } else { (1.0, -1.0) };
+            crate::fx_window::handle_cursor(way, 0.0, false)
+        }
+        (_, Tangent) => Cursor::PenTangent,
+        (MaskTool::AddAnchor, Anchor) => Cursor::PenTangent,
+        (MaskTool::AddAnchor | MaskTool::SplitTangent, Segment) => Cursor::PenAdd,
+        (MaskTool::AddAnchor, _) => Cursor::Pen,
+        (MaskTool::SplitTangent, Anchor) => Cursor::PenSplitTangent,
+        (MaskTool::DeleteAnchor, Anchor) => Cursor::PenDelete,
+        (MaskTool::Normal, Anchor | Segment) => Cursor::Arrow,
+        (MaskTool::Normal, Inside) => Cursor::MoveFrame,
+        _ => return None,
+    })
 }
 
 /// An anchor: its path and its place in it.
@@ -128,6 +183,8 @@ pub(crate) struct MaskEditor {
     /// anchor closes it.
     drawing: Option<usize>,
     drag: Option<MaskDrag>,
+    /// The pointer the drag going on shows: the one its press showed.
+    held: Option<Cursor>,
     /// The rectangle picking anchors, while it is dragged.
     marquee: Option<Rect>,
     /// The tangents a click of the Anchor Creation or Split Tangent tool
@@ -161,6 +218,7 @@ impl Default for MaskEditor {
             boxed: false,
             drawing: None,
             drag: None,
+            held: None,
             marquee: None,
             hidden: HashMap::new(),
             sections: [true, true, true],
@@ -383,7 +441,8 @@ impl MaskEditor {
             None
         };
 
-        // A press: what it grabs, by tool.
+        // A press: what it grabs, by tool (a drag shows the pointer the
+        // press did while it goes on).
         if let Some(o) = press {
             let h = Press {
                 o,
@@ -392,6 +451,9 @@ impl MaskEditor {
                 double: interactive && resp.double_clicked(),
                 mods,
             };
+            if primary {
+                self.held = mask_cursor(self.tool, self.spot(sp, &shapes, o));
+            }
             match self.tool {
                 MaskTool::Normal => self.press_normal(&h, sp, &shapes, &mut m, local),
                 MaskTool::SplitTangent => self.press_split(&h, sp, &shapes, &mut m, local),
@@ -619,40 +681,21 @@ impl MaskEditor {
             self.menu(resp, &mut m, local);
         }
 
-        // The cursor.
-        if interactive
-            && self.drag.is_none()
-            && let Some(p) = resp.hover_pos()
-        {
-            let shapes = m.shapes_at(local);
-            let on_line = || self.segment_at(sp, &shapes, p).is_some();
-            let icon = match self.tool {
-                MaskTool::Rectangle | MaskTool::Oval => CursorIcon::Crosshair,
-                MaskTool::AddAnchor => CursorIcon::Cell,
-                MaskTool::DeleteAnchor => CursorIcon::NotAllowed,
-                _ if self.anchor_at(sp, &shapes, p).is_some()
-                    || self.tangent_at(sp, &shapes, p).is_some() =>
-                {
-                    CursorIcon::PointingHand
-                }
-                // The turning handle: the turning cursor, drawn.
-                _ if self.rotate_at(sp, &shapes, p).is_some() => CursorIcon::None,
-                _ if self.corner_at(sp, &shapes, p).is_some() => CursorIcon::ResizeNwSe,
-                MaskTool::SplitTangent if on_line() => CursorIcon::Cell,
-                MaskTool::Normal if on_line() => CursorIcon::Grab,
-                _ if path_at(&shapes, sp.media64(p)).is_some() => CursorIcon::Move,
-                _ => CursorIcon::Default,
-            };
-            if icon == CursorIcon::None {
-                crate::fx_window::rotate_cursor(ui.ctx(), p);
+        // The pointer, as VEGAS's for each tool (`mask_cursor`): what the
+        // press would take under it; while a drag goes on, the one its
+        // press showed.
+        if interactive {
+            let shown = if self.drag.is_some() {
+                Some(self.held)
             } else {
-                ui.ctx().set_cursor_icon(icon);
+                resp.hover_pos()
+                    .map(|p| mask_cursor(self.tool, self.spot(sp, &m.shapes_at(local), p)))
+            };
+            match shown {
+                Some(Some(c)) => cursors::set(ui.ctx(), c),
+                Some(None) => cursors::system(ui.ctx(), CursorIcon::Default),
+                None => {}
             }
-        }
-        if matches!(self.drag, Some(MaskDrag::Rotate { .. }))
-            && let Some(p) = ui.input(|i| i.pointer.latest_pos())
-        {
-            crate::fx_window::rotate_cursor(ui.ctx(), p);
         }
 
         // Drawn with what it is now.
@@ -695,7 +738,7 @@ impl MaskEditor {
         m: &mut PanCropMask,
         local: Tick,
     ) {
-        let adding = h.mods.ctrl || h.mods.shift;
+        let adding = h.mods.command || h.mods.shift;
         if let Some(center) = self.rotate_at(sp, shapes, h.o) {
             if h.primary {
                 self.drag = Some(MaskDrag::Rotate {
@@ -744,7 +787,7 @@ impl MaskEditor {
                     from: h.at,
                     shapes: shapes.to_vec(),
                 });
-            } else if h.mods.ctrl {
+            } else if h.mods.command {
                 if !self.anchors.remove(&key) {
                     self.anchors.insert(key);
                 }
@@ -778,7 +821,8 @@ impl MaskEditor {
             self.pick_path(path);
             if h.primary {
                 // Ctrl: a copy dragged, the original left.
-                let (path, shapes) = match h.mods.ctrl.then(|| m.duplicate_path(path, [0.0; 2])) {
+                let (path, shapes) = match h.mods.command.then(|| m.duplicate_path(path, [0.0; 2]))
+                {
                     Some(Some(copy)) => {
                         self.pick_path(copy);
                         self.anchors.clear();
@@ -855,7 +899,7 @@ impl MaskEditor {
             self.split_at(m, local, path, segment, t, h.primary);
             return;
         }
-        if !h.primary && !(h.mods.ctrl || h.mods.shift) {
+        if !h.primary && !(h.mods.command || h.mods.shift) {
             self.selected = None;
             self.anchors.clear();
             self.boxed = false;
@@ -1032,7 +1076,8 @@ impl MaskEditor {
     /// The anchor under `p` (screen): the picked path's first.
     fn anchor_at(&self, sp: &Space, shapes: &[Vec<MaskAnchor>], p: Pos2) -> Option<AnchorRef> {
         let near = |path: usize| {
-            shapes[path]
+            shapes
+                .get(path)?
                 .iter()
                 .position(|a| sp.screen64((a.at[0], a.at[1])).distance(p) <= GRAB)
                 .map(|i| (path, i))
@@ -1125,6 +1170,46 @@ impl MaskEditor {
             && shapes[d]
                 .first()
                 .is_some_and(|a| sp.screen64((a.at[0], a.at[1])).distance(p) <= GRAB)
+    }
+
+    /// What a press of the tool at `p` (screen) takes, in the order its
+    /// press looks (`press_normal`, `press_split`, `press_pen`).
+    fn spot(&self, sp: &Space, shapes: &[Vec<MaskAnchor>], p: Pos2) -> MaskSpot {
+        let anchor = || self.anchor_at(sp, shapes, p).is_some();
+        let tangent = || self.tangent_at(sp, shapes, p).is_some();
+        let segment = || self.segment_at(sp, shapes, p).is_some();
+        let drawing = self.drawing.filter(|&d| d < shapes.len());
+        match self.tool {
+            MaskTool::Normal => {
+                if self.rotate_at(sp, shapes, p).is_some() {
+                    MaskSpot::Rotate
+                } else if let Some((fixed, corner)) = self.corner_at(sp, shapes, p) {
+                    MaskSpot::Corner {
+                        falling: (corner.0 > fixed.0) == (corner.1 > fixed.1),
+                    }
+                } else if tangent() {
+                    MaskSpot::Tangent
+                } else if anchor() {
+                    MaskSpot::Anchor
+                } else if segment() {
+                    MaskSpot::Segment
+                } else if path_at(shapes, sp.media64(p)).is_some() {
+                    MaskSpot::Inside
+                } else {
+                    MaskSpot::Free
+                }
+            }
+            MaskTool::SplitTangent if tangent() => MaskSpot::Tangent,
+            MaskTool::SplitTangent | MaskTool::DeleteAnchor if anchor() => MaskSpot::Anchor,
+            MaskTool::SplitTangent if segment() => MaskSpot::Segment,
+            // Closing the path drawn, or drawing it on: an anchor made.
+            MaskTool::AddAnchor if drawing.is_some_and(|d| self.near_first(sp, shapes, d, p)) => {
+                MaskSpot::Free
+            }
+            MaskTool::AddAnchor if anchor() => MaskSpot::Anchor,
+            MaskTool::AddAnchor if drawing.is_none() && segment() => MaskSpot::Segment,
+            _ => MaskSpot::Free,
+        }
     }
 
     /// The workspace's menu in the Mask row. Its tangents' items work on
@@ -1654,7 +1739,7 @@ fn drawn_shape(tool: MaskTool, a: (f64, f64), b: (f64, f64), mods: egui::Modifie
         let s = dx.abs().max(dy.abs());
         (dx, dy) = (s * dx.signum(), s * dy.signum());
     }
-    let (p0, p1) = if mods.ctrl {
+    let (p0, p1) = if mods.command {
         ([a.0 - dx, a.1 - dy], [a.0 + dx, a.1 + dy])
     } else {
         ([a.0, a.1], [a.0 + dx, a.1 + dy])
@@ -1753,5 +1838,43 @@ mod tests {
         let (b, a) = (s[0].before, s[0].after);
         assert!((b[0] * a[1] - b[1] * a[0]).abs() < 1e-3 && b[0] * a[0] + b[1] * a[1] < 0.0);
         assert_eq!(s[1].after, [0.0; 2]);
+    }
+
+    /// Each tool's pointer where its press would take something, as
+    /// VEGAS's: the rectangle and oval tools' crosshair; a tangent's pen;
+    /// on an anchor the Anchor Creation tool's tangent pen, Split Tangent's
+    /// and Anchor Deletion's own pens, the Normal tool's arrow; on a line
+    /// the pen adding an anchor; elsewhere the pen making one.
+    #[test]
+    fn each_mask_tool_shows_vegas_s_pen_where_it_works() {
+        use MaskSpot::*;
+        use MaskTool::*;
+        let c = mask_cursor;
+        for tool in [Rectangle, Oval] {
+            for spot in [Anchor, Segment, Inside, Free] {
+                assert_eq!(c(tool, spot), Some(Cursor::Crosshair));
+            }
+        }
+        for tool in [Normal, AddAnchor, DeleteAnchor, SplitTangent] {
+            assert_eq!(c(tool, Tangent), Some(Cursor::PenTangent), "{tool:?}");
+        }
+        assert_eq!(c(AddAnchor, Anchor), Some(Cursor::PenTangent));
+        assert_eq!(c(SplitTangent, Anchor), Some(Cursor::PenSplitTangent));
+        assert_eq!(c(DeleteAnchor, Anchor), Some(Cursor::PenDelete));
+        assert_eq!(c(Normal, Anchor), Some(Cursor::Arrow));
+        assert_eq!(c(AddAnchor, Segment), Some(Cursor::PenAdd));
+        assert_eq!(c(SplitTangent, Segment), Some(Cursor::PenAdd));
+        assert_eq!(c(Normal, Segment), Some(Cursor::Arrow));
+        assert_eq!(c(AddAnchor, Free), Some(Cursor::Pen));
+        // The Normal tool's path: moved inside it, its box's handles.
+        assert_eq!(c(Normal, Inside), Some(Cursor::MoveFrame));
+        assert_eq!(c(Normal, Rotate), Some(Cursor::Rotate));
+        let corner = |falling| c(Normal, Corner { falling });
+        assert_eq!(corner(true), Some(Cursor::ResizeNwse));
+        assert_eq!(corner(false), Some(Cursor::ResizeNesw));
+        // Nothing to take: the system's arrow (a rectangle picks anchors).
+        for tool in [Normal, DeleteAnchor, SplitTangent] {
+            assert_eq!(c(tool, Free), None, "{tool:?}");
+        }
     }
 }

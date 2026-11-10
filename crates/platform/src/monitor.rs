@@ -1,7 +1,8 @@
 //! What a long job needs from the OS: how much processor and memory this
 //! process uses and how busy the disks are (the render progress window's
-//! Performance section), its progress on the taskbar button, a sound when it
-//! ends and shutting the computer down afterwards.
+//! Performance section), its progress on the taskbar button (the Dock's icon
+//! on macOS), a sound when it ends and shutting the computer down
+//! afterwards.
 
 use std::time::Instant;
 
@@ -84,6 +85,26 @@ pub fn shutdown_in(seconds: u32, message: &str) -> bool {
             .args(["-P", &format!("+{minutes}"), message])
             .status()
             .is_ok_and(|s| s.success());
+    }
+    if cfg!(target_os = "macos") {
+        // After the wait, the system's own question about shutting down,
+        // which counts down a minute and can be cancelled (the message is
+        // the system's).
+        let _ = message;
+        let script =
+            format!("delay {seconds}\ntell application \"loginwindow\" to «event aevtrsdn»");
+        return std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|mut child| {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            })
+            .is_ok();
     }
     if !cfg!(windows) {
         return false;
@@ -527,7 +548,184 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+/// macOS: this process's processor time and memory (its footprint, as
+/// Activity Monitor shows it) from the kernel; the disks' busy time and the
+/// graphics' use from IOKit's statistics (the graphics' for the whole Mac:
+/// macOS does not tell a process's own); the progress on the Dock's icon,
+/// the system's sound.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod imp {
+    use std::ffi::{CStr, c_char};
+    use std::time::Instant;
+
+    use bv_apple::cf::{self, Owned, Ref};
+
+    pub fn process_cpu_seconds() -> Option<f64> {
+        // SAFETY: a structure all of whose bits may be zero, filled by the
+        // call.
+        let u = unsafe {
+            let mut u: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut u) != 0 {
+                return None;
+            }
+            u
+        };
+        let t = |v: libc::timeval| v.tv_sec as f64 + f64::from(v.tv_usec) / 1e6;
+        Some(t(u.ru_utime) + t(u.ru_stime))
+    }
+
+    pub fn process_memory() -> Option<u64> {
+        // SAFETY: this process's usage into a structure of the version
+        // asked for.
+        unsafe {
+            let mut info: libc::rusage_info_v2 = std::mem::zeroed();
+            let r =
+                libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V2, (&raw mut info).cast());
+            (r == 0).then_some(info.ri_phys_footprint)
+        }
+    }
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOServiceMatching(name: *const c_char) -> Ref;
+        fn IOServiceGetMatchingServices(port: u32, matching: Ref, iterator: *mut u32) -> i32;
+        fn IOIteratorNext(iterator: u32) -> u32;
+        fn IOObjectRelease(object: u32) -> i32;
+        fn IORegistryEntryCreateCFProperty(entry: u32, key: Ref, alloc: Ref, options: u32) -> Ref;
+    }
+
+    /// The property `key` (a dictionary) of each IOKit service of class
+    /// `class`, read with `read`.
+    fn each<T>(class: &CStr, key: &str, mut read: impl FnMut(Ref) -> Option<T>) -> Vec<T> {
+        let mut out = Vec::new();
+        let key = cf::string(key);
+        // SAFETY: a matching dictionary (taken by the call), an iterator
+        // and its services released here; each property owned.
+        unsafe {
+            let mut iterator = 0u32;
+            if IOServiceGetMatchingServices(0, IOServiceMatching(class.as_ptr()), &mut iterator)
+                != 0
+            {
+                return out;
+            }
+            loop {
+                let service = IOIteratorNext(iterator);
+                if service == 0 {
+                    break;
+                }
+                let value = Owned::take(IORegistryEntryCreateCFProperty(
+                    service,
+                    key.get(),
+                    std::ptr::null(),
+                    0,
+                ));
+                if let Some(v) = value.and_then(|v| read(v.get())) {
+                    out.push(v);
+                }
+                IOObjectRelease(service);
+            }
+            IOObjectRelease(iterator);
+        }
+        out
+    }
+
+    /// Each disk's nanoseconds spent reading and writing.
+    fn disk_times() -> Vec<f64> {
+        each(c"IOBlockStorageDriver", "Statistics", |stats| {
+            // SAFETY: the dictionary IOKit gave, alive during the call.
+            unsafe {
+                let read = cf::to_f64(cf::get(stats, "Total Time (Read)"))?;
+                let write = cf::to_f64(cf::get(stats, "Total Time (Write)"))?;
+                Some(read + write)
+            }
+        })
+    }
+
+    #[derive(Debug)]
+    pub struct DiskQuery {
+        last: Option<(Instant, Vec<f64>)>,
+    }
+
+    impl DiskQuery {
+        pub fn new() -> DiskQuery {
+            DiskQuery { last: None }
+        }
+
+        /// The busiest disk's share of the time since the last call.
+        pub fn sample(&mut self) -> Option<f64> {
+            let now = disk_times();
+            if now.is_empty() {
+                return None;
+            }
+            let at = Instant::now();
+            let share = self.last.as_ref().and_then(|(t, before)| {
+                let wall = at.duration_since(*t).as_secs_f64() * 1e9;
+                (wall > 0.0 && before.len() == now.len()).then(|| {
+                    now.iter()
+                        .zip(before)
+                        .map(|(n, b)| (n - b).max(0.0) / wall * 100.0)
+                        .fold(0.0, f64::max)
+                        .clamp(0.0, 100.0)
+                })
+            });
+            self.last = Some((at, now));
+            share
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct GpuQuery {
+        asked: bool,
+    }
+
+    impl GpuQuery {
+        pub fn new() -> GpuQuery {
+            GpuQuery { asked: false }
+        }
+
+        /// The busiest graphics' use now (`None` on the first call, as the
+        /// other systems' counters).
+        pub fn sample(&mut self) -> Option<f64> {
+            let first = !std::mem::replace(&mut self.asked, true);
+            let uses = each(c"IOAccelerator", "PerformanceStatistics", |stats| {
+                // SAFETY: the dictionary IOKit gave, alive during the call.
+                unsafe { cf::to_f64(cf::get(stats, "Device Utilization %")) }
+            });
+            if first || uses.is_empty() {
+                return None;
+            }
+            Some(uses.into_iter().fold(0.0, f64::max).clamp(0.0, 100.0))
+        }
+    }
+
+    /// The progress on the Dock's icon ("42%"), its own window's title not
+    /// needed: one icon for the program.
+    pub fn taskbar_progress(_title: &str, progress: Option<f32>) {
+        let label = progress.map(|p| format!("{}%", (p.clamp(0.0, 1.0) * 100.0).round() as u32));
+        bv_apple::on_main(move || {
+            let Some(mtm) = objc2::MainThreadMarker::new() else {
+                return;
+            };
+            let tile = objc2_app_kit::NSApplication::sharedApplication(mtm).dockTile();
+            let text = label.as_deref().map(objc2_foundation::NSString::from_str);
+            tile.setBadgeLabel(text.as_deref());
+            tile.display();
+        });
+    }
+
+    /// The system's "Glass" sound.
+    pub fn notify_sound() {
+        bv_apple::on_main(|| {
+            let name = objc2_foundation::NSString::from_str("Glass");
+            if let Some(sound) = objc2_app_kit::NSSound::soundNamed(&name) {
+                sound.play();
+            }
+        });
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     pub fn process_cpu_seconds() -> Option<f64> {
         None
@@ -622,7 +820,7 @@ mod tests {
         }
         std::hint::black_box(x);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if cfg!(any(windows, target_os = "linux")) {
+        if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
             let cpu = u.cpu().expect("processor share");
             assert!((0.0..=100.0).contains(&cpu), "{cpu}");
             assert!(u.memory().is_some_and(|m| m > 1 << 20));

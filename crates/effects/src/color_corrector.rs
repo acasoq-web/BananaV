@@ -21,8 +21,8 @@
 //! encoding of it ([`gamma_curve`]). The calibration card through VEGAS
 //! shows Saturation (0 and 2), Gamma (0.5 and 2), Gain (0.5 and 1.5) and
 //! Offset (-0.2 and 0.2) so, to an 8-bit step. Nothing is clipped
-//! (VEGAS's float effects keep what passes white or black; 8-bit projects
-//! hold each effect's result within 0–1).
+//! (in 32-bit projects VEGAS's effects keep what passes white or black;
+//! 8-bit projects hold each effect's result within 0–1).
 //! Colors are taken unpremultiplied, on the values the host hands over
 //! (encoded in BananaV's 8-bit projects, as VEGAS's).
 //!

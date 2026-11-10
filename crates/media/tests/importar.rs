@@ -6,7 +6,10 @@
 //! Run with `cargo test -p bv-media --test importar -- --ignored --nocapture`.
 
 #![allow(clippy::print_stdout)]
-#![cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#![cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 
 use std::path::PathBuf;
 use std::process::Command;

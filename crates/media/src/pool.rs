@@ -56,6 +56,24 @@ pub struct Ask {
     pub span: Option<Tick>,
     /// Y′CbCr as studio RGB (see [`VideoReader::set_video_levels`]).
     pub video_levels: bool,
+    /// The project's pictures: 8 bits a channel, composited on the encoded
+    /// values (see [`VideoReader::set_project`]).
+    pub eight_bit: bool,
+    pub encoded: bool,
+}
+
+/// How long a generator's pictures last: its media's own length when it
+/// has one (a `.veg`'s generated media, timed by it as VEGAS's are), else
+/// its event's.
+fn span_of(m: &MediaLayer<'_>) -> Tick {
+    match &m.info.source {
+        bv_timeline::MediaSource::Generated(_)
+            if m.info.duration < bv_timeline::Generator::DURATION =>
+        {
+            m.info.duration
+        }
+        _ => m.length,
+    }
 }
 
 impl Ask {
@@ -65,8 +83,10 @@ impl Ask {
             time: m.time,
             min_size: m.min_size,
             want,
-            span: Some(m.length),
+            span: Some(span_of(m)),
             video_levels: m.video_levels,
+            eight_bit: m.eight_bit,
+            encoded: m.encoded,
         }
     }
 
@@ -342,6 +362,7 @@ impl Worker {
 fn fetch(reader: &mut dyn VideoReader, ask: Ask) -> Result<Picture> {
     reader.set_span(ask.span);
     reader.set_video_levels(ask.video_levels);
+    reader.set_project(ask.eight_bit, ask.encoded);
     let (w, h) = ask.min_size;
     match ask.want {
         Want::Linear => reader.frame_at_scaled(ask.time, w, h).map(Picture::Linear),
@@ -666,6 +687,8 @@ impl VideoPool {
             want: Want::Linear,
             span: None,
             video_levels: false,
+            eight_bit: false,
+            encoded: true,
         };
         match self.picture(NO_EVENT, info, ask)? {
             Picture::Linear(img) => Ok(img),
@@ -801,6 +824,8 @@ mod tests {
             want: Want::Linear,
             span: None,
             video_levels: false,
+            eight_bit: false,
+            encoded: true,
         };
         let plan = stretch_behind(at(100), at(99));
         let times: Vec<i64> = plan.iter().map(|a| a.time.0 / f.0).collect();
@@ -824,6 +849,8 @@ mod tests {
             want: Want::Linear,
             span: None,
             video_levels: false,
+            eight_bit: false,
+            encoded: true,
         };
         let need = |owner| Need {
             owner,

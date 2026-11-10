@@ -27,7 +27,8 @@ use bv_timeline::{ClipId, MarkerId, MediaId, MediaSource, Project, TrackKind};
 use serde::{Deserialize, Serialize};
 
 use crate::app::BananaApp;
-use crate::egui::{self, Align2, Color32, CursorIcon, FontId, Rect, Sense, Stroke, pos2, vec2};
+use crate::cursors::Cursor;
+use crate::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 use crate::icons::Icon;
 use crate::theme;
 use crate::timefmt;
@@ -830,6 +831,25 @@ enum Hit {
     Nothing,
 }
 
+/// The table's pointer, as VEGAS's grids: over a heading's border and
+/// while it is dragged, ↔ with a bar (the column resized); over a heading
+/// and while it is dragged, the arrow moving a column — off the window
+/// (`off`), where letting it go hides the column (never the last of
+/// `columns`), the arrow taking one away —; elsewhere none of BananaV's.
+fn table_cursor(hover: Hit, drag: Option<HeadDrag>, off: bool, columns: usize) -> Option<Cursor> {
+    match drag {
+        Some(HeadDrag::Resize { .. }) => Some(Cursor::ResizeBarEw),
+        Some(HeadDrag::Move { .. }) if off && columns > 1 => Some(Cursor::ColumnDelete),
+        Some(HeadDrag::Move { .. }) => Some(Cursor::ColumnMove),
+        Some(HeadDrag::Cells { .. }) => None,
+        None => match hover {
+            Hit::Border(_) => Some(Cursor::ResizeBarEw),
+            Hit::Head(_) => Some(Cursor::ColumnMove),
+            _ => None,
+        },
+    }
+}
+
 /// The table's places: its content's origin and what is visible.
 struct Geometry {
     origin: egui::Pos2,
@@ -1034,8 +1054,14 @@ fn table(
     let resp = ui.interact(g.visible, id, Sense::click_and_drag());
     let pointer = ui.input(|i| i.pointer.latest_pos());
     let hover = pointer.map_or(Hit::Nothing, |p| g.hit(p));
-    if matches!(hover, Hit::Border(_)) || matches!(view.drag, Some(HeadDrag::Resize { .. })) {
-        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+    let shown = if resp.hovered() || view.drag.is_some() {
+        hover
+    } else {
+        Hit::Nothing
+    };
+    let off = pointer.is_some_and(|p| !window.contains(p));
+    if let Some(c) = table_cursor(shown, view.drag, off, cols.len()) {
+        crate::cursors::set(ui.ctx(), c);
     }
     let modifiers = ui.input(|i| i.modifiers);
     let at = |r: usize, c: usize| (items[r], cols[c]);
@@ -1933,5 +1959,42 @@ mod tests {
             app.project().markers.is_empty(),
             "Delete removes the rows' items"
         );
+    }
+
+    /// As VEGAS's grids: ↔ with a bar on a heading's border and while it
+    /// resizes; the arrow moving a column on a heading and while it moves,
+    /// the one taking it away off the window (but the last column); the
+    /// cells none of BananaV's.
+    #[test]
+    fn the_headings_show_the_grid_s_pointers() {
+        let resize = HeadDrag::Resize {
+            col: 0,
+            from_w: 80.0,
+            from_x: 0.0,
+        };
+        let moving = HeadDrag::Move { col: 1, grab: 4.0 };
+        let cells = HeadDrag::Cells { from: (0, 0) };
+        let c = table_cursor;
+        assert_eq!(c(Hit::Border(2), None, false, 5), Some(Cursor::ResizeBarEw));
+        assert_eq!(c(Hit::Head(2), None, false, 5), Some(Cursor::ColumnMove));
+        assert_eq!(c(Hit::Cell(0, 0), None, false, 5), None);
+        assert_eq!(c(Hit::RowNumber(0), None, false, 5), None);
+        assert_eq!(
+            c(Hit::Nothing, Some(resize), true, 5),
+            Some(Cursor::ResizeBarEw)
+        );
+        assert_eq!(
+            c(Hit::Cell(1, 1), Some(moving), false, 5),
+            Some(Cursor::ColumnMove)
+        );
+        assert_eq!(
+            c(Hit::Nothing, Some(moving), true, 5),
+            Some(Cursor::ColumnDelete)
+        );
+        assert_eq!(
+            c(Hit::Nothing, Some(moving), true, 1),
+            Some(Cursor::ColumnMove)
+        );
+        assert_eq!(c(Hit::Border(0), Some(cells), false, 5), None);
     }
 }

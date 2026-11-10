@@ -305,6 +305,95 @@ impl Generator {
             Generator::Adjustment => "Adjustment Event".into(),
         }
     }
+
+    /// BananaV's OFX generator drawing what this older built-in one drew,
+    /// for media `width` pixels wide: Solid Color's color, Color Bars as
+    /// Test Pattern's SMPTE bars, Checkerboard's tiles and colors, and
+    /// Gradient's two colors across the frame at its angle. `None` for the
+    /// rest: noise and tones have no plug-in, an empty event (a solid
+    /// color nothing shows through) and an adjustment event stay as they
+    /// are, and a plug-in's is one already.
+    pub fn as_plugin(&self, width: u32) -> Option<Generator> {
+        use crate::fx::{PluginParam, PluginValue};
+        let num = |v: &[f64]| PluginParam {
+            value: PluginValue::Num(v.to_vec()),
+            keys: Vec::new(),
+        };
+        // Six decimals: the colors as typed, the same after a save.
+        let tidy = |v: f64| (v * 1e6).round() / 1e6;
+        let color = |c: [f32; 4]| num(&c.map(|v| tidy(f64::from(v))));
+        let plugin = |id: &str, version: [u32; 2], name: &str, params: Vec<(&str, PluginParam)>| {
+            Generator::Plugin(Box::new(PluginFx {
+                id: id.into(),
+                version,
+                name: name.into(),
+                params: params
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            }))
+        };
+        Some(match *self {
+            Generator::SolidColor { rgba } if rgba[3] > 0.0 => plugin(
+                "org.bananav.SolidColor",
+                [1, 0],
+                "Solid Color",
+                vec![("color", color(rgba))],
+            ),
+            // Its list's SMPTE bars (NTSC).
+            Generator::ColorBars => plugin(
+                "org.bananav.TestPattern",
+                [2, 1],
+                "Test Pattern",
+                vec![("testPatternType", num(&[5.0]))],
+            ),
+            // Square tiles as wide as before, the first one light.
+            Generator::Checkerboard { size } => {
+                let w = tidy(f64::from(size.max(1)) / f64::from(width.max(1)));
+                plugin(
+                    "org.bananav.Checkerboard",
+                    [2, 1],
+                    "Checkerboard",
+                    vec![
+                        ("tileDimensionsWidth", num(&[w.clamp(0.001, 1.0)])),
+                        ("tileDimensionsSquare", num(&[1.0])),
+                        ("color1", num(&[0.8, 0.8, 0.8, 1.0])),
+                        ("color2", num(&[0.35, 0.35, 0.35, 1.0])),
+                    ],
+                )
+            }
+            // The two colors on the angle's axis, at the frame's farthest
+            // corners each way (the older one ran from corner to corner);
+            // the plug-in's angle turns clockwise on screen.
+            Generator::Gradient {
+                from,
+                to,
+                angle_deg,
+            } => {
+                let (s, c) = f64::from(angle_deg).to_radians().sin_cos();
+                let ends = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
+                    .map(|(x, y): (f64, f64)| x * c + y * s);
+                let lo = tidy(ends.iter().copied().fold(f64::MAX, f64::min));
+                let hi = tidy(ends.iter().copied().fold(f64::MIN, f64::max));
+                plugin(
+                    "org.bananav.ColorGradient",
+                    [2, 0],
+                    "Color Gradient",
+                    vec![
+                        ("gradientType", num(&[0.0])),
+                        ("aspectRatioAngle", num(&[-f64::from(angle_deg)])),
+                        ("center", num(&[0.5, 0.5])),
+                        ("controlPoints", num(&[2.0])),
+                        ("distance1", num(&[lo])),
+                        ("color1", color(from)),
+                        ("distance2", num(&[hi])),
+                        ("color2", color(to)),
+                    ],
+                )
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// Uma mídia do projeto: arquivo importado ou mídia gerada.
@@ -542,6 +631,20 @@ impl NewEvents {
     }
 }
 
+/// The transition an event goes out with, over its fade-out: BananaV's
+/// own `kind`, or a plug-in's drawing it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutTransition {
+    #[serde(default)]
+    pub kind: Transition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx: Option<Box<PluginFx>>,
+    /// Its plug-in switched off: a plain fade meanwhile, its settings
+    /// kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass: bool,
+}
+
 /// Um trecho de mídia posicionado numa trilha (o "evento" do VEGAS).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
@@ -566,6 +669,15 @@ pub struct Clip {
     pub fade_in_curve: FadeCurve,
     #[serde(default)]
     pub fade_out_curve: FadeCurve,
+    /// Each fade's reciprocal curve: where an event overlaps it from
+    /// before, the fade-in's shapes how that event goes out under this
+    /// one (the crossfade is this event's, as VEGAS's); the fade-out's is
+    /// kept for the files that have it. `None`: the other fade's curve
+    /// (the event before's fade-out's, in a crossfade).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_in_reciprocal: Option<FadeCurve>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_out_reciprocal: Option<FadeCurve>,
     /// Transição usada na entrada (fade-in e crossfade com o clipe anterior).
     #[serde(default)]
     pub transition: Transition,
@@ -578,6 +690,10 @@ pub struct Clip {
     /// kept.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transition_bypass: bool,
+    /// The transition it goes out with over its fade-out, to what is below
+    /// it (none: a plain fade), as VEGAS's transition at an event's end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_transition: Option<Box<OutTransition>>,
     #[serde(default)]
     pub effects: Vec<Effect>,
     /// How many of `effects` come before its Pan/Crop (the Video Event FX
@@ -734,9 +850,12 @@ impl Clip {
             fade_out: Tick::ZERO,
             fade_in_curve: FadeCurve::default(),
             fade_out_curve: FadeCurve::default(),
+            fade_in_reciprocal: None,
+            fade_out_reciprocal: None,
             transition: Transition::default(),
             transition_fx: None,
             transition_bypass: false,
+            out_transition: None,
             effects: Vec::new(),
             pan_crop_at: 0,
             pan_crop: PanCrop::default(),
@@ -805,6 +924,66 @@ impl Clip {
             Some(env) => env.value_at(d).clamp(0.0, 1.0),
             None if length <= Tick::ZERO => 1.0,
             None => (d.0 as f64 / length.0 as f64).clamp(0.0, 1.0) as f32,
+        }
+    }
+
+    /// Whether it comes in with a transition (over its fade-in, or over the
+    /// event before it): a plug-in's or a built-in one other than the plain
+    /// dissolve, switched on. Without one its fade is its curve's.
+    pub fn has_entrance_transition(&self) -> bool {
+        !self.transition_bypass
+            && (self.transition_fx.is_some() || self.transition != Transition::Dissolve)
+    }
+
+    /// Whether it goes out with a transition over its fade-out.
+    pub fn has_exit_transition(&self) -> bool {
+        self.out_transition
+            .as_deref()
+            .is_some_and(|o| !o.bypass && (o.fx.is_some() || o.kind != Transition::Dissolve))
+    }
+
+    /// A transition's progress `d` after its start, `u` of the way
+    /// through its fade (0–1): its transition progress envelope's value
+    /// there — which runs over the whole event, its fade-in's part for the
+    /// transition it comes in with and its fade-out's for the one it goes
+    /// out with —, else `u`.
+    pub fn progress_at(&self, d: Tick, u: f32) -> f32 {
+        match self.envelope(crate::envelope::EnvelopeKind::TransitionProgress) {
+            Some(env) => env.value_at(d).clamp(0.0, 1.0),
+            None => u.clamp(0.0, 1.0),
+        }
+    }
+
+    /// The plug-in drawing its entrance transition (`out`: its exit's), and
+    /// whether it is switched off.
+    pub fn transition_plugin(&self, out: bool) -> (Option<&PluginFx>, bool) {
+        if out {
+            self.out_transition
+                .as_deref()
+                .map_or((None, false), |o| (o.fx.as_deref(), o.bypass))
+        } else {
+            (self.transition_fx.as_deref(), self.transition_bypass)
+        }
+    }
+
+    /// Gives its entrance transition (`out`: its exit) the plug-in `fx`,
+    /// switched off when `off`. None: a plain crossfade, or a plain fade-out
+    /// with no exit transition.
+    pub fn set_transition_plugin(&mut self, out: bool, fx: Option<PluginFx>, off: bool) {
+        match (out, fx) {
+            (false, fx) => {
+                self.transition_bypass = off && fx.is_some();
+                if fx.is_none() {
+                    self.transition = Transition::default();
+                }
+                self.transition_fx = fx.map(Box::new);
+            }
+            (true, Some(fx)) => {
+                let o = self.out_transition.get_or_insert_with(Default::default);
+                o.fx = Some(Box::new(fx));
+                o.bypass = off;
+            }
+            (true, None) => self.out_transition = None,
         }
     }
 
@@ -1709,6 +1888,14 @@ impl PixelFormat {
         matches!(
             self,
             PixelFormat::Legacy8BitVideoLevels | PixelFormat::Float32VideoLevels
+        )
+    }
+
+    /// Whether the pictures hold 8 bits a channel.
+    pub fn is_eight_bit(self) -> bool {
+        matches!(
+            self,
+            PixelFormat::Legacy8BitVideoLevels | PixelFormat::Full8Bit
         )
     }
 }
@@ -2625,6 +2812,7 @@ impl Project {
         // Track groups together, whatever wrote the file.
         p.normalize_groups();
         p.upgrade_notes();
+        p.upgrade_generators();
         p.upgrade_plugin_fx();
         p.upgrade_fade_outs();
         p.upgrade_pan_crops();
@@ -2686,6 +2874,27 @@ impl Project {
         self.format_version = Self::FORMAT_VERSION;
     }
 
+    /// Media an older built-in generator made are drawn by BananaV's OFX
+    /// generator that does the same ([`Generator::as_plugin`]): its panel,
+    /// its presets and its place in a `.veg`. A media named after its
+    /// generator takes the new one's name.
+    pub fn upgrade_generators(&mut self) {
+        let frame = self.settings.width;
+        for m in &mut self.media {
+            let MediaSource::Generated(old) = &m.source else {
+                continue;
+            };
+            let width = m.video.as_ref().map_or(frame, |v| v.width);
+            let Some(new) = old.as_plugin(width) else {
+                continue;
+            };
+            if m.name == old.display_name() {
+                m.name = new.display_name();
+            }
+            m.source = MediaSource::Generated(new);
+        }
+    }
+
     /// Brings the plug-in effects' values an older BananaV saved up to
     /// date ([`PluginFx::upgrade`]).
     fn upgrade_plugin_fx(&mut self) {
@@ -2705,6 +2914,9 @@ impl Project {
         }
         for m in &mut self.media {
             upgrade(&mut m.effects);
+            if let MediaSource::Generated(Generator::Plugin(fx)) = &mut m.source {
+                fx.upgrade(frame);
+            }
         }
         upgrade(&mut self.video_output_fx);
     }
@@ -2850,6 +3062,63 @@ mod media_marker_tests {
             name: "Take".into(),
         }];
         assert_eq!(markers_from_json(&markers_to_json(&marks)), Some(marks));
+    }
+}
+
+#[cfg(test)]
+mod generator_upgrade_tests {
+    use super::*;
+    use crate::fx::PluginValue;
+
+    #[test]
+    fn older_generators_open_as_bananav_plugins() {
+        let mut p = Project::new(ProjectSettings::default());
+        let mut add = |g| p.add_media(MediaInfo::generated(g, &ProjectSettings::default()));
+        let bars = add(Generator::ColorBars);
+        let empty = add(Generator::SolidColor { rgba: [0.0; 4] });
+        let red = add(Generator::SolidColor {
+            rgba: [1.0, 0.0, 0.0, 1.0],
+        });
+        let tone = add(Generator::TestTone {
+            frequency_hz: 1000.0,
+            level_db: -18.0,
+        });
+        let board = add(Generator::Checkerboard { size: 96 });
+        let ramp = add(Generator::Gradient {
+            from: [1.0, 0.0, 0.0, 1.0],
+            to: [0.0, 0.0, 1.0, 1.0],
+            angle_deg: 0.0,
+        });
+        let q = Project::from_json(&p.to_json()).expect("load");
+        let plugin = |id: MediaId| match &q.media(id).expect("media").source {
+            MediaSource::Generated(Generator::Plugin(fx)) => Some((**fx).clone()),
+            _ => None,
+        };
+        let num = |fx: &PluginFx, k: &str| match &fx.params[k].value {
+            PluginValue::Num(v) => v.clone(),
+            _ => Vec::new(),
+        };
+        // Color Bars: Test Pattern's SMPTE bars, and its name.
+        let fx = plugin(bars).expect("bars");
+        assert_eq!(fx.id, "org.bananav.TestPattern");
+        assert_eq!(num(&fx, "testPatternType"), [5.0]);
+        assert_eq!(q.media(bars).unwrap().name, "Test Pattern");
+        // A solid color keeps its color; an empty event and a tone stay.
+        assert_eq!(
+            num(&plugin(red).expect("red"), "color"),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        assert!(plugin(empty).is_none() && plugin(tone).is_none());
+        // Tiles as wide as before: 96 of the frame's pixels.
+        let fx = plugin(board).expect("board");
+        let width = f64::from(ProjectSettings::default().width);
+        assert_eq!(num(&fx, "tileDimensionsWidth"), [96.0 / width]);
+        // Across the frame, from its left edge to its right one.
+        let fx = plugin(ramp).expect("ramp");
+        assert_eq!(fx.id, "org.bananav.ColorGradient");
+        assert_eq!(num(&fx, "distance1"), [-0.5]);
+        assert_eq!(num(&fx, "distance2"), [0.5]);
+        assert_eq!(num(&fx, "color2"), [0.0, 0.0, 1.0, 1.0]);
     }
 }
 

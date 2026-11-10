@@ -572,6 +572,7 @@ fn view_menu(ui: &mut Ui, app: &mut BananaApp) {
         cmd(ui, app, Cmd::Window(Tab::LoudnessMeters));
         cmd(ui, app, Cmd::Window(Tab::ColorGrading));
         cmd(ui, app, Cmd::Window(Tab::Properties));
+        cmd(ui, app, Cmd::Window(Tab::Transform));
     });
     sub(ui, tr("Extensions"), false, |_| {});
     ui.separator();
@@ -872,10 +873,31 @@ fn options_menu(ui: &mut Ui, app: &mut BananaApp) {
     cmd(ui, app, Cmd::CustomizeToolbar);
     cmd(ui, app, Cmd::CustomizeTimelineToolbar);
     cmd(ui, app, Cmd::CustomizeKeyboard);
+    cmd(ui, app, Cmd::EnvelopeAppearance);
     ui.separator();
     cmd(ui, app, Cmd::ExportPreferences);
     cmd(ui, app, Cmd::ImportPreferences);
     cmd(ui, app, Cmd::Preferences);
+    // As VEGAS's: with Shift held as the menu opens, "Internal…" at its
+    // end (no command, key or toolbar button has it).
+    if shift_at_opening(ui, Id::new("options-menu-shift")) && item(ui, tr("Internal…")) {
+        app.menu_dialogs.more.internal = Some(crate::internal_prefs::InternalDialog::new(app));
+        ui.close();
+    }
+}
+
+/// Whether Shift was held when the menu `id` opened: read on its first
+/// pass, kept while it stays open (letting Shift go changes nothing).
+fn shift_at_opening(ui: &Ui, id: Id) -> bool {
+    let pass = ui.ctx().cumulative_pass_nr();
+    let kept = ui
+        .ctx()
+        .data(|d| d.get_temp::<(u64, bool)>(id))
+        .filter(|(last, _)| *last + 1 >= pass)
+        .map(|(_, shift)| shift);
+    let shift = kept.unwrap_or_else(|| ui.input(|i| i.modifiers.shift));
+    ui.ctx().data_mut(|d| d.insert_temp(id, (pass, shift)));
+    shift
 }
 
 fn help_menu(ui: &mut Ui, app: &mut BananaApp) {
@@ -884,7 +906,7 @@ fn help_menu(ui: &mut Ui, app: &mut BananaApp) {
     cmd(ui, app, Cmd::KeyboardShortcuts);
     soon(ui, tr("Download the BananaV User Manual"), "");
     ui.separator();
-    soon(ui, tr("Check for Software Updates…"), "");
+    cmd(ui, app, Cmd::CheckUpdates);
     soon(ui, tr("Deactivate Software on This Computer…"), "");
     ui.separator();
     soon(ui, tr("BananaV Home Page"), "");

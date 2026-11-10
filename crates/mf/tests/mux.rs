@@ -5,7 +5,10 @@
 //! Needs `ffmpeg`/`ffprobe` on the PATH; run with
 //! `cargo test -p bv-mf --test mux -- --ignored --nocapture`.
 
-#![cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#![cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 
 use std::fs::File;
 use std::io::BufWriter;

@@ -628,11 +628,13 @@ pub enum Plan {
         beyond: [f32; 4],
     },
     /// One of the generators: its kernel and numbers (`f` from the frame's
-    /// size in the picture's pixels on).
+    /// size in the picture's pixels on), and the table it reads
+    /// (Checkerboard's: [`crate::checkerboard::Board::table`]).
     Generate {
         kernel: GenerateKernel,
         f: Vec<f32>,
         j: [u32; 4],
+        table: Vec<[f32; 4]>,
     },
     /// Fill Light: each pixel's light from `table` by its 8-bit luma
     /// (`looks::fill_index`), blurred by VEGAS's Gaussian reaching `reach`
@@ -768,6 +770,7 @@ pub enum Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerateKernel {
     Checkerboard,
+    ColorGradient,
     TestPattern,
     NoiseTexture,
     /// Solid Color: the card's fill with f's color.
@@ -775,14 +778,17 @@ pub enum GenerateKernel {
 }
 
 /// What the card draws for generator `id` with `values`: a picture
-/// `size` pixels big of a frame `full` pixels big (its pixels square), as
-/// the plug-in draws it at that render scale; `None` for a generator the
+/// `size` pixels big of a frame `full` pixels big, as the plug-in draws it
+/// at that render scale — in an 8-bit project's bytes or not, the media's
+/// pixels `pixel_aspect` times as wide as tall; `None` for a generator the
 /// processor draws.
 pub fn generator_plan(
     id: &str,
     values: Values<'_>,
     full: (u32, u32),
     size: (u32, u32),
+    eight_bit: bool,
+    pixel_aspect: f64,
 ) -> Option<Plan> {
     let kind = crate::generators::Kind::of(id)?;
     let vals = crate::kit::Vals::of(kind.specs(), &|spec| {
@@ -797,7 +803,11 @@ pub fn generator_plan(
         scale: [k, k],
         par: 1.0,
     };
-    kind.card_plan(&vals, &grid)
+    let look = crate::generators::Look {
+        eight_bit,
+        pixel_aspect,
+    };
+    kind.card_plan(&vals, &grid, look)
 }
 
 /// A compositor on the card (a track's Custom compositing mode): what

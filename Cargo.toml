@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-or-later"
@@ -23,6 +23,7 @@ publish = false
 
 [workspace.dependencies]
 bv-core = { path = "crates/core" }
+bv-apple = { path = "crates/apple" }
 bv-cuda = { path = "crates/cuda" }
 bv-bitstream = { path = "crates/bitstream" }
 bv-ac3 = { path = "crates/ac3" }
@@ -42,6 +43,9 @@ bv-dvd = { path = "crates/dvd" }
 bv-platform = { path = "crates/platform" }
 bv-vst3-sys = { path = "crates/vst3-sys" }
 bv-vst3 = { path = "crates/vst3" }
+bv-bridge = { path = "crates/bridge" }
+bv-vst2-sys = { path = "crates/vst2-sys" }
+bv-vst2 = { path = "crates/vst2" }
 bv-wic = { path = "crates/wic" }
 bv-color = { path = "crates/color" }
 bv-ocio = { path = "crates/ocio" }

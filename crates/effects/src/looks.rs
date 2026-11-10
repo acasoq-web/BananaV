@@ -947,7 +947,7 @@ pub(crate) const DENOISE: &[Spec] = &[
     Spec::GroupEnd,
 ];
 /// Looks' list, as VEGAS's AutoLooks' starts: none, then the looks —
-/// BananaV's own (VEGAS's are tables of its own, not known yet).
+/// BananaV's own.
 const LOOK_NAMES: &[&CStr] = &[
     c"none",
     c"Restored",
@@ -1325,9 +1325,9 @@ impl Vignette {
 }
 
 /// VEGAS's Soft Contrast: the luma's curve and the tint (`SoftContrast`),
-/// Diffusion's glow screened in — the glow VEGAS's Gaussian
-/// (`recursive_gauss`) —, then the vignette's outside: blurred (VEGAS's
-/// Gaussian across and down), black, white or transparent.
+/// Diffusion's glow screened in — the glow blurred as VEGAS blurs
+/// (`recursive_gauss`) —, then the vignette's outside: blurred (across
+/// and down), black, white or transparent.
 fn soft_contrast(s: &Vals, g: &Grid, src: &Buf) -> Buf {
     let sc = SoftContrast::of(s);
     let wpx = width_px(g);
@@ -2666,7 +2666,7 @@ pub(crate) fn rays_drawn(r: &Rays, w: usize, h: usize, src: &[[u8; 4]]) -> Vec<[
     dst
 }
 
-/// Pixel `at` of quarter `q` (VEGAS's math): its ray, read in what is
+/// Pixel `at` of quarter `q` (as VEGAS's renders show): its ray, read in what is
 /// drawn, and the pixel mixed with it.
 fn rays_pixel(
     r: &Rays,
@@ -3034,8 +3034,8 @@ impl Film {
     }
 
     /// Pixel `c` (premultiplied) at column `x`, row `y` (from the top) of
-    /// the shaken picture: grayed, grained and tinted as VEGAS's float
-    /// math, the light flickered and the marks laid over.
+    /// the shaken picture: grayed, grained and tinted as VEGAS's renders
+    /// show it, the light flickered and the marks laid over.
     pub(crate) fn pixel(&self, c: [f32; 4], x: u32, y: u32) -> [f32; 4] {
         let mut p = c;
         if self.gray {

@@ -108,6 +108,14 @@ pub trait VideoReader: Send {
         let _ = on;
     }
 
+    /// Tells the reader what the project's pictures are: 8 bits a channel
+    /// (`eight_bit`), composited on the encoded values (`encoded`, video
+    /// gamma). Generated media follow it: a generator draws as an 8-bit
+    /// editor's does there, in the values the project composites on.
+    fn set_project(&mut self, eight_bit: bool, encoded: bool) {
+        let _ = (eight_bit, encoded);
+    }
+
     /// Tells the reader how to read its pictures' alpha channel (Media
     /// Properties' Alpha channel and, for Premultiplied (dirty), the
     /// Background color): readers of pictures with alpha follow it.
@@ -267,7 +275,17 @@ pub fn psd_layer_blends(path: &str) -> Vec<[u8; 4]> {
 pub fn open_video(info: &MediaInfo) -> Result<Box<dyn VideoReader>> {
     let video = info.video.ok_or(MediaError::NoStream)?;
     match &info.source {
-        MediaSource::Generated(bv_timeline::Generator::Plugin(fx)) => plugin_video(fx, video),
+        // Drawn at its own size, then turned as its Media Properties say.
+        MediaSource::Generated(bv_timeline::Generator::Plugin(fx)) => {
+            let r = video.reading;
+            let mut own = video;
+            if r.rotation.quarters() % 2 == 1 {
+                (own.width, own.height) = (video.height, video.width);
+            }
+            let mut reader = plugin_video(fx, own)?;
+            reader.set_alpha(r.alpha, r.background);
+            Ok(reading::Reading::around(reader, r))
+        }
         MediaSource::Generated(g) => Ok(Box::new(generator::GeneratedVideo::new(
             g.clone(),
             video.width,
@@ -299,7 +317,8 @@ fn plugin_video(
     fx: &bv_timeline::PluginFx,
     v: bv_timeline::VideoStreamInfo,
 ) -> Result<Box<dyn VideoReader>> {
-    let reader = plugins::PluginVideo::new(fx, v.width, v.height, v.frame_rate)?;
+    let aspect = f64::from(v.pixel_aspect.num) / f64::from(v.pixel_aspect.den.max(1));
+    let reader = plugins::PluginVideo::new(fx, v.width, v.height, aspect, v.frame_rate)?;
     Ok(Box::new(reader))
 }
 

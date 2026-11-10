@@ -689,7 +689,7 @@ fn lr_thirds(a: u32, b: u32, c: u32) -> u32 {
 
 // Reading `i` (1-3) toward the light along `d` (dx or dy) of a pixel
 // `big` (dx² + dy²) away: the whole pixels it moves and the 256ths past
-// them, exactly as VEGAS's doubles give them (0.99 of a pixel at most).
+// them, exactly as VEGAS's renders show them (0.99 of a pixel at most).
 fn lr_step(d: i32, big: u32, i: u32) -> vec2<i32> {
     if d == 0 {
         return vec2<i32>(0, 0);
@@ -923,8 +923,8 @@ fn kit_light_rays_finish(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[o] = vec4<f32>(d) / 255.0;
 }
 
-// Gradient Map (`bv-effects`' `gradient_map::Gradient`, VEGAS's float
-// math): `tb` holds the stops' count (row 0) and places (rows 1 to n),
+// Gradient Map (`bv-effects`' `gradient_map::Gradient`): `tb` holds the
+// stops' count (row 0) and places (rows 1 to n),
 // then each piece of the gradient (n + 1 of them, the ends' flat): its
 // times and each channel's Bézier — alpha, red, green, blue: the start,
 // its two handles and the end (five rows a piece). f: Amount (0); j.x:
@@ -979,8 +979,8 @@ fn kit_gradient_map(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // Film Effects (`bv-effects`' `looks::Film`, rows from the top): the
-// picture shaken by i.xy whole pixels, grayed (i.z), grained (VEGAS's
-// float math, the processor's hash), tinted toward the color by Tint,
+// picture shaken by i.xy whole pixels, grayed (i.z), grained (the
+// processor's hash), tinted toward the color by Tint,
 // its light flickered, then the marks of `tb` laid over (two rows each:
 // kind — 0 a speck, 1 a hair, 2 a scratch — and its numbers; i.w how
 // many). f: Grain (0), Tint (1), the color (2-4), the flicker (5); j.x
@@ -2044,11 +2044,11 @@ fn kit_stitch(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // Stereoscopic 3D Adjust: each pixel read where the eye's inverse map puts
-// it, in 32nds of a pixel worked out on the processor as OpenCV's warps
-// work them out — `j.x` 1: an affine map's columns' whole numbers, then
+// it, in 32nds of a pixel worked out on the processor — `j.x` 1: an
+// affine map's columns' whole numbers, then
 // its rows' from the top, in `tb` (added, then made 32nds); 0: a
 // perspective map's 32nds for each pixel from the top, two pixels an
-// entry — between four pixels with OpenCV's weights, nothing past the
+// entry — between four pixels with bilinear weights, nothing past the
 // picture (rows up); then the floating window: columns `i.x` to `i.y`
 // opaque black, column `i.z` toward it by f0.
 fn stereo_pixel(i: i32, j: i32) -> vec4<f32> {

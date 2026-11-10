@@ -2,7 +2,8 @@
 # `gh workflow run package.yml --ref <branch>`), kept as the run's
 # artifacts — nothing is published:
 #
-# - Windows x64 and ARM64: BananaV.exe (the C runtime inside), a README,
+# - Windows x64 and ARM64: BananaV.exe (the C runtime inside; on x64 its
+#   32-bit bridge for 32-bit VST plug-ins beside it), a README,
 #   the license texts and the third-party notices
 #   (tools/third_party_notices.py), in a zip and in an installer
 #   (packaging/windows/bananav.iss, Inno Setup), which is tried out here;
@@ -10,7 +11,19 @@
 #   distribution since (glibc 2.35), with FFmpeg's libraries built here
 #   under the LGPL (packaging/linux/build_ffmpeg.sh), the third-party and
 #   system libraries' notices, and (from the x64 job) a tarball of the
-#   LGPL libraries' sources, FFmpeg's and LAME's.
+#   LGPL libraries' sources, FFmpeg's and LAME's;
+# - macOS: one app for Apple's chips and Intel Macs (macOS 11 and later),
+#   BananaV.app in a disk image (BananaV-...-macos-universal.dmg) with the
+#   licenses and notices: each processor's build made natively on its own
+#   Mac (Apple's chips: macos-15; Intel: macos-15-intel) with FFmpeg's
+#   libraries built here under the LGPL (packaging/macos/build_ffmpeg.sh),
+#   then put together and signed by packaging/macos/make_app.py - with a
+#   Developer ID and notarized when the repository has the secrets
+#   MACOS_CERTIFICATE (a .p12, base64), MACOS_CERTIFICATE_PASSWORD,
+#   MACOS_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD;
+#   ad hoc without them -; the app is started on the runner for a while
+#   and its screen kept as a picture; and a tarball of the LGPL libraries'
+#   sources, FFmpeg's and LAME's.
 
 name: Packages
 
@@ -20,7 +33,7 @@ on:
       platforms:
         description: Which packages
         type: choice
-        options: [all, windows, linux]
+        options: [all, windows, linux, macos]
         default: all
 
 env:
@@ -30,7 +43,7 @@ env:
 jobs:
   windows:
     name: Windows ${{ matrix.arch }}
-    if: inputs.platforms != 'linux'
+    if: inputs.platforms == 'all' || inputs.platforms == 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The 32-bit bridge (x64 packages): 32-bit Windows.
+          targets: ${{ matrix.arch == 'x64' && 'i686-pc-windows-msvc' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: package
@@ -51,6 +67,11 @@ jobs:
           # No Visual C++ runtime to install.
           RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release -p bananav
+      - name: The 32-bit bridge
+        if: matrix.arch == 'x64'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release -p bananav-bridge32 --target i686-pc-windows-msvc
       - name: Zip
         shell: bash
         run: |
@@ -58,6 +79,9 @@ jobs:
           name="BananaV-$version-${GITHUB_SHA::7}-windows-${{ matrix.arch }}"
           mkdir -p "dist/$name"
           cp target/release/bananav.exe "dist/$name/BananaV.exe"
+          if [ -f target/i686-pc-windows-msvc/release/bananav-bridge32.exe ]; then
+            cp target/i686-pc-windows-msvc/release/bananav-bridge32.exe "dist/$name/bananav-bridge32.exe"
+          fi
           cp packaging/windows/README.txt "dist/$name/"
           cp LICENSE "dist/$name/LICENSE.txt"
           cp crates/effects/fonts/OFL.txt "dist/$name/Arimo-OFL.txt"
@@ -112,7 +136,7 @@ jobs:
 
   linux:
     name: Linux ${{ matrix.arch }}
-    if: inputs.platforms != 'windows'
+    if: inputs.platforms == 'all' || inputs.platforms == 'linux'
     strategy:
       fail-fast: false
       matrix:
@@ -242,3 +266,181 @@ jobs:
           name: ${{ env.NAME }}
           path: dist/${{ env.NAME }}
           retention-days: 30
+
+  macos-build:
+    name: macOS ${{ matrix.arch }} (build)
+    if: inputs.platforms == 'all' || inputs.platforms == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tools
+        run: brew install nasm meson ninja cmake pkgconf
+      - name: FFmpeg (kept)
+        id: ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-lgpl
+          key: ffmpeg-macos-${{ matrix.arch }}-${{ hashFiles('packaging/macos/build_ffmpeg.sh') }}
+      - name: FFmpeg (built)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: sh packaging/macos/build_ffmpeg.sh "$PWD/ffmpeg-lgpl"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-macos
+      - name: BananaV
+        env:
+          # Room in the program's header for its libraries' names inside
+          # the app, and where they are (BananaV.app/Contents/Frameworks).
+          RUSTFLAGS: -C link-arg=-Wl,-headerpad_max_install_names -C link-arg=-Wl,-rpath,@executable_path/../Frameworks
+          # Two at a time: the interface's crate is big for the runner's
+          # memory.
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          export PKG_CONFIG_PATH="$PWD/ffmpeg-lgpl/lib/pkgconfig"
+          cargo build --release -p bananav
+          otool -L target/release/bananav
+      - name: Kept for the app
+        run: |
+          mkdir -p "kept/${{ matrix.arch }}"
+          cp target/release/bananav "kept/${{ matrix.arch }}/bananav"
+          cp -R ffmpeg-lgpl "kept/${{ matrix.arch }}/ffmpeg-lgpl"
+          tar -czf "bananav-macos-${{ matrix.arch }}.tar.gz" -C kept "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bananav-macos-${{ matrix.arch }}
+          path: bananav-macos-${{ matrix.arch }}.tar.gz
+          retention-days: 7
+
+  macos:
+    name: macOS universal
+    needs: macos-build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bananav-macos-*
+          path: builds
+          merge-multiple: true
+      - name: The signing keychain
+        # Only with the Developer ID's secrets: a keychain of its own for
+        # the run, with the certificate.
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(uuidgen)
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+      - name: The app and its disk image
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          for a in arm64 x86_64; do tar -xzf "builds/bananav-macos-$a.tar.gz" -C builds; done
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="BananaV-$version-${GITHUB_SHA::7}-macos-universal"
+          docs="$RUNNER_TEMP/docs"
+          lic=builds/arm64/ffmpeg-lgpl/share/licenses
+          mkdir -p "$docs"
+          cp LICENSE "$docs/LICENSE.txt"
+          cp "$lic/ffmpeg/COPYING.LGPLv2.1" "$docs/FFmpeg-LGPL-2.1.txt"
+          cp "$lic/ffmpeg/LICENSE.md" "$docs/FFmpeg-license.md"
+          cp "$lic/dav1d/COPYING" "$docs/dav1d-license.txt"
+          cp "$lic/lame/COPYING" "$docs/LAME-LGPL.txt"
+          cp "$lic/svt-av1/LICENSE.md" "$docs/SVT-AV1-license.md"
+          cp "$lic/svt-av1/PATENTS.md" "$docs/SVT-AV1-patents.md"
+          cp crates/effects/fonts/OFL.txt "$docs/Arimo-OFL.txt"
+          cp crates/ocio/licenses/ACES.md "$docs/ACES-license.md"
+          cp crates/effects/licenses/gl-transitions.md "$docs/GL-Transitions-license.md"
+          cp crates/effects/licenses/lensfun.md "$docs/Lensfun-database-license.md"
+          cp crates/vst3-sys/licenses/vst3-pluginterfaces.txt "$docs/VST3-SDK-interfaces-license.txt"
+          python3 tools/third_party_notices.py aarch64-apple-darwin > "$docs/THIRD-PARTY-NOTICES.txt"
+          python3 packaging/macos/make_app.py --version "$version" \
+            --arch arm64 builds/arm64/bananav builds/arm64/ffmpeg-lgpl \
+            --arch x86_64 builds/x86_64/bananav builds/x86_64/ffmpeg-lgpl \
+            --out dist --dmg "$name.dmg" --docs "$docs"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+      - name: A start
+        # The app from its disk image, as a user opens it: it runs for a
+        # while without a crash; its screen is kept as a picture.
+        run: |
+          mount=$(hdiutil attach "dist/$NAME.dmg" -nobrowse -readonly | tail -1 | cut -f3-)
+          cp -R "$mount/BananaV.app" "$RUNNER_TEMP/"
+          hdiutil detach "$mount"
+          "$RUNNER_TEMP/BananaV.app/Contents/MacOS/BananaV" > bananav-start.log 2>&1 &
+          pid=$!
+          sleep 30
+          screencapture -x bananav-macos-start.png || echo "::warning::no picture of the screen"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "BananaV was still running after 30 s"
+            kill "$pid"
+          else
+            code=0
+            wait "$pid" || code=$?
+            cat bananav-start.log
+            echo "::error::BananaV stopped (exit code $code)"
+            exit 1
+          fi
+          cat bananav-start.log
+      - name: LGPL sources
+        # FFmpeg's and LAME's sources go with the package (the LGPL asks
+        # for them): the tag and tarball build_ffmpeg.sh builds, and the
+        # script.
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          src="BananaV-$version-${GITHUB_SHA::7}-macOS-LGPL-sources"
+          ffmpeg=$(sed -n 's/^ffmpeg_version=${FFMPEG_VERSION:-\(.*\)}$/\1/p' packaging/macos/build_ffmpeg.sh)
+          lame=$(sed -n 's/^lame_version=${LAME_VERSION:-\(.*\)}$/\1/p' packaging/macos/build_ffmpeg.sh)
+          mkdir -p "$src"
+          curl -fsSL --retry 5 -o "$src/FFmpeg-n$ffmpeg.tar.gz" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n$ffmpeg.tar.gz"
+          curl -fsSL --retry 5 -o "$src/lame-$lame.tar.gz" "https://downloads.sourceforge.net/project/lame/lame/$lame/lame-$lame.tar.gz"
+          cp packaging/macos/build_ffmpeg.sh "$src/"
+          {
+            echo "The sources of the LGPL libraries in BananaV $version's macOS package:"
+            echo "- FFmpeg n$ffmpeg (FFmpeg-n$ffmpeg.tar.gz), built by build_ffmpeg.sh;"
+            echo "- LAME $lame (lame-$lame.tar.gz), built by the same script."
+          } > "$src/README.txt"
+          mkdir -p dist-src
+          tar -czf "dist-src/$src.tar.gz" "$src"
+          echo "SRC=$src" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.dmg
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SRC }}
+          path: dist-src/${{ env.SRC }}.tar.gz
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-start
+          path: |
+            bananav-macos-start.png
+            bananav-start.log
+          retention-days: 7
+          if-no-files-found: ignore

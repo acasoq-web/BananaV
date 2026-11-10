@@ -7,8 +7,75 @@ use bv_timeline::{MarkerId, Project};
 
 use super::{Layout, TimelineView};
 use crate::app::BananaApp;
-use crate::egui::{self, Align2, CursorIcon, FontId, Rect, Sense, Shape, Stroke, pos2};
+use crate::cursors::{self, Cursor};
+use crate::egui::{self, Align2, FontId, Rect, Sense, Shape, Stroke, pos2};
 use crate::theme;
+
+/// How near the loop region's start or end (points) a press takes that
+/// edge.
+const LOOP_EDGE: f32 = 5.0;
+
+/// What the pointer is over in the bars above the tracks (the loop
+/// region's, the ruler, the marker bar, the CD layout and command bars),
+/// or what a drag there holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BarSpot {
+    /// The loop region's start or end: the time selection's edges.
+    LoopEdge,
+    /// What a drag moves along the bar: a marker's or a region's flag, a
+    /// CD layout or command tag, the loop region by its middle.
+    Movable,
+    /// Anything else: an empty spot, the ruler.
+    Other,
+}
+
+/// The pointer over `spot` (`None`: the arrow), as VEGAS's marker and loop
+/// bars show it: ↔ on the loop region's edges, the arrow with ↔ on what a
+/// drag moves, the arrow elsewhere and on the ruler.
+fn bar_pointer(spot: BarSpot) -> Option<Cursor> {
+    match spot {
+        BarSpot::LoopEdge => Some(Cursor::ResizeEw),
+        BarSpot::Movable => Some(Cursor::ArrowLeftRight),
+        BarSpot::Other => None,
+    }
+}
+
+/// Shows the pointer over `spot` this frame (the arrow needs nothing).
+pub(crate) fn show(ctx: &egui::Context, spot: BarSpot) {
+    if let Some(c) = bar_pointer(spot) {
+        cursors::set(ctx, c);
+    }
+}
+
+/// What `drag` holds: while it lasts the pointer it began with stays, as
+/// VEGAS's.
+fn drag_spot(drag: &BarDrag) -> BarSpot {
+    match drag {
+        BarDrag::LoopStart | BarDrag::LoopEnd => BarSpot::LoopEdge,
+        BarDrag::LoopMove { .. }
+        | BarDrag::Marker { .. }
+        | BarDrag::Cd { .. }
+        | BarDrag::Command { .. }
+        | BarDrag::Picked => BarSpot::Movable,
+        BarDrag::LoopCreate { .. } | BarDrag::Scrub => BarSpot::Other,
+    }
+}
+
+/// Where `x` is on the loop region's bar, the region spanning `x0..x1` on
+/// the screen: on its start or end (as a press there takes them), within
+/// it, or outside it (or there is none).
+fn loop_spot(x: f32, region: Option<(f32, f32)>) -> BarSpot {
+    let Some((x0, x1)) = region else {
+        return BarSpot::Other;
+    };
+    if (x - x0).abs() <= LOOP_EDGE || (x - x1).abs() <= LOOP_EDGE {
+        BarSpot::LoopEdge
+    } else if x > x0 && x < x1 {
+        BarSpot::Movable
+    } else {
+        BarSpot::Other
+    }
+}
 
 pub(crate) enum BarDrag {
     LoopCreate {
@@ -61,11 +128,21 @@ fn marker_at(view: &TimelineView, l: &Layout, p: &Project, x: f32) -> Option<(Ma
         })
 }
 
-/// The loop region a double-click on its bar leaves: the whole project,
-/// or nothing when it was the whole project already.
-fn whole_or_none(project: &Project) -> Option<TimeRange> {
+/// Whether `x` is on the loop region spanning `x0..x1` on the screen (its
+/// handles included).
+fn on_region(x: f32, (x0, x1): (f32, f32)) -> bool {
+    x >= x0 - LOOP_EDGE && x <= x1 + LOOP_EDGE
+}
+
+/// The loop region a double-click on its bar leaves: none when there is
+/// one (the maintainer's rule: a double-click takes it away, always), the
+/// whole project when there is none.
+fn after_double_click(project: &Project) -> Option<TimeRange> {
+    if project.loop_region.is_some_and(|r| r.duration > Tick::ZERO) {
+        return None;
+    }
     let all = TimeRange::new(Tick::ZERO, project.duration());
-    (all.duration > Tick::ZERO && project.loop_region != Some(all)).then_some(all)
+    (all.duration > Tick::ZERO).then_some(all)
 }
 
 pub(crate) fn interact(
@@ -154,16 +231,8 @@ pub(crate) fn interact(
         Sense::click_and_drag(),
     );
     let region = project.loop_region;
-    let edge_hit = |x: f32, t: Tick| (view.x_of(l, t) - x).abs() <= 5.0;
-    if lb.hovered()
-        && let (Some(p), Some(r)) = (pointer, region)
-    {
-        if edge_hit(p.x, r.start) || edge_hit(p.x, r.end()) {
-            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-        } else if p.x > view.x_of(l, r.start) && p.x < view.x_of(l, r.end()) {
-            ui.ctx().set_cursor_icon(CursorIcon::Grab);
-        }
-    }
+    let edge_hit = |x: f32, t: Tick| (view.x_of(l, t) - x).abs() <= LOOP_EDGE;
+    let loop_hovered = lb.hovered();
     if lb.drag_started()
         && let Some(o) = ui.input(|i| i.pointer.press_origin())
     {
@@ -218,6 +287,7 @@ pub(crate) fn interact(
         if let Some(r) = new {
             let r = (r.duration > Tick::ZERO).then_some(r);
             app.modify_merged(lb.id, |p| p.loop_region = r);
+            app.hidden_selection = None;
         }
     }
     if lb.drag_stopped() {
@@ -225,25 +295,29 @@ pub(crate) fn interact(
         view.snap_line = None;
         app.restart_if_playing();
     }
-    if lb.double_clicked() {
-        app.set_loop_region(whole_or_none(&project));
+    // Clicks counted in pairs and as slow as the system's double-click
+    // (egui's own missed some).
+    if crate::widgets::double_click(ui, &lb) {
+        app.set_loop_region(after_double_click(&project));
+    }
+    // A right-click on the loop region, in its bar, removes it.
+    if lb.secondary_clicked()
+        && let Some(r) = region.filter(|r| r.duration > Tick::ZERO)
+        && let Some(p) = lb.interact_pointer_pos()
+        && on_region(p.x, (view.x_of(l, r.start), view.x_of(l, r.end())))
+    {
+        app.set_loop_region(None);
     }
     lb.on_hover_text(tr(
-        "Drag to create the loop region · double-click: the whole project, again: none",
+        "Drag to create the loop region · double-click: remove it (with none, the whole project) · right-click on it: remove it",
     ));
 
     // Ruler: a click or a drag moves the cursor, and playback with it.
     // Dragging holds playback; it goes on from where the mouse is let go,
     // like VEGAS's. While playing, each needle's head can be grabbed on its
-    // own: the playback position's triangle, the edit cursor's flag.
+    // own: the playback position's triangle, the edit cursor's flag. The
+    // pointer stays the arrow there, as on VEGAS's ruler.
     let ruler = ui.interact(l.ruler, ui.id().with("regua"), Sense::click_and_drag());
-    if ruler.hovered()
-        && let Some(p) = pointer
-        && view.needle_head(app, l, p.x).is_some()
-    {
-        ui.ctx()
-            .set_cursor_icon(crate::egui::CursorIcon::ResizeHorizontal);
-    }
     // From the press on, as VEGAS's: the needle comes to the mouse at once
     // and follows every move (egui's drag starts only some pixels away,
     // which left it behind, then made it jump). A click is a press let go
@@ -298,12 +372,6 @@ pub(crate) fn interact(
         ui.id().with("barra-marcadores"),
         Sense::click_and_drag(),
     );
-    if mb.hovered()
-        && let Some(p) = pointer
-        && marker_at(view, l, &project, p.x).is_some()
-    {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
     if mb.drag_started()
         && let Some(o) = ui.input(|i| i.pointer.press_origin())
         && let Some((id, region_end)) = marker_at(view, l, &project, o.x)
@@ -420,6 +488,29 @@ pub(crate) fn interact(
             view.context =
                 super::lanes::ContextTarget::Marker(hit.map(|h| h.0), view.time_at(l, p.x));
         }
+    }
+    // The pointer, as VEGAS's bars show it: what a press does where it is,
+    // and while a drag lasts (its button held) what the drag does.
+    let held = ui.input(|i| i.pointer.any_down());
+    let spot = match &view.bar_drag {
+        Some(d) if held => Some(drag_spot(d)),
+        _ => pointer.and_then(|p| {
+            if loop_hovered {
+                let x = |t: Tick| view.x_of(l, t);
+                Some(loop_spot(p.x, region.map(|r| (x(r.start), x(r.end())))))
+            } else if mb.hovered() {
+                Some(if marker_at(view, l, &project, p.x).is_some() {
+                    BarSpot::Movable
+                } else {
+                    BarSpot::Other
+                })
+            } else {
+                None
+            }
+        }),
+    };
+    if let Some(s) = spot {
+        show(ui.ctx(), s);
     }
     mb.on_hover_text(tr(
         "Markers (M) and regions (R) · double-click creates/renames · drag to move",
@@ -615,28 +706,73 @@ pub(crate) fn paint(
             crate::fmt::fps(rate)
         ));
 
-    // Região de loop.
-    painter.rect_filled(l.loop_bar, 0.0, theme::panel_dark());
-    if let Some(r) = project.loop_region {
-        let x0 = view.x_of(l, r.start).max(l.loop_bar.left());
-        let x1 = view.x_of(l, r.end()).min(l.loop_bar.right());
-        if x1 > x0 {
-            let color = if app.loop_enabled {
-                theme::loop_bar()
-            } else {
-                theme::loop_bar().gamma_multiply(0.5)
-            };
-            let bar = Rect::from_min_max(
-                pos2(x0, l.loop_bar.top() + 1.0),
-                pos2(x1, l.loop_bar.bottom() - 1.0),
-            );
-            painter.rect_filled(bar, 2.0, color);
-            // Sombra da região sobre as faixas.
-            let lanes = painter.with_clip_rect(l.lanes);
-            lanes.rect_filled(
-                Rect::from_min_max(pos2(x0, l.lanes.top()), pos2(x1, l.lanes.bottom())),
-                0.0,
-                theme::loop_bar().gamma_multiply(if app.loop_enabled { 0.10 } else { 0.05 }),
+    // The loop region's bar: a grey of its own, lighter under the pointer
+    // (a drag there makes the loop region). The region as VEGAS's: a
+    // lighter strip between yellow handles (fainter while Loop Playback is
+    // off); while the timeline shows the selection, a yellow line with a
+    // dark one beside it from each handle down to the timeline's bottom
+    // (the tracks' tint within it is `lanes::paint`'s).
+    let band = if ui.rect_contains_pointer(l.loop_bar) {
+        theme::loop_band_hover()
+    } else {
+        theme::loop_band()
+    };
+    painter.rect_filled(l.loop_bar, 0.0, band);
+    if let Some(r) = project.loop_region.filter(|r| r.duration > Tick::ZERO) {
+        let (x0, x1) = (view.x_of(l, r.start), view.x_of(l, r.end()));
+        let shown = |x: f32| x >= l.loop_bar.left() - 0.5 && x <= l.loop_bar.right() + 0.5;
+        let strip = if app.loop_enabled {
+            theme::loop_strip()
+        } else {
+            theme::loop_strip().gamma_multiply(0.7)
+        };
+        let handle = theme::loop_handle();
+        let shade = theme::panel_dark();
+        let lines = app.shown_selection().is_some();
+        let bar = Rect::from_min_max(
+            pos2(x0.max(l.loop_bar.left()), l.loop_bar.top() + 2.0),
+            pos2(x1.min(l.loop_bar.right()), l.loop_bar.bottom() - 1.0),
+        );
+        if bar.width() > 0.0 {
+            painter.rect_filled(bar, 0.0, strip);
+        }
+        // The lines from the bar's top to the tracks' bottom, over all.
+        let down = painter.with_clip_rect(Rect::from_min_max(
+            pos2(l.loop_bar.left(), l.loop_bar.top()),
+            pos2(l.loop_bar.right(), l.lanes.bottom()),
+        ));
+        let top = l.loop_bar.top();
+        let size = (l.loop_bar.height() * 0.5).round().max(5.0);
+        for (x, toward) in [(x0, 1.0), (x1, -1.0)] {
+            if !shown(x) {
+                continue;
+            }
+            let x = x.round() + 0.5;
+            if lines {
+                // The dark line on the region's side, as VEGAS's.
+                down.line_segment(
+                    [pos2(x + toward, top), pos2(x + toward, l.lanes.bottom())],
+                    Stroke::new(1.0, shade),
+                );
+                down.line_segment(
+                    [pos2(x, top), pos2(x, l.lanes.bottom())],
+                    Stroke::new(1.0, handle),
+                );
+            }
+            // The handle: a right triangle at the bar's top, toward the
+            // region's middle, its long side outlined dark.
+            down.add(Shape::convex_polygon(
+                vec![
+                    pos2(x, top),
+                    pos2(x + toward * size, top),
+                    pos2(x, top + size),
+                ],
+                handle,
+                Stroke::NONE,
+            ));
+            down.line_segment(
+                [pos2(x + toward * size, top), pos2(x, top + size)],
+                Stroke::new(1.0, shade),
             );
         }
     }
@@ -776,16 +912,93 @@ fn flag_texts(name: &str, index: usize) -> (String, &str) {
 mod tests {
     use super::*;
 
+    /// The bars' pointers, as VEGAS's marker and loop bars show them: ↔ on
+    /// the loop region's edges (where a press takes them, either side),
+    /// the arrow with ↔ on what a drag moves, the arrow elsewhere and on the
+    /// ruler; a drag keeps the pointer it began with.
     #[test]
-    fn a_double_click_on_the_loop_bar_takes_the_whole_project_then_nothing() {
+    fn the_bars_point_as_vegas_does() {
+        let region = Some((100.0, 300.0));
+        for x in [95.0, 100.0, 105.0, 295.0, 300.0, 305.0] {
+            assert_eq!(
+                bar_pointer(loop_spot(x, region)),
+                Some(Cursor::ResizeEw),
+                "{x}"
+            );
+        }
+        assert_eq!(
+            bar_pointer(loop_spot(200.0, region)),
+            Some(Cursor::ArrowLeftRight),
+            "the region's middle moves it"
+        );
+        for x in [50.0, 94.0, 306.0, 400.0] {
+            assert_eq!(bar_pointer(loop_spot(x, region)), None, "{x}");
+        }
+        assert_eq!(bar_pointer(loop_spot(200.0, None)), None, "no region");
+        // A region a few points long is all edges.
+        assert_eq!(loop_spot(102.0, Some((100.0, 104.0))), BarSpot::LoopEdge);
+        assert_eq!(bar_pointer(BarSpot::Other), None, "the ruler");
+        // Drags.
+        for d in [BarDrag::LoopStart, BarDrag::LoopEnd] {
+            assert_eq!(bar_pointer(drag_spot(&d)), Some(Cursor::ResizeEw));
+        }
+        let id = MarkerId(1);
+        for d in [
+            BarDrag::LoopMove {
+                grab: Tick::ZERO,
+                len: Tick(1),
+            },
+            BarDrag::Marker {
+                id,
+                region_end: true,
+            },
+            BarDrag::Cd {
+                tag: super::super::marker_bars::CdTag::Index(id),
+                whole: false,
+                grab: Tick::ZERO,
+            },
+            BarDrag::Command {
+                id,
+                grab: Tick::ZERO,
+            },
+            BarDrag::Picked,
+        ] {
+            assert_eq!(bar_pointer(drag_spot(&d)), Some(Cursor::ArrowLeftRight));
+        }
+        for d in [BarDrag::LoopCreate { anchor: Tick::ZERO }, BarDrag::Scrub] {
+            assert_eq!(bar_pointer(drag_spot(&d)), None);
+        }
+    }
+
+    #[test]
+    fn a_right_click_on_the_loop_region_is_on_it() {
+        // Its handles count, a little past each end.
+        assert!(on_region(100.0, (100.0, 200.0)));
+        assert!(on_region(150.0, (100.0, 200.0)));
+        assert!(on_region(200.0 + LOOP_EDGE, (100.0, 200.0)));
+        assert!(!on_region(90.0 - LOOP_EDGE, (100.0, 200.0)));
+        assert!(!on_region(260.0, (100.0, 200.0)));
+    }
+
+    #[test]
+    fn a_double_click_on_the_loop_bar_takes_the_region_away() {
         let mut app = BananaApp::new(egui::Context::default());
         app.load_demo();
         let all = TimeRange::new(Tick::ZERO, app.project().duration());
-        assert_ne!(app.project().loop_region, Some(all));
-        assert_eq!(whole_or_none(app.project()), Some(all));
+        // Any region goes, the whole project's too.
+        let some = TimeRange::new(Tick::from_seconds(1), Tick::from_seconds(2));
+        app.set_loop_region(Some(some));
+        assert_eq!(after_double_click(app.project()), None);
         app.set_loop_region(Some(all));
-        assert_eq!(whole_or_none(app.project()), None, "again: none");
-        assert_eq!(whole_or_none(&Project::default()), None, "nothing to take");
+        assert_eq!(after_double_click(app.project()), None);
+        // With none, the whole project.
+        app.set_loop_region(None);
+        assert_eq!(after_double_click(app.project()), Some(all));
+        assert_eq!(
+            after_double_click(&Project::default()),
+            None,
+            "nothing to take"
+        );
     }
 
     #[test]

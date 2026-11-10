@@ -856,6 +856,8 @@ fn preview_of_packed(
         exact: true,
         width: sw,
         height: sh,
+        drawn: (sw, sh),
+        room: (0, 0),
         rgba,
     }
 }
@@ -882,6 +884,8 @@ fn preview_of(img: &ImageRgbaF32, time: Tick, n: u64) -> crate::PreviewFrame {
         exact: true,
         width: w,
         height: h,
+        drawn: (w, h),
+        room: (0, 0),
         rgba: bv_color::linear_to_display_rgba8(&small, bv_core::TransferCharacteristic::Bt709),
     }
 }

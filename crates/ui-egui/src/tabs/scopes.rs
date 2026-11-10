@@ -1625,11 +1625,14 @@ mod tests {
     use super::*;
 
     fn frame_of(pixels: &[[u8; 4]], width: u32) -> PreviewFrame {
+        let height = (pixels.len() as u32 / width).max(1);
         PreviewFrame {
             time: bv_core::Tick::ZERO,
             generation: 0,
             width,
-            height: (pixels.len() as u32 / width).max(1),
+            height,
+            drawn: (width, height),
+            room: (0, 0),
             rgba: pixels.concat(),
             exact: true,
         }

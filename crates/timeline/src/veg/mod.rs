@@ -26,7 +26,7 @@ mod tests;
 mod write;
 
 pub use build::{Imported, build};
-pub use read::{DocMedia, Document, read};
+pub use read::{DocGenerator, DocMedia, Document, read};
 pub use riff::VegError;
 pub use write::{WriteOptions, write};
 
@@ -70,10 +70,25 @@ pub struct DocEffect {
     pub before_pan_crop: bool,
     /// It is a transition.
     pub transition: bool,
+    /// It is a generator (a generated media's).
+    pub generator: bool,
     /// The class of a plug-in of the file's own kind, and its settings'
     /// record.
     pub native: Option<String>,
     pub native_data: Vec<u8>,
+    /// That plug-in's keyframes: when (100 ns from the media's start),
+    /// their curve to the next (0 Linear, 1 Hold, 2 Slow, 3 Fast, 4 Smooth,
+    /// 5 Sharp) and the record at them.
+    pub native_keys: Vec<NativeKey>,
+}
+
+/// A keyframe of a plug-in of the file's own kind.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NativeKey {
+    pub time: i64,
+    pub curve: u32,
+    pub flags: u32,
+    pub data: Vec<u8>,
 }
 
 use bv_core::{TICKS_PER_SECOND, Tick};
@@ -129,6 +144,9 @@ const AUDIO_EVENT: Guid = Guid::parse("D54AD82A-EFA7-4C24-8C0C-316427A5F209");
 const VIDEO_EVENT_LIST: Guid = Guid::parse("FC2B3BCE-7985-11D2-8711-00C04F8EDB8A");
 const VIDEO_EVENT: Guid = Guid::parse("FC2B3BCF-7985-11D2-8711-00C04F8EDB8A");
 const VIDEO_EVENT_ENVELOPES_1: Guid = Guid::parse("3277F926-B5D3-40A1-8203-0EE5FA443F4A");
+/// A video event's fade out's transition progress envelope (the fade in's
+/// is in the list above).
+const VIDEO_EVENT_ENVELOPES_2: Guid = Guid::parse("EF72046C-3A19-40E8-B7E1-56BA79A825ED");
 const EVENT_FX: Guid = Guid::parse("1AF0E4E4-6E7F-11D2-8705-00C04F8EDB8A");
 const TRACK_FX: Guid = Guid::parse("1AF0E4E5-6E7F-11D2-8705-00C04F8EDB8A");
 const EFFECT: Guid = Guid::parse("1AF0E4E6-6E7F-11D2-8705-00C04F8EDB8A");

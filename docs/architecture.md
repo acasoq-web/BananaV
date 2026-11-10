@@ -15,14 +15,14 @@ layers (`cargo xtask layers` enforces it):
 
 | Layer | Crates |
 |---|---|
-| 0 | `core` (ticks, rates), `bitstream`, `deflate`, `cuda` (NVIDIA's CUDA driver, loaded at run time where the computer has it), `lut` (`.cube` look-up tables), `track` (motion tracking: a region followed from frame to frame; dense optical flow), `mpeg2` (MPEG-2 and MPEG-1 video encoding), `dvd` (DVD-Video's video objects, information files and disc image), `ofx-sys` (OpenFX's C API), `vst3-sys` (VST 3's interfaces) |
-| 1 | `zip` (ZIP archives: OpenTimelineIO's bundles), `color`, `png`, `wav` (also Wave64, AIFF, AU, CAF; ADPCM), `image` (BMP, GIF, TIFF, TGA, DPX, EXR, PSD, DDS, JPEG), `flac`, `prores` (encoder and decoder), `ac3` (Dolby Digital decoder), `mp4` (MP4/MOV writer; MPEG-2 program streams, MPEG-1 system streams), `mf` (the system's codecs: Media Foundation on Windows, FFmpeg on Linux), `wic` (HEIC, AVIF, WebP, JPEG XR, camera RAW), `platform` (OS services; burning discs), `ofx` (the OpenFX host), `ocio` (color management: OpenColorIO's configurations and transforms, ACES 1.3), `effects` (BananaV's own video effects, written as OFX plug-ins), `ofx-testplug` (OFX plug-ins for the tests, never shipped), `vst3` (the VST 3 host), `vst3-testplug` (VST 3 plug-ins for the tests, never shipped) |
+| 0 | `core` (ticks, rates), `bitstream`, `deflate`, `cuda` (NVIDIA's CUDA driver, loaded at run time where the computer has it), `apple` (what the plug-in hosts and OS services share on macOS — Core Foundation's values, bundles, work sent to the main thread, the guard around calls into plug-ins — and Mach-O files read on any system), `lut` (`.cube` look-up tables), `track` (motion tracking: a region followed from frame to frame; dense optical flow), `mpeg2` (MPEG-2 and MPEG-1 video encoding), `dvd` (DVD-Video's video objects, information files and disc image), `ofx-sys` (OpenFX's C API), `vst3-sys` (VST 3's interfaces), `vst2-sys` (VST 2's binary interface, declared in BananaV's own words), `bridge` (the 32-bit bridge's frames, process and server) |
+| 1 | `zip` (ZIP archives: OpenTimelineIO's bundles), `color`, `png`, `wav` (also Wave64, AIFF, AU, CAF; ADPCM), `image` (BMP, GIF, TIFF, TGA, DPX, EXR, PSD, DDS, JPEG), `flac`, `prores` (encoder and decoder), `ac3` (Dolby Digital decoder), `mp4` (MP4/MOV writer; MPEG-2 program streams, MPEG-1 system streams), `mf` (the system's codecs: Media Foundation on Windows, FFmpeg on Linux and macOS), `wic` (HEIC, AVIF, WebP, JPEG XR, camera RAW), `platform` (OS services; burning discs), `ofx` (the OpenFX host), `ocio` (color management: OpenColorIO's configurations and transforms, ACES 1.3), `effects` (BananaV's own video effects, written as OFX plug-ins), `ofx-testplug` (OFX plug-ins for the tests, never shipped), `vst3` (the VST 3 host), `vst3-testplug` (VST 3 plug-ins for the tests, never shipped), `vst2` (BananaV's VST 2 compatibility), `vst2-testplug` (VST 2 plug-ins for the tests, never shipped) |
 | 2 | `timeline` (project model, editing, undo) |
 | 3 | `media` (files and generators → frames and samples) |
 | 4 | `render` (video compositing on the processor, the reference), `gpu` (the same on the graphics card, wgpu), `mixer` (audio) |
 | 5 | `engine` (playback, preview, export, loudness) |
 | 6 | `ui-egui` (the whole interface) |
-| 7 | `apps/bananav`, `apps/ofx-bundle` (BananaV's effects as `BananaV.ofx` for other OFX hosts) |
+| 7 | `apps/bananav`, `apps/ofx-bundle` (BananaV's effects as `BananaV.ofx` for other OFX hosts), `apps/bridge32` (`bananav-bridge32.exe`: 32-bit plug-ins in a process of their own, built for i686) |
 
 - Time is in ticks: 254,016,000,000 per second.
 - Video is composited in 32-bit float, premultiplied alpha. New projects
@@ -42,7 +42,7 @@ layers (`cargo xtask layers` enforces it):
   `decoded`) and written back the same way (`linear_to_420_levels`,
   `linear_to_frame_levels`, `Output::Yuv420`'s `video_levels`); RGB
   files, stills and generated media stay as they are. In 32-bit projects effects
-  keep what passes white or black, as VEGAS's float effects do (the
+  keep what passes white or black, as VEGAS's effects do there (the
   calibration card through ACES's view shows the light past white); 8-bit
   projects clip what each effect leaves to 0–1 (`FrameScene::clips`:
   `bv_render::effects::stored`, the card's `clip_range` kernel; also the
@@ -585,6 +585,28 @@ layers (`cargo xtask layers` enforces it):
   decoder loses a file's last frames on the card after a seek). While scrubbing, a newer position
   interrupts a reader's seek, and a seek slower than the preview's patience
   shows the frames it decodes on the way (`VideoPool::set_patience`).
+- The Video Preview's Transform mode (`transform_ui.rs`): the event at the
+  cursor (the selected one there, else the top one) framed on the picture
+  as the Properties panel frames it (`pancrop::transform_from_key`: a
+  picture fitted, moved, scaled, turned), its box the picture's corners
+  through the placement's `to_media` turned around; drags and the
+  Transform window's fields write the box back (`key_from_transform`,
+  `Project::set_clip_box_at`: the keyframe at the cursor when the event
+  has keyframes, else its one box).
+- Docking (`dock.rs`, egui_dock): a tab dragged lights up the room it
+  would take (`OverlayType::HighlightedAreas`); Float in Its Own Window
+  (the tab's menu) moves a window into an OS window of its own
+  (`floating_windows`, `BananaApp::floating_panels`, kept in the session),
+  Dock puts it back where windows open.
+- Playback waits for its first frame (`BananaApp::preroll`): while the
+  Video Preview shows and has not drawn the frame where playback starts
+  exact (a seek in a long-GOP recording decodes for a second), the sound
+  starts only once it has (3 s at most), so picture and sound start
+  together. The decoders know an MP4's or MOV's keyframes
+  (`bv_mf`'s `mp4::video_keyframes`, from `stss`, `stts` and `ctts`): a
+  later frame with no keyframe on the way is decoded on to, however far,
+  instead of seeking back to the keyframe before (`seek_speed` and
+  `playback_start`, ignored tests, measure a file).
 - The preview's frames (the engine's `preview.rs`) are drawn by two
   threads, each with its own painter, readers and plug-in instances; the
   frames asked for (a still, scrubbing, playback's first) and Dynamic RAM
@@ -599,7 +621,43 @@ layers (`cargo xtask layers` enforces it):
   drawing on the card and the frames do not wait on the decoders (effects
   do the work), the second draws alternate frames at once, tried and kept
   only while that shows more frames (`Pace::plan`; on the processor a
-  frame keeps every core busy already). Before events start (cuts,
+  frame keeps every core busy already). Its readers must open and seek
+  first, decoding up to a keyframe's distance beside the first thread's:
+  it is tried only when the frame playback started from seeked quickly
+  (`SEEK_LIMIT`) or reads a single media (two 4K long-GOP decoders more
+  stalled a transition's frames for seconds); its first frame is not
+  counted in what frames cost, and a frame being drawn for a time the
+  position passed holds no lane (the other thread waited on it).
+- The Transform window (`tabs::transform`, a docking tab opened beside
+  the browsers, `dock::open_beside_browsers`): the controls of
+  `transform_ui::target`'s event as other editors' effect controls —
+  foldable sections, each property's name, frameless numbers in the
+  accent's color (`hot`), a reset button per row (`prop`) — written
+  through the same framing as the Transform mode's box
+  (`transform_ui::framing`/`write`) and the event's fields; the Pan/Crop
+  keyframes beside the rows on a strip of the event's time. The time
+  selection the timeline shows (`BananaApp::shown_selection`): the loop
+  region unless a click elsewhere let go of it (`hidden_selection`), when
+  only its bar shows it.
+- Frames for the screen come back at the size the screen shows them
+  (`Engine::request_preview_in`'s room; `bv_gpu::room_size`, by
+  sixteenths so that resizing the window a little keeps the size): drawn
+  at Preview Quality's size — Full, Half or Quarter, their effects as at
+  that size —, the card reduces them (2 × 2 averages, then bicubic,
+  `Output::DisplayIn`) before they are brought back, so a 4K frame in a
+  1280 × 720 window brings back and uploads a sixth of the bytes. Auto
+  draws at the room's size already; the 360° View and the scopes take
+  whole frames, and a snapshot is drawn on its own at the project's
+  size. The status line names the size drawn (`PreviewFrame::drawn`).
+  Frames' bytes are used again (`bv_gpu::give_back` when a
+  `PreviewFrame` goes, the interface's image when the texture took its
+  pixels): fresh memory for each 33 MB 4K frame cost more than the copy.
+  A decoded picture's planes are written straight into the card's upload
+  memory (`write_buffer_with`), and an event a pixel for a pixel on the
+  frame is placed by its nearest pixel, not bicubic's sixteen (as
+  `bv_render::place_box`). Video thumbnails wait while playback or a
+  render runs (`thumbs::hold_thumbnails`): a 4K long-GOP recording's
+  decoded on the processor took the cores the preview needed. Before events start (cuts,
   transitions) their readers
   are positioned — those left elsewhere by an earlier playback too,
   `VideoPool::ready_at`; never those of events playing on — and their
@@ -1300,7 +1358,7 @@ layers (`cargo xtask layers` enforces it):
   interface of the plug-in's own — markers picked, dragged, added on the
   bar and dragged off below it, the picked stop's color in Color, kept
   in sync on instance changes —, the stops text in a hidden parameter;
-  VEGAS's float math: the premultiplied pixel's BT.601 luma through the
+  as VEGAS's renders show it: the premultiplied pixel's BT.601 luma through the
   stops' spline, `spline.rs`, each stop's weight 0.8, alpha and
   premultiplied colors held as VEGAS holds them, mixed in by the
   gradient's alpha times Amount or added; transparent pixels take the
@@ -1312,7 +1370,7 @@ layers (`cargo xtask layers` enforces it):
   then toward Color by `A − 0.5 − falloff × gray`; its presets' colors
   8-bit values the picker shows rounded in HSV) — each `Plan::Affine` on
   the card (Sepia with falloff through the processor), Gaussian Blur,
-  `gaussian_blur.rs` (VEGAS's Gaussian, `recursive_gauss`, its radii each
+  `gaussian_blur.rs` (the Gaussian as VEGAS blurs, `recursive_gauss`, its radii each
   range × the frame's longer side in pixels, the vertical one times the
   pixels' shape — the pixel aspect times the render scale's height over
   its width —, the edge pixels held, nothing blurred only with both
@@ -1412,8 +1470,8 @@ layers (`cargo xtask layers` enforces it):
   edges held, the foreground's shadow its alpha blurred by 0.022 × the
   width × Shadow Blur, black at 0.95; two crosshairs on the preview; on
   the card Picture In Picture's kernel draws both layers), Unsharp Mask,
-  `unsharp_mask.rs` (VEGAS's math: the picture blurred by VEGAS's
-  Gaussian of radius Radius × the frame's longer side, up and down that
+  `unsharp_mask.rs` (as VEGAS's renders measure: the picture blurred as
+  VEGAS blurs, of radius Radius × the frame's longer side, up and down that
   over the pixel aspect, its edges held; each channel, alpha too, as the
   premultiplied values stand, moved away from the blurred one by Amount ×
   their difference unless the result is within Threshold of the blurred
@@ -1447,7 +1505,13 @@ layers (`cargo xtask layers` enforces it):
   the outline from the letters' distance field, the shadow offset and
   blurred, a background; parts of the text in styles of their own (the
   FX window's text box's selection, BananaV's `kBananaVParamPropRichText`,
-  kept as runs in its hidden Styles parameter, `parse_runs`); its box
+  kept as runs in its hidden Styles parameter, `parse_runs`; the host
+  draws the text as a page — its name and clock, its bar of font, size
+  with a word processor's sizes, B and I, the justification's buttons and
+  Transfer Text Properties, `kBananaVParamPropSuggested`,
+  `…ButtonStyle`, `…OptionIcons`, `…Icon` and `…Transfer`, then the text
+  dark on white in its font, `bv_engine::plugins::font_face` added to
+  egui's fonts); its box
   dragged and its corners scaled on the preview; VEGAS's defaults and
   Animation list wait for its pictures),
   the transitions, `transitions.rs` (VEGAS's Linear Wipe, Clock Wipe,
@@ -1456,7 +1520,7 @@ layers (`cargo xtask layers` enforces it):
   Loop, Page Peel, Page Roll and Gradient Wipe — `gradient_wipe.rs`: a
   gradient picture Search… picks,
   handed over on a clip of its own and kept small in the settings, or
-  BananaV's shapes; VEGAS's math: the gradient made 8-bit steps at the
+  BananaV's shapes; as VEGAS's renders show: the gradient made 8-bit steps at the
   frame's pixels (the picture cut to the frame's shape and enlarged when
   Maintain aspect ratio), stretched from its darkest step to its lightest,
   mirrored, flipped and blurred as VEGAS blurs 8-bit pictures, kept
@@ -1618,7 +1682,7 @@ layers (`cargo xtask layers` enforces it):
   (VEGAS's AutoLooks: its panel — none, then the looks, and Strength —
   and its engine: each look a 16 × 16 × 16 table read trilinearly,
   `look_table`, the straight colors moved toward it by Strength; the
-  looks BananaV's own, VEGAS's being tables of its own; on the card LUT
+  looks BananaV's own; on the card LUT
   Filter's kernel, `Plan::Lut`) —, and in `classics.rs`
   VEGAS's Chroma Keyer with its controls — it and the own plug-ins
   Gaussian Blur, Sharpen, Vignette, Mirror and Glow took the places of
@@ -1658,9 +1722,9 @@ layers (`cargo xtask layers` enforces it):
   within 0–1; `Plan::Defocus`), Soft Contrast (`SoftContrast`, `looks.rs`:
   VEGAS's panel — its units, the Vignette group — and three presets; its
   math BananaV's: the
-  luma's curve, the tint, Diffusion's glow — VEGAS's Gaussian,
-  `recursive_gauss` — screened in, the vignette's outside blurred (VEGAS's
-  Gaussian across and down), black, white or transparent;
+  luma's curve, the tint, Diffusion's glow — blurred as VEGAS blurs,
+  `recursive_gauss` — screened in, the vignette's outside blurred (across
+  and down), black, white or transparent;
   `Plan::SoftContrast`, `kit_soft_tone`, `kit_soft_diffuse`,
   `kit_soft_vignette`), Rays (`Beams`, `looks.rs`: VEGAS's panel and two
   presets, its math BananaV's as Soft Contrast's — the lights, the
@@ -1721,7 +1785,7 @@ layers (`cargo xtask layers` enforces it):
   the bound's ellipse and grained by a 16-bit generator, then the
   whole picture tinted and the source blended back; Radius X and Y and
   Feather greyed while Bound radius is off, `filters::show`) and Film
-  Effects (`Film`: VEGAS's float math for its gray — the channels'
+  Effects (`Film`: its gray as VEGAS's renders show it — the channels'
   average —, its grain — one random number a pixel, half of Grain each
   way, on straight colors, the processor's hash `film_hash` the card's too —
   and its tint toward Color, before the particles; the particles — dust,
@@ -1737,7 +1801,7 @@ layers (`cargo xtask layers` enforces it):
   stripes, the scanlines by Interlacing and the scan phasing band rolling
   down, held within 0 and the alpha, then the phosphors' powers, blue
   lifted most; the grill's, the scanlines' and the band's profiles
-  BananaV's, VEGAS's tables not being known yet),
+  BananaV's own),
   Newsprint (`Newsprint`, VEGAS's halftone: cells (the longer side × Dot
   size) ⁄ 20 + 3 pixels, across divided by the pixels' shape; the picture
   averaged over them, `averaged`; a dot a cell in brick rows, its radii
@@ -1861,7 +1925,7 @@ layers (`cargo xtask layers` enforces it):
   last a part by Number of layers, those over 0.01 —, VEGAS's styles
   — fractal smooth or turbulent, veins of marble and lines, rings — and
   colors' line in 65,536ths, premultiplied; its lattice's gradients hashed,
-  VEGAS's permutation and gradient tables not being known yet) and
+  BananaV's own) and
   Solid Color is VEGAS's (its Color, transparent at first, and ten
   presets, premultiplied; the Media Generator's Solid Color makes it,
   the older built-in one stays for projects and BananaV's own uses); on
@@ -2324,17 +2388,107 @@ layers (`cargo xtask layers` enforces it):
   `vst_ui.rs` (the Plug-In Chooser's VST3 folder on audio chains — an effect's
   presets in the FX window's preset bar are its values and states,
   `presets::VstPreset` by `vst_key` —, and an
-  effect's page in the FX window: BananaV's generic rows and the
-  plug-in's own window, `bv_platform::PluginWindow` — on Windows, and on
-  Linux an X11 window whose editor gets VST 3's run loop from its frame
-  (`IRunLoop`'s file descriptors and timers, run by `bv_vst3::run_loop`
-  each frame while one is open) —, opened with the page unless
-  Preferences › VST Effects' "Generic
-  VST editor"; what changes goes back to the effect, its state read when
-  a gesture ends). `bv-vst3-testplug` has the tests' plug-ins (a gain
+  effect's page in the FX window: on Windows the plug-in's own editor
+  inside the FX window, as VEGAS shows it (`vst_ui::embedded`: a child
+  window, `bv_platform::EmbeddedWindow`, found under the FX window by its
+  title, placed where the page leaves the editor's room and hidden while
+  an egui menu is open over it; the window fits the editor; the preset
+  bar has the plug-in's programs and VEGAS's Open VST Preset, Save VST
+  Preset As, Open VST Bank and Save VST Bank As — `.vstpreset`, `.fxp`,
+  `.fxb`, banks VST 2's alone —, the chain's button names its kind and
+  width, "Modern Equalizer(VST3, 64 Bit)"); BananaV's generic rows where
+  it has no editor or Preferences › VST Effects' "Generic VST editor"
+  asks, and the plug-in's own window, `bv_platform::PluginWindow`, on
+  Linux (an X11 window whose editor gets VST 3's run loop from its frame:
+  `IRunLoop`'s file descriptors and timers, run by `bv_vst3::run_loop`
+  each frame while one is open); what changes goes back to the effect,
+  its state read when a gesture ends). A 32-bit plug-in's editor is made
+  in its bridge, in a window of the bridge's own (the plug-in deals with
+  its process's windows only), then put inside BananaV's (`EditorWindow::
+  embed`: `SetParent` across the processes); the size it asks for comes
+  back with the bridge's answers, and the interface's thread, marked by
+  `bv_bridge::windows_here`, answers the messages the bridge's windows
+  send it while it waits for the bridge. `bv-vst3-testplug` has the tests' plug-ins (a gain
   that is its own controller, with an editor; a polarity switch whose
-  controller is apart and hears the component through a message);
+  controller is apart and hears the component through a message; a gain
+  with programs and a tail that keeps what its process context said; a
+  module of its own whose gain crashes as it processes);
   `cargo test -p bv-vst3` also builds them into a bundle and loads it.
+  Stability: every call into a plug-in's sound and states goes through
+  `guard.rs` (`guard.c`'s structured exception handling on Windows'
+  MSVC builds, `bv_apple::guard`'s signal handlers on macOS): a crash
+  comes back as an error, its module is switched
+  off (`Module::crashed`; never called again, not even to release its
+  objects: `Instance` leaks them), the sound passes and
+  `take_crashes` gives the interface what to tell
+  (`follow_plugin_crashes`). Finding plug-ins: `bv_vst3::scan` tries
+  each module in a process of its own (BananaV started with
+  `--vst3-scan <module> <answer.json>`, `plugin_scan_child`; the
+  `bv-vst3-scan` tool for the tests), a job object ending what the
+  plug-in started, several at once, `Cache` keeping what they said by
+  file stamp (crashes and hangs looked at again); the interface's
+  `vst.rs` has one search for each list of folders, shared by the
+  Plug-In Chooser and Preferences, the cache's known effects listed at
+  once, names made unique (`unique_names`), the tests' programs reading
+  modules without running them. `Instance` also has programs (the
+  program-change parameter; names from `IUnitInfo`'s program list, else
+  the parameter's texts), `tail`, a `Transport` and `locate` filling the
+  process context, and `queue_ramp` (points spread over the blocks a
+  call is cut into); `bv_vst3::preset` reads and writes the standard
+  `.vstpreset` file. The mixer's `vst.rs` tells each block's place and
+  the project's tempo, turns FX automation into ramps (a point every 32
+  samples, `Chain::automate`), keeps plug-ins across seeks
+  (`Chain::reset` restarts them) and lets one sleep once its input and
+  output stayed silent past its tail (a second at least). Other editors'
+  projects: `veg/audio.rs`'s `vst3` reads a VST 3 effect's states and
+  `bv_timeline::vst_id` the identity its class gives (`VstWanted`), which
+  `vst::find_wanted` matches to the plug-ins installed.
+- VST 2 plug-ins: BananaV's own compatibility. `bv-vst2-sys` (layer 0)
+  declares their binary interface from how plug-ins behave — the object
+  (`PluginObject`), the requests (`op`), the host's answers (`host_op`),
+  the time information — with no Steinberg code or header; `bv-vst2` is the
+  host: `module.rs` (libraries never unloaded, their processor read from
+  their header), `local.rs` (a plug-in in this process: requests behind
+  `guard.c`'s guard, processing in pieces cut at ramps' points, BananaV's
+  state format "BVV2", editors), `bridge.rs` (a 32-bit plug-in in
+  `bananav-bridge32.exe` through `bv-bridge`: requests and blocks through
+  the child's standard input and output; the bridge's side serves a
+  `Local`, its editor in the bridge's window), `instance.rs` (either,
+  alike), `scan.rs`
+  (the child's scan, by the bridge for 32-bit libraries), `preset.rs`
+  (`.fxp`/`.fxb`). `VstFx::format` tells a VST 2 effect (its class the
+  plug-in's number, `bv_vst2::class_id`); the mixer's `vst.rs` and
+  `vst_ui.rs` run both kinds through one path; `bv-vst2-testplug` is the
+  tests' plug-in (built for i686 for the bridge's test).
+- BananaV's 32-bit bridge (Windows x64): `bv-bridge` (layer 0) has what
+  its hosts share — `wire.rs` (frames: a length and its bytes, written
+  with `Out` and read with `In`), `Process` (the host's side: the bridge
+  started, each request answered within a deadline — 60 s to start a
+  plug-in, 10 s for a block of sound, 30 s otherwise —, a crash caught in
+  the bridge answered with its details, `answer::CRASHED`; a crash, a hang
+  or an end leaves it gone for good, `Lost`, the sound passing), `serve`
+  (the bridge's side: requests read on a thread of their own and answered
+  on the main thread between the windows' messages,
+  `MsgWaitForMultipleObjects` woken by a posted message), `apartment`
+  (OLE on the bridge's thread, as BananaV's interface thread) and
+  `window.rs` (the editor's top-level window, sized by the plug-in).
+  `apps/bridge32` (`bananav-bridge32.exe`, i686, an 8 MiB main stack)
+  serves `--vst2-serve`/`--vst2-scan` (`bv_vst2::bridge`, `scan`) and
+  `--vst3-serve`/`--vst3-scan` (`bv_vst3::bridge`, `scan`); `exe()` finds
+  it beside BananaV (`BV_BRIDGE32` first, the build folders' i686 target
+  last), `set_enabled` follows Preferences' "Enable support for 32-bit VST
+  plug-ins". A VST 3 module goes there only when it has a 32-bit library
+  alone (`bv_vst3::is_32bit`: a bundle's `Contents/x86-win`, or a 32-bit
+  `.vst3` file; 64-bit modules never): `bv_vst3::Bridged` answers as
+  `Instance` does (parameters, values and texts, blocks with their changes
+  and ramps, the transport and place, programs, states, latency, tail; its
+  editor in the bridge's window, `poll_editor` bringing what it reported),
+  the scan's `Scanner::bridge` looks at it there (`ModuleScan::bits32`;
+  `Failure::NeedsBridge` without one, not kept in the cache), and the
+  mixer's `Plugin::V3Bridged` and `vst_ui.rs`'s `Plug::V3Bridged` run it —
+  the page's `Asked` keeping a bridged plug-in's values a moment and its
+  texts by value, each answer being a request. `cargo test -p bv-vst3`
+  builds the test plug-ins and the bridge for i686 and runs them there.
 - Audio busses and assignable effects chains, as VEGAS's Help and its
   signal-flow diagram describe them: `bv_timeline::busses` (`Project`'s
   `busses`, A to Z, and `fx_chains`, each a `Channel` — name, gain, pan,
@@ -2444,10 +2598,14 @@ layers (`cargo xtask layers` enforces it):
   — plug-ins too —, never a prerendered part or a proxy; the file a PNG
   with the frame's straight alpha over nothing, as VEGAS's files keep
   it, the copy over black as the preview shows it). Generated media are edited in
-  `generated_media.rs` (VEGAS's Video Media Generators window, Titles &
-  Text's Transfer Text Properties there; its Media Properties, and
-  Replace Plug-In's list of the generators of its kind of media,
-  `tabs::generators::replacements`; events pasted, copied by Copy Here or
+  `generated_media.rs` (VEGAS's Video Media Generators window: the
+  generator and its settings' columns; the frame size and the generated
+  media's own Duration — `MediaInfo::duration` under
+  `Generator::DURATION`, the event's length where it has none — with the
+  plug-in's help, Replace Plug-In's list of the generators of its kind of
+  media, `tabs::generators::replacements`, Match Event Length and Media
+  Properties; the preset; Titles & Text's Transfer Text Properties a
+  button of its bar, BananaV's `kBananaVParamPropTransfer`; events pasted, copied by Copy Here or
   dragged from Project Media while another event shows their generated
   media ask for a copy of their own or a reference, VEGAS's question,
   `generated_copies.rs` on `Project::copy_generated_media`, the answer
@@ -2944,8 +3102,38 @@ layers (`cargo xtask layers` enforces it):
   graphics cards, Windows copies the window between them itself, so it
   moves smoothly from one monitor to the other. `WGPU_BACKEND` picks
   another.
+- Starts that end early (`ui-egui`'s `safe_start`): some drivers fail on
+  DirectX 12 and BananaV closed as its window appeared. Each start is
+  noted in `Start.json` (the settings folder) before the window opens and
+  crossed out once the window drew and the card compositing video opened
+  and compiled its kernels (`Engine::gpu_starting`), or when BananaV
+  closes. A start left noted makes the next one draw through the next
+  interface — Windows: Vulkan for the interface and the video card
+  (`bv_gpu::set_interfaces`), then OpenGL with the processor compositing;
+  Linux: OpenGL — and the one that works is kept (deleting `Start.json`
+  goes back). `Crash.log` in the logs folder gets the panics, the window's
+  failures and, on Windows, crashes no code handled (`bv_platform::
+  on_crash`: one line, the exception and its module, written without
+  taking memory); a crash while starting there starts BananaV again at
+  once on the next interface.
+- Updates (`ui-egui`'s `updates`): the public repository's latest
+  release asked of GitHub's API through the system's `curl` (no network
+  library in BananaV), as BananaV starts and from the Help menu; on
+  Windows, installed by its installer, the setup is downloaded to the
+  temporary folder, checked against the SHA-256 GitHub gives and run as
+  BananaV closes (`install_on_exit`).
+- Letters: egui's fonts have Latin, Greek and Cyrillic; behind them the
+  interface adds the computer's Chinese, Japanese and Korean faces and
+  one with many other scripts (`interface_fonts`, found by
+  `bv_effects::interface_fallbacks`), read on a thread of their own (at
+  once for an Asian interface language). Titles & Text draws a letter its
+  font lacks from a face that has it (`fonts::fallback`: the usual
+  families of the text's language — kana makes it Japanese, hangul Korean
+  —, then wide ones, then any face whose `OS/2` table says it covers the
+  block), each such face a style of its own.
 - Windows x64 is the development computer; Windows ARM64 and Linux (x64
-  and ARM64) are checked on GitHub's machines (`.github/workflows/ci.yml`).
+  and ARM64) are checked on GitHub's machines (`.github/workflows/ci.yml`),
+  macOS (Apple's chips and Intel) there too when asked (`-f macos=true`).
   Started by hand, the CI can check one crate (`gh workflow run ci.yml
   --ref <branch> -f crate=bv-mf`; `-f ignored=true` adds its oracle
   tests, with the ffmpeg tool installed).
@@ -2959,6 +3147,58 @@ layers (`cargo xtask layers` enforces it):
   (`ui-egui`'s `run`): `BANANAV_WAYLAND=1` gives Wayland's own, which
   cannot place dialogs nor see the mouse, keypad or screen outside them.
   `BV_FFMPEG_LOG=warning` (`info`, `debug`) shows FFmpeg's messages.
+- macOS (11 and later; one app for Apple's chips and Intel): media
+  through FFmpeg as on Linux (`crates/mf/src/ff`), the Mac's media engine
+  through VideoToolbox (`hw.rs`: one "card", named after the chip,
+  decoding H.264, HEVC and what else it takes; `encode.rs`: the H.264 and
+  HEVC encoders, `Vendor::Apple`, "Apple VideoToolbox", constant quality
+  on Apple's chips); sound through Core Audio (cpal); the interface drawn
+  by Metal (`every_kernel_translates_to_metal` checks every kernel in
+  Metal's language from any system). `bv_platform`'s services are
+  `mac.rs` — AppKit through objc2, on the main thread: the program's
+  windows (`NSWindow`; dialogs as child windows of the main one), the
+  mouse, the displays' names, the Trash, the system's color sampler for
+  the eyedropper (`start_color_sampler`), Quit and the files Finder
+  opens (the window library's application delegate gets
+  `applicationShouldTerminate:` and `application:openURLs:` as it
+  finishes launching, `before_run`; the interface reads
+  `take_quit_request` and `take_opened_files`, woken by `set_wake`); Core
+  Graphics for the displays and the Screen Capture window (`screen.rs`);
+  the keyboard layouts (Text Input Sources) for the keys' labels and a
+  watch on the program's key events for the keypad; LaunchServices for
+  project files; Disk Arbitration for removable drives; GameController;
+  Core MIDI (`midi.rs`); IOKit's disk and graphics statistics and the
+  Dock's badge for a render's progress (`monitor.rs`). The main window
+  keeps the system's buttons at the left of BananaV's bar (`lib.rs`' `run`:
+  a clear title bar over the content; `title_bar.rs` leaves them room and
+  has no buttons or edges of its own); BananaV's Ctrl is the Command key
+  (the interface reads `Modifiers::command`), a Control-click is a right
+  click (`keymap::mac_control_click`) and the texts name the keys Cmd and
+  Option (`i18n::system_keys`). Plug-ins are bundles: `bv-apple` loads
+  them through `CFBundle` (VST 3's `bundleEntry`, VST 2's `VSTPluginMain`
+  or `main_macho`, OpenFX's `MacOS` folder), reads Mach-O files
+  (`macho.rs`; a plug-in made for the other processor is refused with the
+  reason — BananaV opened through Rosetta runs Intel-only ones) and guards
+  every call into them (`guard.c`: signal handlers put in before a
+  plug-in's code loads, a crash coming back as the signal and its place,
+  `cfg(bv_vst3_guard)` and its kind as on Windows); their editors are
+  NSViews inside the FX window (`EmbeddedWindow`, sized in points,
+  `EDITOR_POINTS`) or windows of their own (`PluginWindow`). The scans'
+  child processes call plug-ins on their main thread, where Mac plug-ins
+  expect their first calls. There is no 32-bit bridge, CUDA or ASIO on a
+  Mac; burning discs and capturing from cameras are not done there yet.
+  From another system `sh tools/mac_check.sh` runs clippy for macOS
+  (`MAC_TARGET=x86_64-apple-darwin` for Intel Macs).
+- macOS's package (`packaging/macos`): `build_ffmpeg.sh` builds FFmpeg
+  under the LGPL for one processor (VideoToolbox, AudioToolbox, dav1d,
+  LAME, SVT-AV1; macOS 11), `make_app.py` puts each processor's program
+  and libraries together in `BananaV.app` (`lipo`; the libraries in
+  Contents/Frameworks, found through `@rpath`), with `Info.plist` (bundle
+  identifier `io.github.bananav-editor.BananaV`, the `.bvproj` files'
+  type, the permissions' texts in English and Brazilian Portuguese),
+  `BananaV.icns` and `BananaV.entitlements`, signs it (ad hoc, or with a
+  Developer ID and notarized when the secrets are there) and makes the
+  disk image.
 - Building on Linux needs (Ubuntu's names) `libasound2-dev pkg-config
   libclang-dev libavcodec-dev libavformat-dev libavutil-dev
   libswscale-dev libswresample-dev`.
@@ -2970,7 +3210,9 @@ layers (`cargo xtask layers` enforces it):
 - Packages: `gh workflow run package.yml` makes, as the run's artifacts
   (nothing is published), zips and installers for Windows x64 and ARM64 (the
   C runtime inside; `packaging/windows/bananav.iss`, Inno Setup, the installer
-  tried out on the runner) and AppImages for Linux x64 and ARM64, built on Ubuntu 22.04
+  tried out on the runner), macOS's universal disk image (each processor
+  built on its own Mac, put together, started on the runner and its screen
+  kept as a picture) and AppImages for Linux x64 and ARM64, built on Ubuntu 22.04
   with an FFmpeg built under the LGPL (`packaging/linux/build_ffmpeg.sh`:
   no x264 or x265 while BananaV's license is open). The icon is BananaV's
   official logo (`packaging/icons`: `bananav-icon.svg`, the rounded icon;

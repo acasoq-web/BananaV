@@ -34,6 +34,7 @@ use bv_timeline::{
 use crate::app::BananaApp;
 use crate::automation::{AutoOwner, TrackControl};
 use crate::commands::Cmd;
+use crate::cursors::Cursor;
 use crate::egui::{self, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, pos2, vec2};
 use crate::fx_window::FxTarget;
 use crate::icons::Icon;
@@ -463,6 +464,14 @@ fn drag_channels(ui: &mut egui::Ui, app: &mut BananaApp) {
             .iter()
             .copied()
             .find(|(of, r)| r.x_range().contains(pos.x) && same_kind(from, *of));
+        // Something dragged; where it can't go (no channel of its kind),
+        // the arrow that says so.
+        let pointer = if target.is_some() {
+            Cursor::Drag
+        } else {
+            Cursor::ArrowNo
+        };
+        crate::cursors::set(ui.ctx(), pointer);
         if let Some((to, r)) = target
             && to != from
         {
@@ -478,7 +487,6 @@ fn drag_channels(ui: &mut egui::Ui, app: &mut BananaApp) {
                 move_channel(app, from, to, after);
             }
         }
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
     if released {
         app.console.dragging = None;
@@ -851,9 +859,11 @@ fn left_pane(ui: &mut egui::Ui, app: &mut BananaApp, view: &ConsoleView, height:
     let (rect, _) = ui.allocate_exact_size(vec2(view.pane_w + PANE_GAP, height), Sense::hover());
     let body = Rect::from_min_size(rect.min, vec2(view.pane_w, height));
     let gap = Rect::from_min_max(pos2(body.right(), rect.top()), rect.max);
-    let split = ui
-        .interact(gap, ui.id().with("console-pane-split"), Sense::drag())
-        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    let split = ui.interact(gap, ui.id().with("console-pane-split"), Sense::drag());
+    if split.hovered() || split.dragged() {
+        // A split bar, as VEGAS's.
+        crate::cursors::set(ui.ctx(), Cursor::SplitterEw);
+    }
     if split.dragged() {
         let w = app.console.pane_w + split.drag_delta().x;
         app.console.pane_w = w.clamp(PANE_MIN, PANE_MAX);
@@ -878,7 +888,9 @@ fn left_pane(ui: &mut egui::Ui, app: &mut BananaApp, view: &ConsoleView, height:
                 ui.add_space(4.0);
                 let (r, band) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 5.0), Sense::drag());
-                let band = band.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                if band.hovered() || band.dragged() {
+                    crate::cursors::set(ui.ctx(), Cursor::SplitterNs);
+                }
                 if band.dragged() {
                     let h = app.console.list_h + band.drag_delta().y;
                     app.console.list_h = h.clamp(LIST_MIN, LIST_MAX);
@@ -1875,7 +1887,7 @@ fn pan_row(ui: &mut egui::Ui, pan: f32, automated: bool) -> (Option<f32>, egui::
     let (from, to) = (line.left() + 3.0, line.right() - 3.0);
     let mut out = None;
     if resp.dragged() {
-        let fine = if ui.input(|i| i.modifiers.ctrl) {
+        let fine = if ui.input(|i| i.modifiers.command) {
             0.1
         } else {
             1.0
@@ -2676,6 +2688,7 @@ fn master_strip(ui: &mut egui::Ui, app: &mut BananaApp, sizes: &Sizes, view: &Co
                 app.console.meter_scale,
             )
             .on_hover_text(tr("Click to clear the clip lights"));
+            crate::tabs::master::reset_pointer(ui, &r);
             if r.clicked() {
                 app.meters.reset_clip();
             }
@@ -2817,6 +2830,7 @@ fn master_strip(ui: &mut egui::Ui, app: &mut BananaApp, sizes: &Sizes, view: &Co
                     app.console.meter_scale,
                 )
                 .on_hover_text(tr("Click to clear the clip lights"));
+                crate::tabs::master::reset_pointer(ui, &r);
                 if r.clicked() {
                     app.meters.reset_clip();
                 }
@@ -3200,8 +3214,11 @@ fn send_divider(ui: &mut egui::Ui, app: &mut BananaApp, of: Of, rect: Rect, size
             egui::Id::new(("send-divider", format!("{of:?}"))),
             Sense::drag(),
         )
-        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
         .on_hover_text(tr("Drag to show more or fewer sends"));
+    if r.hovered() || r.dragged() {
+        // The region's divider, as VEGAS's split bars.
+        crate::cursors::set(ui.ctx(), Cursor::SplitterNs);
+    }
     let color = if r.hovered() || r.dragged() {
         theme::text()
     } else {
@@ -3283,7 +3300,7 @@ fn mini_fader(
     );
     let mut out = None;
     if resp.dragged() {
-        let fine = if ui.input(|i| i.modifiers.ctrl) {
+        let fine = if ui.input(|i| i.modifiers.command) {
             0.1
         } else {
             1.0

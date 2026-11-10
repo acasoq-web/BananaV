@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  BananaV.app's Info.plist. packaging/macos/make_app.py puts the version in
+  for @VERSION@ (Cargo.toml's).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>pt-BR</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>BananaV</string>
+	<key>CFBundleDisplayName</key>
+	<string>BananaV</string>
+	<key>CFBundleExecutable</key>
+	<string>BananaV</string>
+	<key>CFBundleIconFile</key>
+	<string>BananaV</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.bananav-editor.BananaV</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>BananaV is free software under the GNU General Public License 3.0 or later.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSRequiresAquaSystemAppearance</key>
+	<false/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>BananaV records sound from your microphone or audio interface onto the tracks you arm for recording.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>BananaV asks the system to shut the computer down when a render ends, when you choose so.</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>BananaV Project</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>BananaV</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.bananav-editor.bananav.project</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.bananav-editor.bananav.project</string>
+			<key>UTTypeDescription</key>
+			<string>BananaV Project</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeIconFile</key>
+			<string>BananaV</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>bvproj</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

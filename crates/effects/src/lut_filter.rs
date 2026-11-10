@@ -379,15 +379,18 @@ pub fn resolve(file: &str, dir: &Path) -> String {
     }
 }
 
-/// The factory presets: BananaV's looks, worked out tetrahedrally.
+/// The factory presets: BananaV's looks, worked out tetrahedrally. Only
+/// their names and files: the tables' text (thousands of numbers each) is
+/// written once, by [`write_looks`] — the interface lists the presets
+/// every frame its windows show them.
 pub(crate) fn presets() -> Vec<Preset> {
-    looks()
-        .into_iter()
-        .map(|(name, file, _)| Preset {
+    LOOK_LIST
+        .iter()
+        .map(|&(name, _)| Preset {
             name,
             values: vec![
                 ("name", PresetValue::Text(name.to_string())),
-                ("file", PresetValue::Text(format!("{LOOKS}{file}"))),
+                ("file", PresetValue::Text(format!("{LOOKS}{name}.cube"))),
                 ("interpolation", PresetValue::Num(vec![1.0])),
                 ("strength", PresetValue::Num(vec![1.0])),
             ],

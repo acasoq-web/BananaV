@@ -11,9 +11,10 @@ use crate::app::BananaApp;
 use crate::fx_window::FxTarget;
 
 impl BananaApp {
-    /// The FX window on the transition event `clip` comes in with.
-    pub(crate) fn open_transition_window(&mut self, clip: ClipId) {
-        self.clip_windows.fx_target = Some(FxTarget::Transition(clip));
+    /// The FX window on the transition event `clip` comes in with (`out`:
+    /// the one it goes out with).
+    pub(crate) fn open_transition_window(&mut self, clip: ClipId, out: bool) {
+        self.clip_windows.fx_target = Some(FxTarget::Transition(clip, out));
     }
 
     /// For review: the first crossfade of the first video track given
@@ -73,7 +74,7 @@ impl BananaApp {
             }
         });
         if open {
-            self.open_transition_window(clip);
+            self.open_transition_window(clip, false);
         }
         true
     }

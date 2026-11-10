@@ -7,8 +7,8 @@
 //! scaled with no ceiling (past 1 the colors leave the cube: 8-bit
 //! projects clip them there, Max Saturation's strong colors), the
 //! lightness scaled and held within 0–1; the result is not clipped
-//! (VEGAS's float effects keep what passes white or black; 8-bit projects
-//! hold each effect's result within 0–1).
+//! (in 32-bit projects VEGAS's effects keep what passes white or black;
+//! 8-bit projects hold each effect's result within 0–1).
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_void};

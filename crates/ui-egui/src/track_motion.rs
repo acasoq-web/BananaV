@@ -16,9 +16,10 @@ use bv_timeline::{CompositeMode, HaloLook, KeyCurve, Project, TrackId, TrackKind
 use serde::{Deserialize, Serialize};
 
 use crate::app::BananaApp;
+use crate::cursors::{self, Cursor};
 use crate::egui::{
     self, Align, Color32, CursorIcon, Layout, PointerButton, Pos2, Rect, Sense, Shape, Stroke,
-    StrokeKind, pos2, vec2,
+    StrokeKind, Vec2, pos2, vec2,
 };
 use crate::fx_window::{self as fxw, Glyph, Hit, Space};
 use crate::i18n::{tr, trc};
@@ -38,6 +39,18 @@ enum Drag {
     Move { vp: Viewport, from: Pos2 },
     Resize { vp: Viewport, sx: f32, sy: f32 },
     Rotate { vp: Viewport, from: f32 },
+}
+
+impl Drag {
+    /// The pointer while it goes on: the one its press showed (the box
+    /// mirrored `flips`), as Pan/Crop's.
+    fn cursor(&self, flips: (bool, bool)) -> Cursor {
+        match *self {
+            Drag::Move { .. } => Cursor::MoveFrame,
+            Drag::Resize { vp, sx, sy } => fxw::box_handle_cursor(sx, sy, vp.angle_deg, flips),
+            Drag::Rotate { .. } => Cursor::Rotate,
+        }
+    }
 }
 
 /// What the window changes this frame.
@@ -676,25 +689,24 @@ impl TrackMotionWindow {
         if resp.drag_stopped() {
             self.drag = None;
         }
-        if self.drag.is_none()
-            && let Some(p) = resp.hover_pos()
-        {
-            let icon = match fxw::hit(&sp, &vp, p, rotation) {
-                Hit::Handle(sx, sy) => fxw::resize_cursor(sx, sy, vp.angle_deg),
-                Hit::Rotate => CursorIcon::None,
-                Hit::Inside => CursorIcon::Move,
-                Hit::Outside => CursorIcon::Default,
-            };
-            if icon == CursorIcon::None {
-                fxw::rotate_cursor(ui.ctx(), p);
-            } else {
-                ui.ctx().set_cursor_icon(icon);
-            }
-        }
-        if matches!(self.drag, Some(Drag::Rotate { .. }))
-            && let Some(p) = ui.input(|i| i.pointer.latest_pos())
-        {
-            fxw::rotate_cursor(ui.ctx(), p);
+        // The pointer, as Pan/Crop's (the same box, VEGAS's choices): a
+        // drag's own while it goes on, else the zone's under it; far from
+        // the box the system's arrow (this view does not move).
+        let flips = if halo_look.is_some() {
+            (false, false)
+        } else {
+            (tf.flip_h, tf.flip_v)
+        };
+        let pointer = match &self.drag {
+            Some(d) => Some(d.cursor(flips)),
+            None => resp.hover_pos().and_then(|p| {
+                fxw::box_cursor(fxw::hit(&sp, &vp, p, rotation), false, vp.angle_deg, flips)
+            }),
+        };
+        match pointer {
+            Some(c) => cursors::set(ui.ctx(), c),
+            None if resp.hovered() => cursors::system(ui.ctx(), CursorIcon::Default),
+            None => {}
         }
         // The workspace's menu: restore, center, flip, aspect.
         let mut action: Option<&str> = None;
@@ -907,6 +919,10 @@ impl TrackMotionWindow {
                 if lr.hover_pos().is_some_and(|h| (h - c).length() <= 6.0) {
                     on_key = Some(at);
                 }
+            }
+            // A keyframe to click, as VEGAS's keyframe rows: the hand.
+            if on_key.is_some() {
+                cursors::set(ui.ctx(), Cursor::HandPoint);
             }
             if lr.clicked()
                 && let Some(h) = lr.interact_pointer_pos()
@@ -1198,22 +1214,28 @@ impl TrackMotionWindow {
                 && let Some(o) = ui.input(|i| i.pointer.press_origin())
                 && let Some(p) = resp.interact_pointer_pos()
             {
-                let ctrl = ui.input(|i| i.modifiers.ctrl);
+                let ctrl = ui.input(|i| i.modifiers.command);
                 b = self.dragged_3d(start, zone, view, o, p, k, ctrl, ball.as_ref(), out);
             }
             if resp.drag_stopped() {
                 self.drag_3d = None;
                 self.zone_3d = None;
             }
+            // The zone's pointer; dragged, the one its press showed.
             if let Some(zone) = active.or(hover) {
-                match zone.cursor() {
-                    Some(icon) => ui.ctx().set_cursor_icon(icon),
-                    None => {
-                        if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
-                            fxw::rotate_cursor(ui.ctx(), p);
-                        }
-                    }
-                }
+                let at = if active.is_some() {
+                    ui.input(|i| i.pointer.press_origin())
+                } else {
+                    resp.hover_pos()
+                };
+                let corner = match (&corners, center, at) {
+                    (Some(c), Some(center), Some(at)) => c
+                        .iter()
+                        .min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
+                        .map_or(Vec2::ZERO, |&k| k - center),
+                    _ => Vec2::ZERO,
+                };
+                cursors::set(ui.ctx(), zone.cursor(corner));
             }
             resp.context_menu(|ui| {
                 if ui.button(tr("Restore")).clicked() {
@@ -1728,15 +1750,19 @@ pub(crate) enum Zone {
 }
 
 impl Zone {
-    /// The pointer over the zone (none: the turning one,
-    /// `fx_window::rotate_cursor`).
-    fn cursor(self) -> Option<CursorIcon> {
+    /// The pointer over the zone and while it is dragged, as the 2D box's
+    /// (VEGAS's Pan/Crop's): inside, the box moved; a corner (`corner`, its
+    /// way from the box's middle on the screen), nearer or farther, the
+    /// arrows along its diagonal; the trackball's top and bottom ↕, its
+    /// sides ↔, the rest of its rim the turning one.
+    fn cursor(self, corner: Vec2) -> Cursor {
         match self {
-            Zone::Move => Some(CursorIcon::Move),
-            Zone::InOut => Some(CursorIcon::ResizeNwSe),
-            Zone::RotateX => Some(CursorIcon::ResizeVertical),
-            Zone::RotateY => Some(CursorIcon::ResizeHorizontal),
-            Zone::RotateZ => None,
+            Zone::Move => Cursor::MoveFrame,
+            Zone::InOut if corner.x * corner.y < 0.0 => Cursor::ResizeNesw,
+            Zone::InOut => Cursor::ResizeNwse,
+            Zone::RotateX => Cursor::ResizeNs,
+            Zone::RotateY => Cursor::ResizeEw,
+            Zone::RotateZ => Cursor::Rotate,
         }
     }
 }
@@ -1975,6 +2001,26 @@ mod tests {
         // Without Enable Rotation the rim moves the box.
         assert_eq!(ball.zone(c + diagonal, &corners, false), Some(Zone::Move));
         assert_eq!(ball.zone(pos2(300.0, 300.0), &corners, true), None);
+    }
+
+    /// The 3D zones' pointers, as the 2D box's: a corner's arrows along its
+    /// own diagonal on the screen, the trackball's ↕ and ↔ where a drag up
+    /// and down or across turns the box, the turning one on the rest of
+    /// its rim.
+    #[test]
+    fn the_3d_zones_show_the_2d_box_s_pointers() {
+        assert_eq!(Zone::Move.cursor(Vec2::ZERO), Cursor::MoveFrame);
+        for (way, c) in [
+            (vec2(-1.0, -1.0), Cursor::ResizeNwse),
+            (vec2(1.0, 1.0), Cursor::ResizeNwse),
+            (vec2(1.0, -1.0), Cursor::ResizeNesw),
+            (vec2(-1.0, 1.0), Cursor::ResizeNesw),
+        ] {
+            assert_eq!(Zone::InOut.cursor(way), c, "{way:?}");
+        }
+        assert_eq!(Zone::RotateX.cursor(Vec2::ZERO), Cursor::ResizeNs);
+        assert_eq!(Zone::RotateY.cursor(Vec2::ZERO), Cursor::ResizeEw);
+        assert_eq!(Zone::RotateZ.cursor(Vec2::ZERO), Cursor::Rotate);
     }
 
     #[test]

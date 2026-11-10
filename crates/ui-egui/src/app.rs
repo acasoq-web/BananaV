@@ -207,6 +207,11 @@ pub struct BananaApp {
     pub(crate) snapping: bool,
     pub(crate) quantize: bool,
     pub(crate) loop_enabled: bool,
+    /// The time selection a click elsewhere on the timeline let go of: its
+    /// loop region stays (in its bar, for Loop Playback and what works on
+    /// the loop region), the timeline no longer shows it. Any other loop
+    /// region shows again.
+    pub(crate) hidden_selection: Option<TimeRange>,
     pub(crate) play_rate: f64,
     pub(crate) tool: Tool,
     pub(crate) media_drag: Option<MediaDrag>,
@@ -216,6 +221,8 @@ pub struct BananaApp {
     pub(crate) clipboard: Option<ClipboardData>,
     pub(crate) timeline: TimelineView,
     pub(crate) preview: PreviewState,
+    /// The Transform window's own state.
+    pub(crate) transform_panel: crate::tabs::transform::Panel,
     pub(crate) trimmer: TrimmerState,
     pub(crate) explorer: ExplorerState,
     /// Project Media's bins and view.
@@ -265,6 +272,9 @@ pub struct BananaApp {
     /// Mídia selecionada no painel de mídias.
     pub(crate) selected_media: Option<MediaId>,
     pub(crate) dock: Option<egui_dock::DockState<Tab>>,
+    /// Windows taken out of the layout into windows of the system's own
+    /// (`dock::floating_windows`).
+    pub(crate) floating_panels: Vec<Tab>,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) saved: Project,
     status: Option<(String, Instant, bool)>,
@@ -400,6 +410,9 @@ pub struct BananaApp {
     pub(crate) transport_dialog: Option<crate::transport_buttons::TransportDialog>,
     /// A Render to New Track running: where its file's events go.
     pub(crate) new_track_render: Option<Tick>,
+    /// Media being let go below the tracks: the new tracks it lands on
+    /// (see [`BananaApp::on_new_tracks`]).
+    pub(crate) drop_tracks: Option<DropTracks>,
     /// The FX Automation Chooser, while it is open.
     pub(crate) fx_automation: Option<crate::fx_automation_ui::FxAutomationChooser>,
     pub(crate) defaults_watch: crate::track_defaults::DefaultsWatch,
@@ -425,6 +438,8 @@ pub struct BananaApp {
     allow_close: bool,
     /// Close the window at the end of this frame.
     exit_now: bool,
+    /// macOS: a right click made of a Control-click, its release to come.
+    mac_control_click: bool,
     title: String,
     /// The audio output's failure noted down last (`logs::audio`).
     last_audio_error: Option<String>,
@@ -434,7 +449,10 @@ pub struct BananaApp {
     pub(crate) timeline_top: bool,
     /// Options › Preferences › Display: the interface type and the scale
     /// last given to egui.
-    look_applied: Option<theme::Interface>,
+    look_applied: Option<(theme::Interface, i8)>,
+    /// The interface brightness Options › Preferences shows while open
+    /// (its slider's, not kept until OK).
+    pub(crate) look_preview: Option<i8>,
     zoom_applied: Option<f32>,
     /// "Automatically hide docking area": the docking area shows now, and
     /// since when the pointer has been away from it.
@@ -521,6 +539,14 @@ pub struct BananaApp {
     pub(crate) to_clipboard: Option<String>,
     /// The Surround Panner's state.
     pub(crate) surround_view: crate::tabs::surround::SurroundView,
+    /// An update's installer, downloaded: it runs as BananaV closes
+    /// (`updates`).
+    pub(crate) install_on_exit: Option<PathBuf>,
+    /// Playback asked for, waiting for the preview's first frame (where it
+    /// starts, and since when): picture and sound start together.
+    pub(crate) preroll: Option<(Tick, Instant)>,
+    /// The main window's frame count (`cumulative_pass_nr`), this frame.
+    pub(crate) pass: u64,
     /// Media info of dragged files (probed once), so the timeline can show
     /// where and how long they will be.
     drag_probe: std::collections::HashMap<PathBuf, Option<MediaInfo>>,
@@ -555,6 +581,39 @@ pub(crate) struct OsDrag {
     pub dropped: bool,
 }
 
+/// The new tracks media let go below the tracks lands on, each made by
+/// the first media that needs it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DropTracks {
+    video: Option<TrackId>,
+    audio: Option<TrackId>,
+}
+
+impl DropTracks {
+    /// The new track of `kind`, made at the bottom when there is none yet
+    /// (a video one above the new audio one).
+    pub(crate) fn track(&mut self, p: &mut Project, kind: TrackKind) -> TrackId {
+        let made = match kind {
+            TrackKind::Video => self.video,
+            TrackKind::Audio => self.audio,
+        };
+        if let Some(t) = made.filter(|&t| p.track(t).is_some()) {
+            return t;
+        }
+        let t = p.add_track(kind);
+        let at = match kind {
+            TrackKind::Video => self.audio.and_then(|a| p.track_index(a)),
+            TrackKind::Audio => None,
+        };
+        let _ = p.move_track_to(t, at.unwrap_or(p.tracks.len()));
+        match kind {
+            TrackKind::Video => self.video = Some(t),
+            TrackKind::Audio => self.audio = Some(t),
+        }
+        t
+    }
+}
+
 impl std::fmt::Debug for BananaApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BananaApp")
@@ -580,6 +639,7 @@ impl BananaApp {
             snapping: true,
             quantize: true,
             loop_enabled: false,
+            hidden_selection: None,
             play_rate: 1.0,
             tool: Tool::Edit,
             media_drag: None,
@@ -587,6 +647,7 @@ impl BananaApp {
             clipboard: None,
             timeline: TimelineView::default(),
             preview: PreviewState::default(),
+            transform_panel: Default::default(),
             trimmer: TrimmerState::default(),
             explorer: ExplorerState::new(),
             media_window: Default::default(),
@@ -679,25 +740,28 @@ impl BananaApp {
             header_buttons_dialog: None,
             transport_dialog: None,
             new_track_render: None,
+            drop_tracks: None,
             fx_automation: None,
             defaults_watch: Default::default(),
             generated_copies: None,
             duck_dialog: None,
             transition_previews: Default::default(),
             ofx: crate::ofx::OfxUi::new(ctx.clone()),
-            vst: Default::default(),
+            vst: crate::vst_ui::VstUi::new(ctx.clone()),
             prerender_dialog: None,
             proxy_checks: Vec::new(),
             released_media: None,
             removable_copies: Vec::new(),
             allow_close: false,
             exit_now: false,
+            mac_control_click: false,
             title: String::new(),
             last_audio_error: None,
             show_toolbar: true,
             show_status_bar: true,
             timeline_top: false,
             look_applied: None,
+            look_preview: None,
             zoom_applied: None,
             dock_peek: false,
             docks_hidden: None,
@@ -746,6 +810,10 @@ impl BananaApp {
             pasted_text: None,
             to_clipboard: None,
             surround_view: Default::default(),
+            install_on_exit: None,
+            preroll: None,
+            pass: 0,
+            floating_panels: Vec::new(),
         };
         // Unit tests never see it (on a clean computer it would open).
         app.menu_dialogs.welcome.open = app.settings.show_welcome && !cfg!(test);
@@ -762,11 +830,13 @@ impl BananaApp {
         app.engine.set_gpu(app.settings.video_gpu.clone());
         bv_engine::Engine::set_render_threads(app.settings.prefs.render_threads as usize);
         let prefs = &app.settings.prefs;
+        bv_engine::Engine::set_dim_db(prefs.dim_db as f32);
         bv_engine::Engine::set_peak_files(!prefs.no_peak_files, prefs.hide_peak_files);
         app.engine
             .set_ram_preview((app.settings.prefs.ram_preview_mb as usize) << 20);
         bv_engine::Engine::set_keep_bypassed_fx(prefs.keep_bypassed_fx);
         bv_engine::Engine::set_aces_on_gpu(prefs.aces_on_gpu);
+        bv_bridge::set_enabled(prefs.vst_32bit);
         bv_engine::Engine::set_true_peak_blocking(app.settings.loudness.blocking);
         app.apply_audio_prefs();
         let p = &app.settings.prefs;
@@ -812,13 +882,14 @@ impl BananaApp {
                 self.generator_color = None;
                 let f = |v: u8| v as f32 / 255.0;
                 let at = self.cursor;
-                self.add_generator(
-                    bv_timeline::Generator::SolidColor {
-                        rgba: [f(r), f(g), f(b), f(a)],
-                    },
-                    at,
-                    None,
-                );
+                // Solid Color's plug-in in that color.
+                let solid = bv_timeline::Generator::SolidColor {
+                    rgba: [f(r), f(g), f(b), f(a)],
+                };
+                let solid = solid
+                    .as_plugin(self.project().settings.width)
+                    .unwrap_or(solid);
+                self.add_generator(solid, at, None);
             }
         }
     }
@@ -881,6 +952,67 @@ impl BananaApp {
     /// written in the plug-ins' log.
     fn follow_plugin_crashes(&mut self) {
         let mut told: Vec<std::path::PathBuf> = Vec::new();
+        // VST 2 plug-ins (BananaV's own compatibility; 32-bit ones in its
+        // bridge): those that crashed let the sound through.
+        for crash in bv_vst2::take_crashes() {
+            crate::logs::log(
+                crate::logs::LogKind::Plugins,
+                &[format!(
+                    "{} ({}) crashed ({}, exception {:#010x} at {}) and was switched off",
+                    crash.module.display(),
+                    crash.effect,
+                    crash.doing,
+                    crash.code,
+                    crash.at
+                )],
+            );
+            if told.contains(&crash.module) {
+                continue;
+            }
+            let name = if crash.effect.is_empty() {
+                crash.module.file_stem().map_or_else(
+                    || crash.module.display().to_string(),
+                    |s| s.to_string_lossy().into_owned(),
+                )
+            } else {
+                crash.effect.clone()
+            };
+            self.report_error(trf!(
+                "The plug-in {} stopped working and was turned off until BananaV restarts.",
+                name
+            ));
+            told.push(crash.module);
+        }
+        // VST 3 plug-ins: those that crashed let the sound through.
+        for crash in bv_vst3::take_crashes() {
+            crate::logs::log(
+                crate::logs::LogKind::Plugins,
+                &[format!(
+                    "{} ({}) crashed ({}, exception {:#010x} at {}) and was switched off",
+                    crash.module.display(),
+                    crash.effect,
+                    crash.doing,
+                    crash.code,
+                    crash.at
+                )],
+            );
+            if told.contains(&crash.module) {
+                continue;
+            }
+            let name = if crash.effect.is_empty() {
+                crash.module.file_stem().map_or_else(
+                    || crash.module.display().to_string(),
+                    |s| s.to_string_lossy().into_owned(),
+                )
+            } else {
+                crash.effect.clone()
+            };
+            self.report_error(trf!(
+                "The plug-in {} stopped working and was turned off until BananaV restarts.",
+                name
+            ));
+            told.push(crash.module);
+        }
         for crash in bv_ofx::take_crashes() {
             crate::logs::log(
                 crate::logs::LogKind::Plugins,
@@ -947,9 +1079,17 @@ impl BananaApp {
         let timeline = |p: &PathBuf| {
             crate::media_files::kind_of(p) == Some(crate::media_files::FileKind::Timeline)
         };
+        // macOS hands the files Finder opened BananaV with apart.
+        let opened = bv_platform::take_opened_files();
         let given = args
             .map(PathBuf::from)
+            .chain(opened.iter().cloned())
             .find(|p| p.is_file() || (p.is_dir() && timeline(p)));
+        for other in opened.iter().filter(|&p| Some(p) != given.as_ref()) {
+            if other.is_file() {
+                self.open_file(other.clone());
+            }
+        }
         match given {
             Some(path) => self.open_file(path),
             None => {
@@ -965,7 +1105,23 @@ impl BananaApp {
         self.check_associations();
         // OFX plug-ins: the cache's at once, new ones in the background.
         self.ofx.scan(&self.settings.ofx_folders);
+        // VST plug-ins too: each VST 3 module looked at in a BananaV of its
+        // own, the cache's at once.
+        self.vst.search(&self.settings.prefs.vst_folders);
+        // A 32-bit plug-in's editor lives in this thread's windows: while
+        // it waits for its bridge, this thread answers the bridge's windows.
+        bv_bridge::windows_here();
         self.open_from_env();
+        // The last start ended early: this one draws through another
+        // graphics interface (`safe_start`).
+        if let Some(notice) = crate::safe_start::notice() {
+            self.notify(notice);
+        }
+        // A newer BananaV, asked of GitHub in the background: a window only
+        // when there is one (Options › Preferences › General).
+        if self.settings.prefs.check_updates {
+            self.check_updates(false);
+        }
     }
 
     /// The main window as BananaV was left — its windows' layout, the
@@ -977,6 +1133,7 @@ impl BananaApp {
             if let Ok(dock) = crate::layouts::dock_from_value(&s.dock) {
                 self.dock = Some(dock);
                 self.timeline_top = s.timeline_top;
+                self.floating_panels = s.floating.clone();
                 self.layout_slot = s
                     .layout_slot
                     .filter(|&n| self.settings.layouts.get(n).is_some_and(Option::is_some));
@@ -1015,6 +1172,7 @@ impl BananaApp {
             hide_toolbar: !self.show_toolbar,
             hide_status_bar: !self.show_status_bar,
             timeline: self.timeline.switches(),
+            floating: self.floating_panels.clone(),
         })
     }
 
@@ -1187,13 +1345,54 @@ impl BananaApp {
     // ---- transporte ------------------------------------------------------
 
     pub(crate) fn is_playing(&self) -> bool {
-        self.engine.is_playing() || self.held_playback
+        self.engine.is_playing() || self.held_playback || self.preroll.is_some()
+    }
+
+    /// Whether playback from `from` waits for the preview's frame there:
+    /// the preview is showing (it asked for a frame lately) and does not
+    /// have that frame exact yet — a long-GOP recording decodes for a
+    /// second after a seek, and the sound went on alone meanwhile.
+    fn preview_lags(&self, from: Tick) -> bool {
+        let rate = self.frame_rate();
+        // A preview that never asked (none drawn: tests, a layout without
+        // it) is not waited for.
+        let shown = self.preview.requested_at > 0 && self.preview.requested_at + 2 >= self.pass;
+        let ready = self
+            .engine
+            .preview_frame()
+            .is_some_and(|f| f.exact && f.time == rate.snap_floor(from));
+        shown && !ready
+    }
+
+    /// Playback waiting for its first frame: it starts once the preview
+    /// has it exact (or after `PREROLL` at most).
+    fn preroll_frame(&mut self, ctx: &egui::Context) {
+        const PREROLL: Duration = Duration::from_secs(3);
+        let Some((from, since)) = self.preroll else {
+            return;
+        };
+        if self.preview_lags(from) && since.elapsed() < PREROLL {
+            ctx.request_repaint_after(Duration::from_millis(15));
+            return;
+        }
+        self.preroll = None;
+        self.engine.play(from, self.play_options());
+        if let AudioStatus::Unavailable(why) = self.engine.audio_status() {
+            let why = why.clone();
+            self.notify(trf!("No audio ({}); using the system clock.", why));
+        }
     }
 
     /// The playback needle grabbed while playing: playback waits (the
     /// needle follows the mouse and the preview shows its frames) until it
     /// is let go.
     pub(crate) fn hold_playback(&mut self) {
+        // Still waiting for its first frame: held where it would start.
+        if let Some((from, _)) = self.preroll.take() {
+            self.playhead = Some(from);
+            self.held_playback = true;
+            return;
+        }
         if self.held_playback || !self.engine.is_playing() {
             return;
         }
@@ -1292,6 +1491,7 @@ impl BananaApp {
             return;
         }
         if self.is_playing() {
+            self.preroll = None;
             let held = std::mem::take(&mut self.held_playback).then_some(self.playhead);
             if let Some(pos) = self.engine.stop().or(held.flatten()) {
                 self.cursor = self.frame_rate().snap_floor(pos);
@@ -1327,10 +1527,16 @@ impl BananaApp {
         };
         self.engine.set_project(self.history.current());
         self.playhead = Some(from);
-        self.engine.play(from, self.play_options());
-        if let AudioStatus::Unavailable(why) = self.engine.audio_status() {
-            let why = why.clone();
-            self.notify(trf!("No audio ({}); using the system clock.", why));
+        // Picture and sound start together: while the preview still
+        // decodes the first frame, playback waits for it.
+        self.preroll = Some((from, Instant::now()));
+        if !self.preview_lags(from) {
+            self.preroll = None;
+            self.engine.play(from, self.play_options());
+            if let AudioStatus::Unavailable(why) = self.engine.audio_status() {
+                let why = why.clone();
+                self.notify(trf!("No audio ({}); using the system clock.", why));
+            }
         }
     }
 
@@ -1342,6 +1548,7 @@ impl BananaApp {
             self.engine.stop();
         }
         self.held_playback = false;
+        self.preroll = None;
         self.playhead = None;
         self.scrub_rate = 0.0;
     }
@@ -1367,8 +1574,10 @@ impl BananaApp {
         let t = t.max(Tick::ZERO);
         self.cursor = t;
         if self.is_playing() {
-            self.engine.play(t, self.play_options());
-            self.playhead = Some(t);
+            // From there once its frame is in (see `start_playback`).
+            self.engine.stop();
+            self.held_playback = false;
+            self.start_playback(t);
         }
     }
 
@@ -1610,7 +1819,16 @@ impl BananaApp {
 
     pub(crate) fn set_loop_region(&mut self, r: Option<TimeRange>) {
         self.modify(|p| p.loop_region = r);
+        self.hidden_selection = None;
         self.restart_if_playing();
+    }
+
+    /// The time selection the timeline shows: the loop region, unless a
+    /// click elsewhere let go of it (it then shows only in its bar).
+    pub(crate) fn shown_selection(&self) -> Option<TimeRange> {
+        self.project()
+            .loop_region
+            .filter(|r| r.duration > Tick::ZERO && Some(*r) != self.hidden_selection)
     }
 
     /// Selects the event and the members of its group (with `add`, as
@@ -1684,6 +1902,17 @@ impl BananaApp {
     pub(crate) fn prune_selection(&mut self) {
         let p = self.history.current();
         self.selection.retain(|id| p.clip(*id).is_some());
+    }
+
+    /// Media let go below the tracks: what `f` places with no track given
+    /// lands on new tracks at the bottom, a video one and an audio one
+    /// made by the first media that needs each and shared by the next
+    /// ones, as VEGAS's.
+    pub(crate) fn on_new_tracks<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.drop_tracks = Some(DropTracks::default());
+        let r = f(self);
+        self.drop_tracks = None;
+        r
     }
 
     /// Coloca a mídia na timeline. `track` é a trilha onde ela foi solta (ou
@@ -1766,15 +1995,20 @@ impl BananaApp {
             self.settings.prefs.crop_video
                 && matches!(info.source, bv_timeline::MediaSource::File { .. })
         };
+        let mut fresh = self.drop_tracks;
         let ids = self.edit(|p| {
             let dropped_kind = track.and_then(|t| p.track(t)).map(|t| t.kind);
             // On the track it was given (an adjustment track's too, as
-            // VEGAS's), else on the first of its kind that is not one.
-            let pick = |p: &mut Project, kind: TrackKind| -> TrackId {
+            // VEGAS's), else on the first of its kind that is not one; let
+            // go below the tracks, on new ones.
+            let mut pick = |p: &mut Project, kind: TrackKind| -> TrackId {
                 if dropped_kind == Some(kind)
                     && let Some(t) = track
                 {
                     return t;
+                }
+                if let Some(fresh) = fresh.as_mut() {
+                    return fresh.track(p, kind);
                 }
                 p.tracks
                     .iter()
@@ -1795,6 +2029,9 @@ impl BananaApp {
             }
             Ok::<_, bv_timeline::EditError>(ids)
         });
+        if ids.is_some() && self.drop_tracks.is_some() {
+            self.drop_tracks = fresh;
+        }
         // A stereo file as two mono events, panned hard left and right
         // (Options › Preferences › General: "Import stereo as dual mono").
         let ids = ids.map(|ids| {
@@ -2142,7 +2379,11 @@ impl BananaApp {
             .and_then(|s| Project::from_json(&s).map_err(|e| e.to_string()))
             .and_then(|p| p.check_invariants().map(|_| p));
         match loaded {
-            Ok(p) => {
+            Ok(mut p) => {
+                // VST 3 effects read from another editor's project whose
+                // plug-in was not found then: looked for again.
+                let folders = self.settings.prefs.vst_folders.clone();
+                crate::vst::find_wanted(&mut p, &folders);
                 self.stop();
                 self.closing_project();
                 self.history.reset(p.clone());
@@ -2289,13 +2530,23 @@ impl BananaApp {
     // ---- layout ------------------------------------------------------------
 
     pub(crate) fn is_tab_open(&self, tab: Tab) -> bool {
-        self.dock
-            .as_ref()
-            .is_some_and(|d| d.find_tab(&tab).is_some())
+        self.floating_panels.contains(&tab)
+            || self
+                .dock
+                .as_ref()
+                .is_some_and(|d| d.find_tab(&tab).is_some())
     }
 
     /// Mostra (ou foca) uma aba; com `toggle`, fecha se já estiver aberta.
     pub(crate) fn show_tab(&mut self, tab: Tab, toggle: bool) {
+        // Floating in a window of its own: closed with `toggle`, else left
+        // there.
+        if self.floating_panels.contains(&tab) {
+            if toggle {
+                self.floating_panels.retain(|t| *t != tab);
+            }
+            return;
+        }
         let Some(dock) = &mut self.dock else { return };
         match dock.find_tab(&tab) {
             Some(path) if toggle => {
@@ -2304,6 +2555,9 @@ impl BananaApp {
             Some(path) => {
                 let _ = dock.set_active_tab(path);
             }
+            // The Transform window beside the Explorer and the other
+            // browsers.
+            None if tab == Tab::Transform => dock::open_beside_browsers(dock, tab),
             None => dock::open_tab(dock, tab),
         }
     }
@@ -2443,8 +2697,13 @@ impl BananaApp {
             .map_or(tr("Untitled").to_string(), |s| {
                 s.to_string_lossy().to_string()
             });
-        let mut title = format!("{name}{} — BananaV", if self.is_dirty() { "*" } else { "" });
-        // While rendering, its progress first ("3% - Untitled — BananaV").
+        // The version too, as "Untitled — BananaV 0.3.0".
+        let mut title = format!(
+            "{name}{} — BananaV {}",
+            if self.is_dirty() { "*" } else { "" },
+            env!("CARGO_PKG_VERSION")
+        );
+        // While rendering, its progress first ("3% - Untitled — BananaV 0.3.0").
         if let Some(p) = self.engine.render_progress()
             && !p.finished
         {
@@ -2669,7 +2928,9 @@ impl BananaApp {
         let mut p = Project::default();
         let v1 = p.tracks[0].id;
         let a1 = p.tracks[1].id;
+        // BananaV's OFX generators drawing them (the tones have none).
         let make = |p: &mut Project, g: Generator| {
+            let g = g.as_plugin(p.settings.width).unwrap_or(g);
             let info = MediaInfo::generated(g, &p.settings);
             p.add_media(info)
         };
@@ -2742,6 +3003,72 @@ impl BananaApp {
             }
             None => false,
         }
+    }
+
+    /// Opens Options › Envelope Appearance… with `look` (line width,
+    /// reach, point size, squares) in use, as if just set (screen tests;
+    /// nothing is saved unless OK is pressed).
+    pub fn envelope_look_for_review(&mut self, look: (f32, f32, f32, bool)) {
+        self.open_envelope_look();
+        let (line, grab, point, square) = look;
+        self.settings.prefs.envelope_look = crate::envelope_look::EnvelopeLook {
+            line,
+            grab,
+            point,
+            square,
+        };
+    }
+
+    /// The update window as it shows a newer `version` (screen tests: no
+    /// request is made).
+    pub fn update_for_review(&mut self, version: &str) {
+        self.menu_dialogs.more.updates = Some(crate::updates::UpdateDialog::found(version));
+    }
+
+    /// Whether the engine plays (its sound started), for tests: a playback
+    /// waiting for its first frame does not yet.
+    pub fn playing_for_review(&self) -> bool {
+        self.engine.is_playing()
+    }
+
+    /// The time selection let go of, as by a click elsewhere on the
+    /// timeline: its loop region shows in its bar alone (screen tests).
+    pub fn hide_selection_for_review(&mut self) {
+        self.hidden_selection = self.project().loop_region;
+    }
+
+    /// The Transform mode on and its window open beside the browsers
+    /// (screen tests).
+    pub fn transform_window_for_review(&mut self) {
+        self.preview.transform = true;
+        self.show_tab(crate::dock::Tab::Transform, false);
+    }
+
+    /// Brings the Video Preview to the front (for tests).
+    pub fn show_preview_for_review(&mut self) {
+        self.show_tab(crate::dock::Tab::Preview, false);
+    }
+
+    /// Shows (or brings to the front) the `n`-th of the docked windows,
+    /// for the frame budget's test; its title, `None` past the last.
+    pub fn show_window_for_review(&mut self, n: usize) -> Option<&'static str> {
+        let tab = *crate::dock::Tab::ALL.get(n)?;
+        self.show_tab(tab, false);
+        Some(tab.title())
+    }
+
+    /// Different preview frames shown a second lately while playing (the
+    /// preview's status line), for tests.
+    pub fn preview_rate_for_review(&self) -> f64 {
+        self.preview.shown_rate().unwrap_or(0.0)
+    }
+
+    /// The preview's latest frame: its time (seconds) and whether it is
+    /// exact (for tests).
+    pub fn preview_shown_for_review(&self) -> Option<(f64, bool)> {
+        self.engine
+            .preview_frame()
+            .map(|f| (f.time.as_seconds_f64(), f.exact))
     }
 
     /// Stretches the selected events (and their groups) to end at `seconds`
@@ -2875,6 +3202,7 @@ impl BananaApp {
             .map(|f| vec![f.to_path_buf()])
             .unwrap_or_default();
         prefs.vst_left_out.clear();
+        prefs.vst_effects_off.clear();
         let p = self.project();
         let Some(clip) = p
             .tracks
@@ -3619,6 +3947,48 @@ impl BananaApp {
         });
     }
 
+    /// The first video track's composite level painted with a stroke as
+    /// the one measured (for screen tests): from 1 s, 90 steps of 0.08 s,
+    /// down and up 21 rows of 65 every 14 steps and 30 rows down from step
+    /// 41 to 52; `thin`: let go and thinned, 20 pixels of tolerance being
+    /// 3⅓ steps as when it was measured.
+    pub fn painted_envelope_for_review(&mut self, thin: bool) {
+        use bv_timeline::EnvelopeKind::CompositeLevel;
+        let Some(track) = self
+            .project()
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .map(|t| t.id)
+        else {
+            return;
+        };
+        let step = Tick::from_seconds_f64(0.08);
+        let start = Tick::from_seconds_f64(1.0);
+        let mut stroke = bv_timeline::envelope_paint::Stroke::new(start);
+        for k in 1..=90i64 {
+            let f = k % 14;
+            let dy = if (41..=52).contains(&k) {
+                30
+            } else {
+                3 * f.min(14 - f)
+            };
+            stroke
+                .moves
+                .push((start + Tick(step.0 * k), (65 - dy) as f32 / 65.0));
+        }
+        let tolerance = thin.then_some(Tick(step.0 * 20 / 6));
+        let curve = self.settings.prefs.new_envelope_curve(CompositeLevel);
+        self.modify(|p| {
+            if let Some(t) = p.track_by_id_mut(track) {
+                t.envelopes.retain(|e| e.kind != CompositeLevel);
+                t.envelopes
+                    .push(bv_timeline::Envelope::with_curve(CompositeLevel, curve));
+            }
+            let _ = p.paint_envelope(track, CompositeLevel, &stroke, tolerance);
+        });
+    }
+
     /// The Loudness Meters open, showing readings as if a program had
     /// played (LUFS, LU and dBTP), with `atsc` and `wide` as their mode and
     /// scale, on settings that are never saved (for screen tests).
@@ -3978,6 +4348,12 @@ impl BananaApp {
 
     /// Abre uma janela do clipe selecionado (para testes de tela e automação):
     /// `"pancrop"`, `"fx"`, `"fx-audio"` ou `"extras"`.
+    /// The Plug-In Chooser's search set to `text`; whether it was open
+    /// (screen tests).
+    pub fn chooser_search_for_review(&mut self, text: &str) -> bool {
+        self.clip_windows.chooser_search_for_review(text)
+    }
+
     pub fn open_clip_window(&mut self, which: &str) {
         let p = self.project();
         let video = self.primary_clip();
@@ -4009,6 +4385,12 @@ impl BananaApp {
         let window = ui.max_rect();
         let rendering = self.dialogs.rendering.is_some();
         crate::floating::set_modal(&ctx, &self.modal_dialogs());
+        self.system_requests();
+        self.pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+        self.preroll_frame(&ctx);
+        // Until the start settled: it is crossed out once the window drew
+        // and the graphics card is ready.
+        crate::safe_start::frame(&self.engine);
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
             if rendering {
@@ -4207,6 +4589,8 @@ impl BananaApp {
             self.follow_dock_peek(&ctx, area, dock::timeline_rect(&dock));
         }
         self.dock = Some(dock);
+        // Windows floating in windows of their own.
+        dock::floating_windows(&ctx, self);
         self.keep_session(&ctx);
         // The VU/PPM meters: computed while the Mixing Console shows them.
         let vu = self
@@ -4348,7 +4732,7 @@ impl BananaApp {
         crate::title_bar::resize_edges(ui, window);
     }
 
-    /// The window's title ("Untitled* — BananaV"), which the title bar
+    /// The window's title ("Untitled* — BananaV 0.3.0"), which the title bar
     /// shows.
     pub(crate) fn window_title(&self) -> &str {
         &self.title
@@ -4470,7 +4854,38 @@ fn media_stamps(p: &Project) -> Vec<(String, Option<std::time::SystemTime>, u64)
         .collect()
 }
 
+impl BananaApp {
+    /// What the system asked (macOS: Quit — the menu's, the Dock's, logging
+    /// out — and files Finder opens): Quit as File › Exit, after the
+    /// question about unsaved changes; a project as File › Open, media
+    /// imported.
+    fn system_requests(&mut self) {
+        // While a render runs nothing closes, as the window's close button
+        // does then.
+        if bv_platform::take_quit_request() && self.dialogs.rendering.is_none() {
+            self.request(Pending::Exit);
+        }
+        for path in bv_platform::take_opened_files() {
+            use crate::media_files::{FileKind, kind_of};
+            match kind_of(&path) {
+                Some(FileKind::Project | FileKind::Timeline | FileKind::VegProject) => {
+                    self.request(Pending::OpenPath(path))
+                }
+                _ => self.open_file(path),
+            }
+        }
+    }
+}
+
 impl eframe::App for BananaApp {
+    /// macOS: a Control-click is a right click, BananaV's Ctrl the Command
+    /// key (`keymap::mac_control_click`).
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if cfg!(target_os = "macos") {
+            crate::keymap::mac_control_click(raw_input, &mut self.mac_control_click);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         self.frame(ui);
@@ -4489,6 +4904,10 @@ impl eframe::App for BananaApp {
         self.autosave_cleanup();
         bv_engine::forget_local_copies();
         let _ = std::fs::remove_dir_all(removable_folder(&self.settings.prefs));
+        // An update downloaded: its installer takes over.
+        if let Some(setup) = self.install_on_exit.take() {
+            crate::updates::run_installer(&setup);
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Unsharp Mask: VEGAS's. The picture sharpened: each pixel moved away
 //! from the picture blurred around it, so edges and detail stand out.
 //!
-//! VEGAS's math: the picture blurred by VEGAS's Gaussian
+//! As VEGAS's renders measure: the picture blurred as VEGAS blurs
 //! (`recursive_gauss`) — its radius Radius × the frame's longer side, up
 //! and down that over the pixel aspect —, the picture's edge pixels held
 //! beyond it; each channel, alpha too, of the values the host hands over
@@ -9,7 +9,7 @@
 //! ones) moves away from the blurred one by Amount × their difference,
 //! unless the result is within Threshold of the blurred one, which keeps
 //! the pixel's; nothing is clipped (in 32-bit projects what passes white
-//! or black stays, as VEGAS's float effects keep it; 8-bit projects hold
+//! or black stays, as VEGAS's effects keep it there; 8-bit projects hold
 //! each effect's result within 0–1, as VEGAS's 8-bit pictures). Amount
 //! goes past its slider's 0–1 as VEGAS's does: its presets go up to 4
 //! (Extreme) and down to −3 (Outline Edges); far below 0 the picture turns

@@ -11,12 +11,12 @@ use crate::i18n::{tr, trc};
 use bv_core::{Tick, TimeRange};
 use bv_timeline::{MarkerId, Project};
 
-use super::bars::BarDrag;
+use super::bars::{self, BarDrag, BarSpot};
 use super::lanes::ContextTarget;
 use super::marker_tool::{self, MarkerBar};
 use super::{Layout, TimelineView};
 use crate::app::BananaApp;
-use crate::egui::{self, Align2, Color32, CursorIcon, FontId, Rect, Sense, Shape, Stroke, pos2};
+use crate::egui::{self, Align2, Color32, FontId, Rect, Sense, Shape, Stroke, pos2};
 use crate::theme;
 
 /// The bars' height.
@@ -147,8 +147,10 @@ fn cd_interact(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut BananaApp, 
     let pointer = ui.input(|i| i.pointer.latest_pos());
     let bar = ui.interact(l.cd_bar, ui.id().with("barra-cd"), Sense::click_and_drag());
     let hit = pointer.and_then(|p| cd_tag_at(view, l, &project, p.x));
+    // A tag moves when dragged: the arrow with ↔, as VEGAS's flags (while
+    // it is dragged too: see `bars::interact`).
     if bar.hovered() && hit.is_some() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        bars::show(ui.ctx(), BarSpot::Movable);
     }
     if bar.drag_started()
         && let Some(o) = ui.input(|i| i.pointer.press_origin())
@@ -317,7 +319,7 @@ fn command_interact(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut Banana
     );
     let hit = pointer.and_then(|p| command_at(view, l, &project, p.x));
     if bar.hovered() && hit.is_some() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        bars::show(ui.ctx(), BarSpot::Movable);
     }
     if bar.drag_started()
         && let Some(o) = ui.input(|i| i.pointer.press_origin())

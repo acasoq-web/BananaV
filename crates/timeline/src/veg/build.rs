@@ -49,7 +49,11 @@ fn audio_fx(chain: &[super::read::DocAudioFx], unread: bool, left: &mut usize) -
     chain
         .iter()
         .filter_map(|x| {
-            let mut e = super::audio::effect(x.class, &x.settings);
+            // BananaV's own; else a VST 3 plug-in, found among those
+            // installed later.
+            let mut e = super::audio::effect(x.class, &x.settings)
+                .or_else(|| super::audio::vst3(x.class, &x.name, &x.settings))
+                .or_else(|| super::audio::vst2(x.class, &x.name, &x.settings));
             *left += usize::from(e.is_none());
             if let Some(e) = e.as_mut().filter(|_| x.bypass) {
                 e.enabled = false;
@@ -370,6 +374,65 @@ fn media_info(
     info
 }
 
+/// A pixel aspect as a fraction: the smallest denominator that gives it
+/// (10/11 for 0.9090…), else in ten-thousandths.
+fn aspect_of(x: f64) -> PixelAspect {
+    if !(x.is_finite() && x > 0.0) || (x - 1.0).abs() < 1e-9 {
+        return PixelAspect::SQUARE;
+    }
+    (1..=1000u32)
+        .find_map(|den| {
+            let num = (x * f64::from(den)).round();
+            ((num / f64::from(den) - x).abs() < 1e-9 && num >= 1.0)
+                .then(|| PixelAspect::new(num as u32, den))
+        })
+        .unwrap_or_else(|| PixelAspect::new((x * 10_000.0).round() as u32, 10_000))
+}
+
+/// A generated media as BananaV's: the plug-in `effect` finds for its
+/// generator, its length, its picture's size and pixel aspect, its fields,
+/// alpha and rotation (its size the turned picture's).
+fn generated_info(
+    m: &DocMedia,
+    s: &ProjectSettings,
+    effect: &dyn Fn(&DocEffect, FrameRate) -> Option<Effect>,
+) -> Option<MediaInfo> {
+    use crate::model::{AlphaChannel, MediaRotation};
+    let g = m.generator.as_ref()?;
+    let fx = effect(g.effects.first()?, s.frame_rate)?.plugin?;
+    let mut info = MediaInfo::generated(Generator::Plugin(fx), s);
+    info.duration = ticks(g.duration).max(s.frame_rate.frame_duration());
+    if let Some(v) = info.video.as_mut() {
+        let rotation = match g.rotation {
+            1 => MediaRotation::Clockwise,
+            2 => MediaRotation::Inverted,
+            3 => MediaRotation::Counterclockwise,
+            _ => MediaRotation::Original,
+        };
+        let (w, h) = (g.width.max(8) as u32, g.height.max(8) as u32);
+        (v.width, v.height) = if rotation.quarters() % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        };
+        v.pixel_aspect = aspect_of(g.pixel_aspect);
+        v.field_order = match g.field_order {
+            1 => bv_core::FieldOrder::UpperFirst,
+            2 => bv_core::FieldOrder::LowerFirst,
+            _ => bv_core::FieldOrder::Progressive,
+        };
+        // Premultiplied, a generator's own, is the media's way already.
+        v.reading.alpha = match g.alpha {
+            0 => AlphaChannel::None,
+            1 => AlphaChannel::Straight,
+            3 => AlphaChannel::PremultipliedDirty,
+            _ => AlphaChannel::Undefined,
+        };
+        v.reading.rotation = rotation;
+    }
+    Some(info)
+}
+
 /// An audio event's channels from the file's number: as they are, one
 /// side switched off, mixed to one or swapped (the rest, a side muted, has no
 /// place here).
@@ -397,12 +460,6 @@ fn video_resample(flags: u32) -> Option<crate::model::ResampleMode> {
     } else {
         Some(R::Disable)
     }
-}
-
-/// A transition's progress envelope that says nothing: straight from 0 to 1.
-fn progress_is_straight(e: &DocEnvelope) -> bool {
-    matches!(e.points.as_slice(),
-        [(0, a, 1), (1_000_000, b, _)] if a.abs() < 1e-6 && (b - 1.0).abs() < 1e-6)
 }
 
 /// Makes the project. `found[i]` is `doc.media[i]` probed (`None`: not
@@ -466,7 +523,12 @@ pub fn build(
     }
     let mut media: HashMap<u32, MediaId> = HashMap::new();
     for (i, m) in doc.media.iter().enumerate() {
+        // A generated media: BananaV's generator of it, if it has one
+        // (its events are left out otherwise).
         if m.generated {
+            if let Some(info) = generated_info(m, &p.settings, effect) {
+                media.insert(m.id, p.add_media(info));
+            }
             continue;
         }
         let probed = found.get(i).cloned().flatten();
@@ -539,6 +601,8 @@ pub fn build(
             c.fade_out = ticks(e.fade_out.max(0)).min(duration);
             c.fade_in_curve = fade_curve(e.curves[0]);
             c.fade_out_curve = fade_curve(e.curves[1]);
+            c.fade_in_reciprocal = Some(fade_curve(e.curves[2]));
+            c.fade_out_reciprocal = Some(fade_curve(e.curves[3]));
             c.group = groups.get(&e.id).copied();
             if kind == TrackKind::Audio && e.pitch.abs() > 1e-9 {
                 c.pitch = e.pitch as f32;
@@ -602,24 +666,40 @@ pub fn build(
                             None => out.effects_left += 1,
                         }
                     }
-                    out.transitions_left += usize::from(e.transition_out.is_some());
-                    // Its progress over the fade: the file's places are its
-                    // parts of a million.
-                    if let Some(env) = &e.progress_in
-                        && e.transition_in.is_some()
-                        && !progress_is_straight(env)
-                    {
+                    if let Some(t) = &e.transition_out {
+                        match effect(t, rate).and_then(|x| x.plugin) {
+                            Some(made) => {
+                                c.out_transition = Some(Box::new(crate::model::OutTransition {
+                                    fx: Some(made),
+                                    bypass: t.bypass,
+                                    ..Default::default()
+                                }));
+                            }
+                            None => out.effects_left += 1,
+                        }
+                    }
+                    // Their progress: one envelope over the event, the fade
+                    // in's part of it and the fade out's — the file's places
+                    // are each fade's parts of a million.
+                    let length = e.length.max(1);
+                    let (fade_in, fade_out) = (e.fade_in.max(0), e.fade_out.max(0));
+                    let mut points = Vec::new();
+                    for (env, from, span) in [
+                        (&e.progress_in, 0, fade_in),
+                        (&e.progress_out, length - fade_out, fade_out),
+                    ] {
+                        let Some(env) = env.as_ref().filter(|_| span > 0) else {
+                            continue;
+                        };
+                        points.extend(env.points.iter().map(|&(place, value, curve)| {
+                            let share = place as f64 / 1_000_000.0;
+                            (from + (span as f64 * share).round() as i64, value, curve)
+                        }));
+                    }
+                    if !points.is_empty() {
                         let across = DocEnvelope {
-                            kind: env.kind,
-                            points: env
-                                .points
-                                .iter()
-                                .map(|&(place, value, curve)| {
-                                    let share = place as f64 / 1_000_000.0;
-                                    let at = (e.fade_in.max(0) as f64 * share).round() as i64;
-                                    (at, value, curve)
-                                })
-                                .collect(),
+                            kind: TRANSITION_PROGRESS,
+                            points,
                         };
                         c.envelopes
                             .extend(envelope(&across, EnvelopeKind::TransitionProgress));

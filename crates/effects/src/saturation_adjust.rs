@@ -10,9 +10,9 @@
 //! a part of pure green's (the farthest any color gets: 1). The adjustment
 //! is Amount at Center and fades smoothly (a smoothstep) into Low below and
 //! High above, reaching them Spread ⁄ 2 away from Center. The colors are
-//! taken within 0–1 and the result is not clipped (VEGAS's float effects
-//! keep what passes white or black; 8-bit projects hold each effect's
-//! result within 0–1).
+//! taken within 0–1 and the result is not clipped (in 32-bit projects
+//! VEGAS's effects keep what passes white or black; 8-bit projects hold
+//! each effect's result within 0–1).
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_void};

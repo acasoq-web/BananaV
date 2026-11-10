@@ -10,6 +10,44 @@ pub struct DocMedia {
     pub id: u32,
     pub path: String,
     pub generated: bool,
+    /// A generated one's generator: its settings and its picture's.
+    pub generator: Option<DocGenerator>,
+}
+
+/// What a generated media keeps: how long it is, its picture's size and
+/// pixel shape, its fields, alpha and rotation, and the plug-in that draws
+/// it (an OpenFX generator's settings, or the record of one of the file's
+/// own kind with its keyframes).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocGenerator {
+    /// In 100 ns.
+    pub duration: i64,
+    /// Its number among the project's generated media (its path's `(n)`).
+    pub number: i64,
+    /// The plug-in's name as the file has it ("VEGAS Solid Color").
+    pub name: String,
+    /// Its pictures' size in pixels, and the size asked for (the pixels
+    /// are as many as that size takes at its pixel aspect).
+    pub width: i32,
+    pub height: i32,
+    pub asked: (i32, i32),
+    /// Its pixels' aspect (width over height).
+    pub pixel_aspect: f64,
+    /// Its stream's number and how many times its length or size changed
+    /// (the file keeps them; written back as read).
+    pub stream_id: i64,
+    pub changes: u32,
+    /// The plug-in, first, and any others the file lists after it.
+    pub effects: Vec<DocEffect>,
+    /// Its stream's properties: the field order (0 progressive, 1 upper
+    /// first, 2 lower first), the alpha channel (0 none, 1 straight, 2
+    /// premultiplied, 3 premultiplied dirty), the rotation (0, 1 = 90°
+    /// clockwise, 2 = 180°, 3 = 90° counterclockwise) and whether they are
+    /// the media's own (not changed by the user).
+    pub field_order: u32,
+    pub alpha: u32,
+    pub rotation: u32,
+    pub automatic: bool,
 }
 
 /// The project's settings.
@@ -59,7 +97,9 @@ pub(crate) struct DocEvent {
     pub speed: f64,
     pub fade_in: i64,
     pub fade_out: i64,
-    pub curves: [i32; 2],
+    /// The fade in's and the fade out's curves, then their reciprocal
+    /// curves.
+    pub curves: [i32; 4],
     /// Its level (the gain its fades go to and come from): its volume, a
     /// video event's opacity.
     pub level: f32,
@@ -87,6 +127,7 @@ pub(crate) struct DocEvent {
     pub transition_in: Option<DocEffect>,
     pub transition_out: Option<DocEffect>,
     pub progress_in: Option<DocEnvelope>,
+    pub progress_out: Option<DocEnvelope>,
     /// Audio: the gain Normalize gave it, when it is on.
     pub normalize: Option<f32>,
     /// Audio: how its channels play (1000 as they are, 1005 mixed to one).
@@ -399,11 +440,61 @@ fn settings(header: &[u8], mixer: Option<&[u8]>) -> DocSettings {
 fn media(b: &[u8]) -> DocMedia {
     let cb = u32_at(b, 0) as usize;
     let path = text_at(b, cb, u32_at(b, 0x24) as usize);
+    let generated = path.to_ascii_uppercase().starts_with("META:\\");
+    // The path, then three other texts.
+    let after = cb
+        + [0x24, 0x28, 0x2C, 0x40]
+            .iter()
+            .map(|&at| u32_at(b, at) as usize)
+            .sum::<usize>();
     DocMedia {
         id: u32_at(b, 0x3C),
-        generated: path.to_ascii_uppercase().starts_with("META:\\"),
+        generator: generated.then(|| generator(b, after)).flatten(),
+        generated,
         path,
     }
+}
+
+/// A generated media's part from `at`: its generator's header (its length,
+/// number and name), its picture's stream (its size and pixel aspect), its
+/// effects — the generator's first — and its stream's properties.
+fn generator(b: &[u8], at: usize) -> Option<DocGenerator> {
+    if u32_at(b, at) != 0x224 {
+        return None;
+    }
+    let mut g = DocGenerator {
+        duration: i64_at(b, at + 8),
+        number: i64_at(b, at + 0x10),
+        name: text_at(b, at + 0x1C, 0x208),
+        ..Default::default()
+    };
+    let s = at + 0x224;
+    if u32_at(b, s) != 0xB0 {
+        return None;
+    }
+    g.width = i32_at(b, s + 0x0C);
+    g.height = i32_at(b, s + 0x10);
+    g.asked = (i32_at(b, s + 0x14), i32_at(b, s + 0x18));
+    // Its format's pixel aspect (the second format: the media's).
+    g.pixel_aspect = f64_at(b, s + 0x5C + 0x18);
+    g.stream_id = i64_at(b, s + 0xA4);
+    g.changes = u32_at(b, s + 0xAC);
+    let mut e = s + 0xB0 + 4;
+    for _ in 0..u32_at(b, s + 0xB0).min(64) {
+        let Some((fx, end)) = effect_at(b, e) else {
+            break;
+        };
+        g.effects.push(fx);
+        e = end;
+    }
+    // The stream's properties.
+    if u32_at(b, e) == 0x98 {
+        g.automatic = u32_at(b, e + 0x0C) != 0;
+        g.field_order = u32_at(b, e + 0x18);
+        g.alpha = u32_at(b, e + 0x1C);
+        g.rotation = u32_at(b, e + 0x40);
+    }
+    Some(g)
 }
 
 /// An envelope (its structure, then its points) and where it ends.
@@ -446,11 +537,22 @@ fn effect_at(b: &[u8], at: usize) -> Option<(DocEffect, usize)> {
         let size = u32_at(b, at + 0x14) as usize;
         let keys = u32_at(b, at + 0x18) as usize;
         let mut end = at + 0x38 + name + size;
+        let mut native_keys = Vec::new();
         for _ in 0..keys.min(1 << 16) {
             if u32_at(b, end) != 0x1C {
                 break;
             }
-            end += 0x1C + u32_at(b, end + 0x18) as usize;
+            let bytes = u32_at(b, end + 0x18) as usize;
+            native_keys.push(super::NativeKey {
+                time: i64_at(b, end + 4),
+                curve: u32_at(b, end + 0x0C),
+                flags: u32_at(b, end + 0x14),
+                data: b
+                    .get(end + 0x1C..end + 0x1C + bytes)
+                    .unwrap_or(&[])
+                    .to_vec(),
+            });
+            end += 0x1C + bytes;
         }
         return Some((
             DocEffect {
@@ -459,6 +561,7 @@ fn effect_at(b: &[u8], at: usize) -> Option<(DocEffect, usize)> {
                     .get(at + 0x38 + name..at + 0x38 + name + size)
                     .unwrap_or(&[])
                     .to_vec(),
+                native_keys,
                 preset: text_at(b, at + 0x38, name),
                 ..Default::default()
             },
@@ -482,6 +585,7 @@ fn effect_at(b: &[u8], at: usize) -> Option<(DocEffect, usize)> {
         bypass: flags & 1 != 0,
         before_pan_crop: flags & 0x80 != 0,
         transition: u32_at(b, at + 0x14) == 5,
+        generator: u32_at(b, at + 0x14) == 11,
         ..Default::default()
     };
     let mut end = after;
@@ -649,7 +753,7 @@ fn event(list: &Chunk<'_>) -> Option<DocEvent> {
         speed: f64_at(h, 0x28),
         fade_in: 0,
         fade_out: 0,
-        curves: [1, 1],
+        curves: [1, 1, 1, 1],
         level: 1.0,
         active: i32_at(h, 0x20),
         takes: list.blocks(TAKE).map(|c| take(c.data)).collect(),
@@ -666,6 +770,7 @@ fn event(list: &Chunk<'_>) -> Option<DocEvent> {
         transition_in: None,
         transition_out: None,
         progress_in: None,
+        progress_out: None,
         normalize: None,
         channels: 1000,
         invert_phase: false,
@@ -694,7 +799,7 @@ fn event(list: &Chunk<'_>) -> Option<DocEvent> {
         if u32_at(h, 0x04) & 0x200 != 0 {
             e.normalize = Some(f32_at(h, after + 0x10)).filter(|g| g.is_finite() && *g > 0.0);
         }
-        e.curves = [i32_at(h, after + 0x14), i32_at(h, after + 0x18)];
+        e.curves = [0x14, 0x18, 0x1C, 0x20].map(|at| i32_at(h, after + at));
         e.fade_in = i64_at(h, after + 0x28);
         e.fade_out = i64_at(h, after + 0x30);
     }
@@ -732,8 +837,11 @@ fn event(list: &Chunk<'_>) -> Option<DocEvent> {
                 }
             }
         }
-        // Their progress: of the fade in. The fade out has no place of its own.
+        // Their progress envelopes: the fade in's and the fade out's.
         e.progress_in = envelopes(v.list(VIDEO_EVENT_ENVELOPES_1))
+            .into_iter()
+            .find(|x| x.kind == TRANSITION_PROGRESS);
+        e.progress_out = envelopes(v.list(VIDEO_EVENT_ENVELOPES_2))
             .into_iter()
             .find(|x| x.kind == TRANSITION_PROGRESS);
     }

@@ -16,11 +16,15 @@ bv-timeline.workspace = true
 bv-engine.workspace = true
 bv-ofx.workspace = true
 bv-vst3.workspace = true
+bv-vst2.workspace = true
+bv-bridge.workspace = true
 bv-platform.workspace = true
 bv-zip.workspace = true
 bv-png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The preview's frames copied whole into textures (egui's pixels are bytes).
+bytemuck = "1"
 # x11 and wayland: the two kinds of Linux desktop (nothing on Windows).
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }
 rfd = "0.17"

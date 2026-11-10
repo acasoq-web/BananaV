@@ -10,6 +10,18 @@
 //!   own: Invert; when connected the component sends the controller a
 //!   message made by the host ("Hello", with an attribute "Version" of 3),
 //!   which the controller shows as its hidden parameter "Hello" (0.3).
+//! - **BananaV Test Programs**, the gain with programs ("Unity", "Half",
+//!   "Silent": a program-change parameter and its unit's program list),
+//!   a tail of [`TAIL`] samples, and a state that also keeps the program
+//!   and what the last block's process context said (tempo, place in
+//!   quarter notes and in samples, flags).
+//!
+//! The gains follow their parameters' changes at the samples they come
+//! at. A module of its own ([`GetPluginFactoryCrash`]) makes **BananaV
+//! Test Crash**, a gain that crashes as it processes (a write where nothing
+//! is). `BV_VST3_TESTPLUG_CRASH=process` makes every gain do that,
+//! `=start` ends the process as one starts: for the tests of the host's
+//! guard and of describing plug-ins in a process of their own.
 
 #![allow(unsafe_code)]
 
@@ -22,15 +34,30 @@ use bv_vst3_sys::{
     IBStreamVtbl, IComponentVtbl, IConnectionPointVtbl, IEditControllerVtbl, IHostApplicationVtbl,
     IMessageVtbl, INPUT, IParamValueQueueVtbl, IParameterChangesVtbl, IPlugFrameVtbl,
     IPlugViewVtbl, IPluginBaseVtbl, IPluginFactory2Vtbl, IPluginFactory3Vtbl, IPluginFactoryVtbl,
-    PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo, ParameterInfo, ProcessData, ProcessSetup,
-    Raw, RoutingInfo, TResult, Tuid, ViewRect, fill8, fill16, iid, param_flags, result, speaker,
-    uid,
+    IUnitInfoVtbl, NO_PROGRAM_LIST, PClassInfo, PClassInfo2, PClassInfoW, PFactoryInfo,
+    ParameterInfo, ProcessData, ProcessSetup, ProgramListInfo, Raw, RoutingInfo, TResult, Tuid,
+    UnitInfo, ViewRect, fill8, fill16, iid, param_flags, result, speaker, uid,
 };
 
 /// The classes' identifiers ("BANANAVTESTGAIN1"…).
 pub const GAIN: Tuid = uid(0x4241_4E41, 0x4E41_5654, 0x4553_5447, 0x4149_4E31);
 pub const POLARITY: Tuid = uid(0x4241_4E41, 0x4E41_5654, 0x4553_5450, 0x4F4C_4152);
 pub const POLARITY_CONTROLLER: Tuid = uid(0x4241_4E41, 0x4E41_5654, 0x4553_5450, 0x4F4C_4354);
+/// "BANANAVTESTPROGS".
+pub const PROGRAMS: Tuid = uid(0x4241_4E41, 0x4E41_5654, 0x4553_5450, 0x524F_4753);
+/// "BANANAVTESTCRASH".
+pub const CRASH: Tuid = uid(0x4241_4E41, 0x4E41_5654, 0x4553_5443, 0x5241_5348);
+
+/// Whether `BV_VST3_TESTPLUG_CRASH` asks for `what`.
+fn crash_wanted(what: &str) -> bool {
+    std::env::var("BV_VST3_TESTPLUG_CRASH").as_deref() == Ok(what)
+}
+
+/// A crash: a write where nothing is.
+fn crash() {
+    // SAFETY: none — an access violation is the point.
+    unsafe { std::ptr::write_volatile(16 as *mut u32, 1) };
+}
 
 const PTR: usize = std::mem::size_of::<*const ()>();
 
@@ -235,6 +262,38 @@ unsafe fn last_changes(changes: Raw) -> Vec<(u32, f64)> {
     out
 }
 
+/// Every point of every parameter changed in a block: (sample in the
+/// block, parameter, value), in the order of their samples.
+///
+/// # Safety
+/// As [`last_changes`].
+unsafe fn all_points(changes: Raw) -> Vec<(i32, u32, f64)> {
+    if changes.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // SAFETY: the caller's, and the queues it gives.
+    unsafe {
+        let c = &**(changes as *const *const IParameterChangesVtbl);
+        for i in 0..(c.get_parameter_count)(changes) {
+            let q = (c.get_parameter_data)(changes, i);
+            if q.is_null() {
+                continue;
+            }
+            let qv = &**(q as *const *const IParamValueQueueVtbl);
+            let id = (qv.get_parameter_id)(q);
+            for k in 0..(qv.get_point_count)(q) {
+                let (mut off, mut v) = (0, 0.0);
+                if (qv.get_point)(q, k, &mut off, &mut v) == result::OK {
+                    out.push((off, id, v));
+                }
+            }
+        }
+    }
+    out.sort_by_key(|p| p.0);
+    out
+}
+
 fn channels_of(arrangement: u64) -> i32 {
     arrangement.count_ones() as i32
 }
@@ -271,6 +330,28 @@ unsafe fn each_sample(data: &mut ProcessData, f: impl Fn(f32) -> f32) {
             let o = *outs.buffers.add(c);
             for s in 0..data.num_samples as usize {
                 *o.add(s) = f(*i.add(s));
+            }
+        }
+    }
+}
+
+/// [`each_sample`] with each sample's place in the block.
+///
+/// # Safety
+/// As [`each_sample`].
+unsafe fn each_sample_at(data: &mut ProcessData, f: impl Fn(usize, f32) -> f32) {
+    if data.num_samples <= 0 || data.num_inputs < 1 || data.num_outputs < 1 {
+        return;
+    }
+    // SAFETY: the caller's.
+    unsafe {
+        let (ins, outs) = (&*data.inputs, &*data.outputs);
+        let n = ins.num_channels.min(outs.num_channels).max(0) as usize;
+        for c in 0..n {
+            let i = *ins.buffers.add(c);
+            let o = *outs.buffers.add(c);
+            for s in 0..data.num_samples as usize {
+                *o.add(s) = f(s, *i.add(s));
             }
         }
     }
@@ -324,6 +405,8 @@ fn sample32(size: i32) -> TResult {
 struct Factory {
     table: &'static IPluginFactory3Vtbl,
     refs: AtomicU32,
+    /// The classes it lists.
+    classes: &'static [Class],
 }
 
 impl Object for Factory {
@@ -337,8 +420,11 @@ impl Object for Factory {
     }
 }
 
-/// The classes: (identifier, category, name, sub-categories).
-const CLASSES: [(Tuid, &str, &str, &str); 3] = [
+/// A class: identifier, category, name, sub-categories.
+type Class = (Tuid, &'static str, &'static str, &'static str);
+
+/// The test module's classes.
+const CLASSES: [Class; 4] = [
     (GAIN, "Audio Module Class", "BananaV Test Gain", "Fx|Tools"),
     (
         POLARITY,
@@ -352,12 +438,27 @@ const CLASSES: [(Tuid, &str, &str, &str); 3] = [
         "BananaV Test Polarity Controller",
         "",
     ),
+    (
+        PROGRAMS,
+        "Audio Module Class",
+        "BananaV Test Programs",
+        "Fx|Tools",
+    ),
 ];
 
-fn class(i: i32) -> Option<(Tuid, &'static str, &'static str, &'static str)> {
+/// The crash module's.
+const CRASH_CLASSES: [Class; 1] = [(CRASH, "Audio Module Class", "BananaV Test Crash", "Fx")];
+
+/// Class `i` of factory `raw`.
+///
+/// # Safety
+/// `raw` is a factory of this library's.
+unsafe fn class(raw: Raw, i: i32) -> Option<Class> {
+    // SAFETY: the caller's.
+    let f = unsafe { this::<Factory>(raw, 0) };
     usize::try_from(i)
         .ok()
-        .and_then(|i| CLASSES.get(i))
+        .and_then(|i| f.classes.get(i))
         .copied()
 }
 
@@ -377,9 +478,14 @@ static FACTORY: IPluginFactory3Vtbl = IPluginFactory3Vtbl {
                 i.flags = 1 << 4;
                 result::OK
             }),
-            count_classes: sys!(|_t: Raw| -> i32 { CLASSES.len() as i32 }),
-            get_class_info: sys!(|_t: Raw, i: i32, info: *mut PClassInfo| -> TResult {
-                let (Some((cid, cat, name, _)), false) = (class(i), info.is_null()) else {
+            count_classes: sys!(|t: Raw| -> i32 {
+                // SAFETY: the host's call on a factory of this library's.
+                unsafe { this::<Factory>(t, 0) }.classes.len() as i32
+            }),
+            get_class_info: sys!(|t: Raw, i: i32, info: *mut PClassInfo| -> TResult {
+                // SAFETY: as above.
+                let class = unsafe { class(t, i) };
+                let (Some((cid, cat, name, _)), false) = (class, info.is_null()) else {
                     return result::INVALID_ARGUMENT;
                 };
                 // SAFETY: the host's structure to fill.
@@ -402,7 +508,11 @@ static FACTORY: IPluginFactory3Vtbl = IPluginFactory3Vtbl {
                 unsafe {
                     let cid = *cid.cast::<Tuid>();
                     let made = if cid == GAIN {
-                        new(Gain::default(), 0)
+                        new(Gain::new(Kind::Gain), 0)
+                    } else if cid == PROGRAMS {
+                        new(Gain::new(Kind::Programs), 0)
+                    } else if cid == CRASH {
+                        new(Gain::new(Kind::Crash), 0)
                     } else if cid == POLARITY {
                         new(Polarity::default(), 0)
                     } else if cid == POLARITY_CONTROLLER {
@@ -420,8 +530,10 @@ static FACTORY: IPluginFactory3Vtbl = IPluginFactory3Vtbl {
                 }
             }),
         },
-        get_class_info2: sys!(|_t: Raw, i: i32, info: *mut PClassInfo2| -> TResult {
-            let (Some((cid, cat, name, subs)), false) = (class(i), info.is_null()) else {
+        get_class_info2: sys!(|t: Raw, i: i32, info: *mut PClassInfo2| -> TResult {
+            // SAFETY: the host's call on a factory of this library's.
+            let class = unsafe { class(t, i) };
+            let (Some((cid, cat, name, subs)), false) = (class, info.is_null()) else {
                 return result::INVALID_ARGUMENT;
             };
             // SAFETY: the host's structure to fill.
@@ -438,8 +550,10 @@ static FACTORY: IPluginFactory3Vtbl = IPluginFactory3Vtbl {
             result::OK
         }),
     },
-    get_class_info_unicode: sys!(|_t: Raw, i: i32, info: *mut PClassInfoW| -> TResult {
-        let (Some((cid, cat, name, subs)), false) = (class(i), info.is_null()) else {
+    get_class_info_unicode: sys!(|t: Raw, i: i32, info: *mut PClassInfoW| -> TResult {
+        // SAFETY: the host's call on a factory of this library's.
+        let class = unsafe { class(t, i) };
+        let (Some((cid, cat, name, subs)), false) = (class, info.is_null()) else {
             return result::INVALID_ARGUMENT;
         };
         // SAFETY: the host's structure to fill.
@@ -468,6 +582,24 @@ pub unsafe extern "system" fn GetPluginFactory() -> Raw {
         Factory {
             table: &FACTORY,
             refs: AtomicU32::new(1),
+            classes: &CLASSES,
+        },
+        0,
+    )
+}
+
+/// The crash module's entry point (a module of its own: one that crashes
+/// is switched off, its neighbours not).
+///
+/// # Safety
+/// Called by a VST 3 host.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn GetPluginFactoryCrash() -> Raw {
+    new(
+        Factory {
+            table: &FACTORY,
+            refs: AtomicU32::new(1),
+            classes: &CRASH_CLASSES,
         },
         0,
     )
@@ -515,10 +647,39 @@ pub unsafe extern "system" fn ModuleExit() -> u8 {
 pub const GAIN_ID: u32 = 0;
 pub const BYPASS_ID: u32 = 1;
 pub const METER_ID: u32 = 2;
+/// BananaV Test Programs' program (its root unit's program list).
+pub const PROGRAM_ID: u32 = 3;
+pub const PROGRAM_LIST: i32 = 7;
+pub const PROGRAM_NAMES: [&str; 3] = ["Unity", "Half", "Silent"];
+/// Each program's gain (normalized).
+pub const PROGRAM_GAINS: [f64; 3] = [0.5, 0.25, 0.0];
+/// BananaV Test Programs' tail (samples).
+pub const TAIL: u32 = 4800;
+
+/// Which gain an object is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Gain,
+    Programs,
+    Crash,
+}
+
+/// What the last block's process context said: tempo, place in quarter
+/// notes and in samples, its flags.
+#[derive(Clone, Copy, Default)]
+struct Seen {
+    tempo: f64,
+    music: f64,
+    samples: i64,
+    flags: u32,
+}
 
 struct GainState {
     gain: f64,
     bypass: f64,
+    /// The program chosen (normalized).
+    program: f64,
+    seen: Seen,
     arrangement: u64,
     host: Option<HostRef>,
     handler: Option<HostRef>,
@@ -529,6 +690,8 @@ impl Default for GainState {
         GainState {
             gain: 0.5,
             bypass: 0.0,
+            program: 0.0,
+            seen: Seen::default(),
             arrangement: speaker::STEREO,
             host: None,
             handler: None,
@@ -536,22 +699,49 @@ impl Default for GainState {
     }
 }
 
+impl GainState {
+    /// A parameter's new value, as the processor and the controller take
+    /// it: a program brings its gain.
+    fn set(&mut self, id: u32, v: f64) -> bool {
+        match id {
+            GAIN_ID => self.gain = v,
+            BYPASS_ID => self.bypass = v,
+            PROGRAM_ID => {
+                self.program = v;
+                self.gain = PROGRAM_GAINS[program_index(v)];
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// The program a normalized value chooses.
+fn program_index(v: f64) -> usize {
+    let last = PROGRAM_NAMES.len() - 1;
+    ((v.clamp(0.0, 1.0) * last as f64).round() as usize).min(last)
+}
+
 #[repr(C)]
 struct Gain {
     component: &'static IComponentVtbl,
     processor: &'static IAudioProcessorVtbl,
     controller: &'static IEditControllerVtbl,
+    units: &'static IUnitInfoVtbl,
     refs: AtomicU32,
+    kind: Kind,
     state: Mutex<GainState>,
 }
 
-impl Default for Gain {
-    fn default() -> Gain {
+impl Gain {
+    fn new(kind: Kind) -> Gain {
         Gain {
             component: &GAIN_COMPONENT,
             processor: &GAIN_PROCESSOR,
             controller: &GAIN_CONTROLLER,
+            units: &GAIN_UNITS,
             refs: AtomicU32::new(1),
+            kind,
             state: Mutex::new(GainState::default()),
         }
     }
@@ -565,6 +755,8 @@ impl Object for Gain {
             Some(1)
         } else if *id == iid::EDIT_CONTROLLER {
             Some(2)
+        } else if *id == iid::UNIT_INFO {
+            Some(3)
         } else {
             None
         }
@@ -573,6 +765,15 @@ impl Object for Gain {
     fn refs(&self) -> &AtomicU32 {
         &self.refs
     }
+}
+
+/// Which gain table `k` of `raw` belongs to.
+///
+/// # Safety
+/// `raw` is a gain's table `k`.
+unsafe fn kind(raw: Raw, k: usize) -> Kind {
+    // SAFETY: the caller's.
+    unsafe { this::<Gain>(raw, k) }.kind
 }
 
 /// The gain's state from table `k`.
@@ -589,14 +790,22 @@ unsafe fn gain<'a>(raw: Raw, k: usize) -> std::sync::MutexGuard<'a, GainState> {
 /// # Safety
 /// `raw` is a gain's table `k`; `stream` a host's stream.
 unsafe fn gain_read(raw: Raw, k: usize, stream: Raw) -> TResult {
+    // The gain and its bypass; the program too for BananaV Test Programs
+    // (what its context said is not read back).
     // SAFETY: the caller's.
-    let Some(b) = (unsafe { read_bytes(stream, 16) }) else {
+    let programs = unsafe { kind(raw, k) } == Kind::Programs;
+    // SAFETY: the caller's.
+    let Some(b) = (unsafe { read_bytes(stream, if programs { 24 } else { 16 }) }) else {
         return result::FALSE;
     };
+    let at = |i: usize| f64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap_or_default());
     // SAFETY: the caller's.
     let mut st = unsafe { gain(raw, k) };
-    st.gain = f64::from_le_bytes(b[..8].try_into().unwrap_or_default());
-    st.bypass = f64::from_le_bytes(b[8..].try_into().unwrap_or_default());
+    st.gain = at(0);
+    st.bypass = at(1);
+    if programs {
+        st.program = at(2);
+    }
     result::OK
 }
 
@@ -604,6 +813,9 @@ static GAIN_COMPONENT: IComponentVtbl = IComponentVtbl {
     base: IPluginBaseVtbl {
         unknown: unknown::<Gain, 0>(),
         initialize: sys!(|raw: Raw, ctx: Raw| -> TResult {
+            if crash_wanted("start") {
+                std::process::abort();
+            }
             // SAFETY: the host's call on table 0; its context counted.
             unsafe { gain(raw, 0).host = HostRef::hold(ctx) };
             result::OK
@@ -641,9 +853,18 @@ static GAIN_COMPONENT: IComponentVtbl = IComponentVtbl {
     get_state: sys!(|raw: Raw, stream: Raw| -> TResult {
         // SAFETY: as above.
         unsafe {
+            let programs = kind(raw, 0) == Kind::Programs;
             let st = gain(raw, 0);
             let mut b = st.gain.to_le_bytes().to_vec();
             b.extend_from_slice(&st.bypass.to_le_bytes());
+            if programs {
+                let s = st.seen;
+                b.extend_from_slice(&st.program.to_le_bytes());
+                b.extend_from_slice(&s.tempo.to_le_bytes());
+                b.extend_from_slice(&s.music.to_le_bytes());
+                b.extend_from_slice(&s.samples.to_le_bytes());
+                b.extend_from_slice(&u64::from(s.flags).to_le_bytes());
+            }
             drop(st);
             write_bytes(stream, &b)
         }
@@ -689,25 +910,59 @@ static GAIN_PROCESSOR: IAudioProcessorVtbl = IAudioProcessorVtbl {
             return result::INVALID_ARGUMENT;
         }
         // SAFETY: the host's call on table 1 with its data.
+        if unsafe { kind(raw, 1) } == Kind::Crash || crash_wanted("process") {
+            crash();
+        }
+        // SAFETY: the host's call on table 1 with its data.
         unsafe {
             let data = &mut *data;
-            let (g, bypass) = {
-                let mut st = gain(raw, 1);
-                for (id, v) in last_changes(data.input_parameter_changes) {
-                    match id {
-                        GAIN_ID => st.gain = v,
-                        BYPASS_ID => st.bypass = v,
-                        _ => {}
+            let n = data.num_samples.max(0) as usize;
+            // Each sample's factor, the parameters changed at the samples
+            // their points give.
+            let mut factors = Vec::with_capacity(n);
+            let mut st = gain(raw, 1);
+            if !data.process_context.is_null() {
+                let c = &*data.process_context;
+                st.seen = Seen {
+                    tempo: c.tempo,
+                    music: c.project_time_music,
+                    samples: c.project_time_samples,
+                    flags: c.state,
+                };
+            }
+            let points = all_points(data.input_parameter_changes);
+            let mut next = points.iter().peekable();
+            for s in 0..n {
+                while let Some(&&(at, id, v)) = next.peek() {
+                    if at as usize > s {
+                        break;
                     }
+                    st.set(id, v);
+                    next.next();
                 }
-                (st.gain, st.bypass)
-            };
-            let k = if bypass >= 0.5 { 1.0 } else { (2.0 * g) as f32 };
-            each_sample(data, |x| x * k);
+                factors.push(if st.bypass >= 0.5 {
+                    1.0
+                } else {
+                    (2.0 * st.gain) as f32
+                });
+            }
+            // Points past the block (or a block of no samples).
+            for &(_, id, v) in next {
+                st.set(id, v);
+            }
+            drop(st);
+            each_sample_at(data, |s, x| x * factors[s]);
         }
         result::OK
     }),
-    get_tail_samples: sys!(|_t: Raw| -> u32 { 0 }),
+    get_tail_samples: sys!(|raw: Raw| -> u32 {
+        // SAFETY: the host's call on table 1.
+        if unsafe { kind(raw, 1) } == Kind::Programs {
+            TAIL
+        } else {
+            0
+        }
+    }),
 };
 
 static GAIN_CONTROLLER: IEditControllerVtbl = IEditControllerVtbl {
@@ -723,9 +978,27 @@ static GAIN_CONTROLLER: IEditControllerVtbl = IEditControllerVtbl {
     }),
     set_state: sys!(|_t: Raw, _s: Raw| -> TResult { result::OK }),
     get_state: sys!(|_t: Raw, _s: Raw| -> TResult { result::OK }),
-    get_parameter_count: sys!(|_t: Raw| -> i32 { 3 }),
-    get_parameter_info: sys!(|_t: Raw, i: i32, out: *mut ParameterInfo| -> TResult {
+    get_parameter_count: sys!(|raw: Raw| -> i32 {
+        // SAFETY: the host's call on table 2.
+        if unsafe { kind(raw, 2) } == Kind::Programs {
+            4
+        } else {
+            3
+        }
+    }),
+    get_parameter_info: sys!(|raw: Raw, i: i32, out: *mut ParameterInfo| -> TResult {
+        // SAFETY: the host's call on table 2.
+        let programs = unsafe { kind(raw, 2) } == Kind::Programs;
         match i {
+            3 if programs => param_info(
+                out,
+                PROGRAM_ID,
+                "Program",
+                "",
+                PROGRAM_NAMES.len() as i32 - 1,
+                0.0,
+                param_flags::CAN_AUTOMATE | param_flags::LIST | param_flags::PROGRAM_CHANGE,
+            ),
             0 => param_info(
                 out,
                 GAIN_ID,
@@ -768,6 +1041,7 @@ static GAIN_CONTROLLER: IEditControllerVtbl = IEditControllerVtbl {
                 text_out(out, &text)
             }
             BYPASS_ID => text_out(out, if v >= 0.5 { "On" } else { "Off" }),
+            PROGRAM_ID => text_out(out, PROGRAM_NAMES[program_index(v)]),
             _ => text_out(out, ""),
         }
     }),
@@ -782,18 +1056,18 @@ static GAIN_CONTROLLER: IEditControllerVtbl = IEditControllerVtbl {
         match id {
             GAIN_ID => st.gain,
             BYPASS_ID => st.bypass,
+            PROGRAM_ID => st.program,
             _ => 0.0,
         }
     }),
     set_param_normalized: sys!(|raw: Raw, id: u32, v: f64| -> TResult {
         // SAFETY: the host's call on table 2.
         let mut st = unsafe { gain(raw, 2) };
-        match id {
-            GAIN_ID => st.gain = v,
-            BYPASS_ID => st.bypass = v,
-            _ => return result::FALSE,
+        if st.set(id, v) {
+            result::OK
+        } else {
+            result::FALSE
         }
-        result::OK
     }),
     set_component_handler: sys!(|raw: Raw, h: Raw| -> TResult {
         // SAFETY: the host's call on table 2; its handler counted.
@@ -807,6 +1081,75 @@ static GAIN_CONTROLLER: IEditControllerVtbl = IEditControllerVtbl {
         }
         view::make()
     }),
+};
+
+/// The gains' units: the root alone; BananaV Test Programs' has its
+/// program list.
+static GAIN_UNITS: IUnitInfoVtbl = IUnitInfoVtbl {
+    unknown: unknown::<Gain, 3>(),
+    get_unit_count: sys!(|_t: Raw| -> i32 { 1 }),
+    get_unit_info: sys!(|raw: Raw, i: i32, out: *mut UnitInfo| -> TResult {
+        if i != 0 || out.is_null() {
+            return result::INVALID_ARGUMENT;
+        }
+        // SAFETY: the host's call on table 3, a structure to fill.
+        unsafe {
+            let programs = kind(raw, 3) == Kind::Programs;
+            let u = &mut *out;
+            u.id = bv_vst3_sys::ROOT_UNIT;
+            u.parent_unit_id = -1;
+            fill16(&mut u.name, "Root");
+            u.program_list_id = if programs {
+                PROGRAM_LIST
+            } else {
+                NO_PROGRAM_LIST
+            };
+        }
+        result::OK
+    }),
+    get_program_list_count: sys!(|raw: Raw| -> i32 {
+        // SAFETY: the host's call on table 3.
+        i32::from(unsafe { kind(raw, 3) } == Kind::Programs)
+    }),
+    get_program_list_info: sys!(|raw: Raw, i: i32, out: *mut ProgramListInfo| -> TResult {
+        // SAFETY: the host's call on table 3.
+        if i != 0 || out.is_null() || unsafe { kind(raw, 3) } != Kind::Programs {
+            return result::INVALID_ARGUMENT;
+        }
+        // SAFETY: a structure to fill.
+        let l = unsafe { &mut *out };
+        l.id = PROGRAM_LIST;
+        fill16(&mut l.name, "Factory");
+        l.program_count = PROGRAM_NAMES.len() as i32;
+        result::OK
+    }),
+    get_program_name: sys!(|_t: Raw, list: i32, i: i32, out: *mut u16| -> TResult {
+        let name = usize::try_from(i).ok().and_then(|i| PROGRAM_NAMES.get(i));
+        match name {
+            Some(name) if list == PROGRAM_LIST => text_out(out, name),
+            _ => result::INVALID_ARGUMENT,
+        }
+    }),
+    get_program_info: sys!(|_t: Raw,
+                            _l: i32,
+                            _i: i32,
+                            _a: *const c_char,
+                            _o: *mut u16|
+     -> TResult { result::FALSE }),
+    has_program_pitch_names: sys!(|_t: Raw, _l: i32, _i: i32| -> TResult { result::FALSE }),
+    get_program_pitch_name: sys!(
+        |_t: Raw, _l: i32, _i: i32, _p: i16, _o: *mut u16| -> TResult { result::FALSE }
+    ),
+    get_selected_unit: sys!(|_t: Raw| -> i32 { bv_vst3_sys::ROOT_UNIT }),
+    select_unit: sys!(|_t: Raw, _u: i32| -> TResult { result::OK }),
+    get_unit_by_bus: sys!(|_t: Raw,
+                           _ty: i32,
+                           _d: i32,
+                           _b: i32,
+                           _c: i32,
+                           _u: *mut i32|
+     -> TResult { result::FALSE }),
+    set_unit_program_data: sys!(|_t: Raw, _l: i32, _i: i32, _d: Raw| -> TResult { result::FALSE }),
 };
 
 // ---- BananaV Test Polarity --------------------------------------------------------------

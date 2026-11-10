@@ -771,9 +771,10 @@ fn a_project_comes_back_as_it_went() {
         shows(ts[0]),
         MediaSource::Generated(Generator::Plugin(fx)) if fx.params["text"].value == PluginValue::Text("Olá & <bem-vindo>".into())
     ));
+    // As BananaV's Solid Color draws it.
     assert!(matches!(
         shows(rs[0]),
-        MediaSource::Generated(Generator::SolidColor { .. })
+        MediaSource::Generated(Generator::Plugin(fx)) if fx.id == "org.bananav.SolidColor"
     ));
     let marks: Vec<(i64, &str)> = back
         .markers

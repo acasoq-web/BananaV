@@ -88,6 +88,8 @@ struct State {
     status: GpuStatus,
     /// Counts choices: a card that opens after another choice is dropped.
     serial: u64,
+    /// The card opened and is compiling its kernels.
+    warming: bool,
 }
 
 /// The card compositing video, shared by the preview and the renders.
@@ -107,6 +109,7 @@ impl Accel {
                 gpu: None,
                 status: GpuStatus::Off,
                 serial: 0,
+                warming: false,
             }),
             repaint,
             decoding: AtomicU64::new(0),
@@ -140,6 +143,7 @@ impl Accel {
             }
             st.choice = choice.clone();
             st.gpu = None;
+            st.warming = false;
             st.serial += 1;
             if choice == GpuChoice::Off {
                 st.status = GpuStatus::Off;
@@ -166,6 +170,7 @@ impl Accel {
                         Ok(g) => {
                             st.status = GpuStatus::Ready(g.adapter().name.clone());
                             st.gpu = Some(g.clone());
+                            st.warming = true;
                             Some(g)
                         }
                         Err(e) => {
@@ -177,10 +182,17 @@ impl Accel {
                 (me.repaint)();
                 // Frames draw on the card from now on, waiting only for
                 // the kernels they use; the others are compiled meanwhile.
-                if let Some(g) = gpu
-                    && let Err(e) = g.warm_up()
-                {
-                    me.failed(&g, &e);
+                if let Some(g) = gpu {
+                    let warmed = g.warm_up();
+                    {
+                        let mut st = me.state.lock().expect("acceleration");
+                        if st.serial == serial {
+                            st.warming = false;
+                        }
+                    }
+                    if let Err(e) = warmed {
+                        me.failed(&g, &e);
+                    }
                 }
             });
         if spawned.is_err() {
@@ -191,6 +203,12 @@ impl Accel {
 
     pub(crate) fn status(&self) -> GpuStatus {
         self.state.lock().expect("acceleration").status.clone()
+    }
+
+    /// Whether the card is opening or still compiling its kernels.
+    pub(crate) fn starting(&self) -> bool {
+        let st = self.state.lock().expect("acceleration");
+        st.status == GpuStatus::Starting || st.warming
     }
 
     /// The card, when it is ready.
@@ -582,16 +600,40 @@ impl Painter {
         quality: Option<RenderQuality>,
         background: [f32; 4],
     ) -> Vec<u8> {
+        self.display_in(project, t, size, pool, quality, background, (0, 0))
+            .0
+    }
+
+    /// [`display_as`](Self::display_as) for a screen showing the frame in
+    /// a room of `room` pixels: drawn at `size` (its effects as at that
+    /// size), on the card it comes back reduced to [`bv_gpu::room_size`]
+    /// — the bytes brought back and shown are what the screen can show.
+    /// With the size of its pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn display_in(
+        &mut self,
+        project: &Project,
+        t: Tick,
+        size: (u32, u32),
+        pool: &mut VideoPool,
+        quality: Option<RenderQuality>,
+        background: [f32; 4],
+        room: (u32, u32),
+    ) -> (Vec<u8>, (u32, u32)) {
         let tc = TransferCharacteristic::Bt709;
         if let Some(samples) = project.motion_blur_at(t) {
             let img = self.blurred(project, t, &samples, size, pool, background, quality);
-            return bv_color::linear_to_display_rgba8(&img, tc);
+            let rgba = bv_color::linear_to_display_rgba8(&img, tc);
+            return (rgba, (img.width, img.height));
         }
-        let output = Output::Display(tc);
-        if let Some(Rendered::Display { rgba, .. }) =
-            self.on_card(project, t, None, size, pool, background, output, quality)
+        let output = Output::DisplayIn(tc, room);
+        if let Some(Rendered::Display {
+            rgba,
+            width,
+            height,
+        }) = self.on_card(project, t, None, size, pool, background, output, quality)
         {
-            return rgba;
+            return (rgba, (width, height));
         }
         let img = bv_render::render_output_with(
             project,
@@ -602,7 +644,8 @@ impl Painter {
             quality,
             self.plugins(),
         );
-        bv_color::linear_to_display_rgba8(&img, tc)
+        let rgba = bv_color::linear_to_display_rgba8(&img, tc);
+        (rgba, (img.width, img.height))
     }
 }
 
@@ -624,9 +667,11 @@ pub(crate) fn has_plugins(project: &Project) -> bool {
     let plugin = |e: &Effect| e.enabled && e.plugin.is_some();
     project.tracks.iter().any(|t| {
         t.effects.iter().any(plugin)
-            || t.clips
-                .iter()
-                .any(|c| c.transition_fx.is_some() || c.effects.iter().any(plugin))
+            || t.clips.iter().any(|c| {
+                c.transition_fx.is_some()
+                    || c.out_transition.as_ref().is_some_and(|o| o.fx.is_some())
+                    || c.effects.iter().any(plugin)
+            })
     }) || project.media.iter().any(|m| m.effects.iter().any(plugin))
         || project.video_output_fx.iter().any(plugin)
 }

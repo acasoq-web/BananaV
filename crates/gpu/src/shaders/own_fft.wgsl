@@ -10,8 +10,7 @@ fn fft_ramp(d: f32, a: f32, b: f32) -> f32 {
 }
 
 // The pixel standing for `i` on a line `n` long: held at the ends, or
-// with i.y reflected about the end pixels (… c b | a b c …), as OpenCV's
-// filters go on.
+// with i.y reflected about the end pixels (… c b | a b c …).
 fn fft_edge(i: i32, n: i32) -> i32 {
     if P.i.y == 0 || n == 1 {
         return clamp(i, 0, n - 1);

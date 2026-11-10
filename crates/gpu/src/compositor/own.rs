@@ -216,6 +216,10 @@ impl Compositor {
             return None;
         }
         let video = m.info.video.as_ref()?;
+        // Turned or read with another alpha: as the processor reads it.
+        if video.reading != bv_timeline::VideoReading::default() {
+            return None;
+        }
         let full = (video.width.max(1), video.height.max(1));
         let (w, h) = bv_media::plugins::covering(full, m.min_size);
         let values: Vec<(String, accel::Value)> =
@@ -231,8 +235,21 @@ impl Compositor {
                     Some((name, v))
                 })
                 .collect();
-        let Plan::Generate { kernel, f, j } =
-            accel::generator_plan(&fx.id, accel::Values(&values), full, (w, h))?
+        let aspect = f64::from(video.pixel_aspect.num) / f64::from(video.pixel_aspect.den.max(1));
+        let plan = accel::generator_plan(
+            &fx.id,
+            accel::Values(&values),
+            full,
+            (w, h),
+            m.eight_bit,
+            aspect,
+        )?;
+        let Plan::Generate {
+            kernel,
+            f,
+            j,
+            table,
+        } = plan
         else {
             return None;
         };
@@ -241,11 +258,22 @@ impl Compositor {
         p.j = j;
         let k = match kernel {
             accel::GenerateKernel::Checkerboard => K::KitCheckerboard,
+            accel::GenerateKernel::ColorGradient => K::KitColorGradient,
             accel::GenerateKernel::TestPattern => K::KitTestPattern,
             accel::GenerateKernel::NoiseTexture => K::KitNoiseTexture,
             accel::GenerateKernel::SolidColor => K::Fill,
         };
-        self.kernel(enc, k, p, &[&img.buf], Grid::Pixels(w, h));
+        if table.is_empty() {
+            self.kernel(enc, k, p, &[&img.buf], Grid::Pixels(w, h));
+        } else {
+            // The generator's table read, the picture written.
+            let entries = self.buffer(table.len() as u64 * 16);
+            self.gpu
+                .queue
+                .write_buffer(&entries, 0, bytemuck::cast_slice(&table));
+            (p.sw, p.sh) = (table.len() as u32, 1);
+            self.kernel(enc, k, p, &[&entries, &img.buf], Grid::Pixels(w, h));
+        }
         Some(img)
     }
 

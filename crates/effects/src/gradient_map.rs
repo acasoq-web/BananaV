@@ -161,7 +161,7 @@ impl Gradient {
     }
 }
 
-/// A premultiplied pixel through the gradient, as VEGAS's float math.
+/// A premultiplied pixel through the gradient, as VEGAS's renders show it.
 pub(crate) fn mapped(g: &Gradient, amount: f32, add: bool, p: [f32; 4]) -> [f32; 4] {
     let y = f64::from(p[1]) * 0.587 + f64::from(p[2]) * 0.114 + f64::from(p[0]) * 0.299;
     let c = g.at(y);

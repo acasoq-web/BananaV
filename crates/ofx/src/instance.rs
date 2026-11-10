@@ -108,6 +108,12 @@ pub struct Instance {
     /// when first asked for.
     param_interacts: Mutex<HashMap<String, Option<Interact>>>,
     created: bool,
+    /// Its renders are for a project of 8-bit pictures
+    /// (`kBananaVImageEffectPropEightBit`).
+    eight_bit: std::sync::atomic::AtomicBool,
+    /// The shape of its generated media's pixels, as an `f64`'s bits
+    /// (`kBananaVImageEffectPropMediaPixelAspect`).
+    media_pixel_aspect: std::sync::atomic::AtomicU64,
 }
 
 /// The render arguments every render and sequence action has: the
@@ -222,6 +228,8 @@ impl Instance {
             interact: OnceLock::new(),
             param_interacts: Mutex::new(HashMap::new()),
             created: false,
+            eight_bit: std::sync::atomic::AtomicBool::new(false),
+            media_pixel_aspect: std::sync::atomic::AtomicU64::new(1f64.to_bits()),
         };
         let status = instance.call(kOfxActionCreateInstance, None, None);
         instance.run().free_images();
@@ -281,6 +289,25 @@ impl Instance {
 
     pub fn context(&self) -> Context {
         self.context
+    }
+
+    /// Tells the instance whether its renders are for a project of 8-bit
+    /// pictures (`kBananaVImageEffectPropEightBit`).
+    pub fn set_eight_bit(&self, on: bool) {
+        self.eight_bit
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Tells a generator's instance its media's pixels' shape, width over
+    /// height (`kBananaVImageEffectPropMediaPixelAspect`).
+    pub fn set_media_pixel_aspect(&self, aspect: f64) {
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        self.media_pixel_aspect
+            .store(aspect.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Tells the instance its effect's length in frames (a generator's:
@@ -499,6 +526,19 @@ impl Instance {
                 &[t],
             );
         }
+        args.set_int(
+            bv_ofx_sys::extensions::kBananaVImageEffectPropEightBit,
+            &[i32::from(
+                self.eight_bit.load(std::sync::atomic::Ordering::Relaxed),
+            )],
+        );
+        args.set_dbl(
+            bv_ofx_sys::extensions::kBananaVImageEffectPropMediaPixelAspect,
+            &[f64::from_bits(
+                self.media_pixel_aspect
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )],
+        );
         render_flags(&args, cuda);
         args
     }

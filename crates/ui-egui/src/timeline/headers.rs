@@ -13,6 +13,7 @@ use bv_timeline::{Output, Project, Send, SendTo, Track, TrackId, TrackKind};
 use super::{Layout, TimelineView};
 use crate::app::BananaApp;
 use crate::automation::TrackControl;
+use crate::cursors::{self, Cursor};
 use crate::egui::{self, Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use crate::menus::{item, item_enabled, keyed_item, mark_item, sub, toggle_item};
 use crate::settings::HeaderButton;
@@ -454,7 +455,7 @@ fn slider_response(
     }
     let mut out = None;
     if resp.dragged() {
-        let fine = if ui.input(|i| i.modifiers.ctrl || i.modifiers.shift) {
+        let fine = if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
             0.1
         } else {
             1.0
@@ -476,6 +477,131 @@ fn slider_response(
     }
     let released = resp.drag_stopped() || resp.double_clicked();
     (out, released, resp.on_hover_text(tip))
+}
+
+/// The composite level slider's steps, as VEGAS's: thousandths, its page
+/// ten of them and its line one.
+const LEVEL_STEPS: i32 = 1000;
+const LEVEL_PAGE: i32 = 10;
+const LEVEL_LINE: i32 = 1;
+
+/// Where a level slider was grabbed: the pointer's distance from the knob,
+/// and where the pointer was last; the wheel's notches not used yet.
+#[derive(Clone, Copy, Default)]
+struct LevelGrab {
+    offset: f32,
+    reference: f32,
+    wheel: f32,
+}
+
+/// Fine steps by a pointer that went `dx` pixels, as VEGAS's: half a step
+/// a pixel, rounded away from zero.
+fn fine_steps(dx: i32) -> i32 {
+    dx.signum() * ((dx.abs() + 1) / 2)
+}
+
+/// The composite level's slider (`level`, 0–1), as VEGAS's: dragged, its
+/// knob follows the pointer where it was grabbed; with Ctrl (or the right
+/// button) it goes half a step each pixel, the pointer put back on the
+/// knob; the wheel goes a page a notch, a line with Ctrl; a double-click
+/// puts 100 %. Shift does nothing. Its place is noted for the wheel
+/// (`view.wheel_sliders`: the tracks do not scroll under it). Returns the
+/// new level, and whether it was let go.
+fn level_slider(
+    ui: &egui::Ui,
+    view: &mut TimelineView,
+    rect: Rect,
+    id: egui::Id,
+    level: f32,
+    tip: &str,
+    automation: bool,
+) -> (Option<f32>, bool) {
+    view.wheel_sliders.push(rect);
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let painter = ui.painter();
+    let y = rect.center().y;
+    let line = Rect::from_min_max(pos2(rect.left(), y - 1.0), pos2(rect.right(), y + 1.0));
+    painter.rect_filled(line, 1.0, Color32::from_gray(0x8A));
+    let steps = (level.clamp(0.0, 1.0) * LEVEL_STEPS as f32).round() as i32;
+    let x_of = |n: i32| rect.left() + rect.width() * n as f32 / LEVEL_STEPS as f32;
+    let knob = Rect::from_center_size(pos2(x_of(steps), y), vec2(9.0, 13.0));
+    crate::widgets::paint_knob(painter, knob, resp.hovered() || resp.dragged());
+    if automation {
+        painter.circle_filled(knob.center(), 2.5, theme::banana());
+    }
+    let key = id.with("grab");
+    let mut grab: LevelGrab = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_default();
+    let mut new = None;
+    let mut released = resp.drag_stopped();
+    if resp.drag_started()
+        && let Some(p) = ui.input(|i| i.pointer.press_origin())
+    {
+        grab.offset = p.x - x_of(steps);
+        grab.reference = p.x;
+    }
+    // Each move of the pointer (none while the system puts it back).
+    let moved = ui.input(|i| {
+        i.events
+            .iter()
+            .any(|e| matches!(e, egui::Event::PointerMoved(_)))
+    });
+    if resp.dragged()
+        && moved
+        && let Some(p) = ui.input(|i| i.pointer.latest_pos())
+    {
+        let fine = ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
+            || resp.dragged_by(egui::PointerButton::Secondary);
+        let to = if fine {
+            steps + fine_steps((p.x - grab.reference).round() as i32)
+        } else {
+            ((p.x - grab.offset - rect.left()) / rect.width() * LEVEL_STEPS as f32) as i32
+        }
+        .clamp(0, LEVEL_STEPS);
+        grab.reference = p.x;
+        if to != steps {
+            new = Some(to);
+            if fine {
+                // The pointer back on the knob, where it held it.
+                let x = x_of(to) + grab.offset;
+                let at = pos2(x, p.y.clamp(rect.top(), rect.bottom()));
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CursorPosition(at));
+                grab.reference = x;
+            }
+        }
+    }
+    if resp.double_clicked() {
+        new = Some(LEVEL_STEPS);
+        released = true;
+    }
+    // The wheel: a page a notch, a line with Ctrl.
+    if resp.hovered() && !resp.dragged() {
+        let (notches, ctrl) = ui.input(|i| crate::widgets::wheel_notches(&i.events));
+        grab.wheel += notches;
+        let n = grab.wheel.trunc();
+        grab.wheel -= n;
+        if n != 0.0 {
+            let step = if ctrl { LEVEL_LINE } else { LEVEL_PAGE };
+            new = Some((steps + n as i32 * step).clamp(0, LEVEL_STEPS));
+            released = true;
+        }
+    } else {
+        grab.wheel = 0.0;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(key, grab));
+    // The joystick moves the slider under the pointer.
+    if new.is_none()
+        && let Some(v) = crate::widgets::joystick_push(ui, &resp)
+        && v.x != 0.0
+    {
+        new = Some(((level + v.x * 0.5).clamp(0.0, 1.0) * LEVEL_STEPS as f32).round() as i32);
+    }
+    resp.on_hover_text(tip);
+    (
+        new.filter(|n| *n != steps)
+            .map(|n| n as f32 / LEVEL_STEPS as f32),
+        released,
+    )
 }
 
 /// A header's button of Edit Visible Button Set (not Mute, Solo or
@@ -1021,6 +1147,7 @@ pub(crate) fn ui(
     let painter = ui.painter().with_clip_rect(l.headers);
     // Below the tracks the timeline's own dark, as VEGAS's track list.
     painter.rect_filled(l.headers, 0.0, theme::bg());
+    view.wheel_sliders.clear();
     let picked = app.track_selection();
     for row in &l.rows {
         let Some(track) = project.track(row.track) else {
@@ -1364,13 +1491,12 @@ pub(crate) fn ui(
                     if end - from >= 30.0 {
                         let s = Rect::from_min_max(pos2(from, y - 8.0), pos2(end, y + 8.0));
                         let key = id("nivel");
-                        let (moved, released) = slider(
+                        let (moved, released) = level_slider(
                             ui,
+                            view,
                             s,
                             key,
                             level,
-                            1.0,
-                            Thumb::Knob,
                             &control_tip(tr("Level (double-click: 100 %; Ctrl+drag: fine)"), track),
                             auto,
                         );
@@ -2144,6 +2270,7 @@ fn color_item(ui: &mut egui::Ui, color: Color32, name: &str, selected: bool) -> 
 
 /// The bottom edges of the headers, over every header (the next track's
 /// header would otherwise take the press): dragging one resizes its track.
+/// Their pointer is the splitter's ↕, as VEGAS's.
 fn edges_ui(view: &mut TimelineView, ui: &egui::Ui, l: &Layout) {
     let clip = ui.clip_rect().intersect(l.headers.expand2(vec2(0.0, 3.0)));
     for row in &l.rows {
@@ -2158,7 +2285,7 @@ fn edges_ui(view: &mut TimelineView, ui: &egui::Ui, l: &Layout) {
         let id = egui::Id::new(("cabecalho", row.track.0, "borda"));
         let resp = ui.interact(edge.intersect(clip), id, Sense::drag());
         if resp.hovered() || resp.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            cursors::set(ui.ctx(), Cursor::SplitterNs);
         }
         if resp.drag_started() {
             // The track's own height: its keyframes row apart.
@@ -2202,15 +2329,17 @@ pub(crate) fn drag_ui(view: &mut TimelineView, ui: &egui::Ui, app: &mut BananaAp
         }
         _ => pointer,
     };
+    // Its pointer while it lasts: the splitter's for a height (as over the
+    // edge), a closed hand for a track or a group carried.
     match drag {
         TrackDrag::Resize { track, top } => {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            cursors::set(ui.ctx(), Cursor::SplitterNs);
             if let Some(p) = pointer {
                 resize_tracks(view, app, track, p.y - top);
             }
         }
         TrackDrag::Group(group) => {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            cursors::set(ui.ctx(), Cursor::HandClosed);
             let project = app.project().clone();
             if let Some((index, y, _)) = pointer.and_then(|p| drop_slot(l, &project, p.y)) {
                 // Never inside another group: after it.
@@ -2241,7 +2370,7 @@ pub(crate) fn drag_ui(view: &mut TimelineView, ui: &egui::Ui, app: &mut BananaAp
             }
         }
         TrackDrag::Reorder(track) => {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            cursors::set(ui.ctx(), Cursor::HandClosed);
             let project = app.project().clone();
             if let Some((index, y, into)) = pointer.and_then(|p| drop_slot(l, &project, p.y)) {
                 let x0 = l.headers.left();
@@ -2767,6 +2896,14 @@ impl BananaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The level slider's fine drag, as VEGAS's: half a step a pixel,
+    /// rounded away from zero, both ways.
+    #[test]
+    fn fine_drags_go_half_a_step_a_pixel() {
+        let got: Vec<i32> = (-4..=4).map(fine_steps).collect();
+        assert_eq!(got, [-2, -2, -1, -1, 0, 1, 1, 2, 2]);
+    }
 
     /// A video header of `width` (its color strip too) with every button,
     /// laid out as `ui` does: the buttons it shows, top row then second.

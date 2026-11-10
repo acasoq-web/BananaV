@@ -894,9 +894,11 @@ fn content(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx) {
             pos2(area.right() - w, area.bottom()),
         );
         main.max.x = border.left();
-        let r = ui
-            .interact(border, egui::Id::new("cg-pinned-border"), Sense::drag())
-            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        let r = ui.interact(border, egui::Id::new("cg-pinned-border"), Sense::drag());
+        if r.hovered() || r.dragged() {
+            // A split bar, as VEGAS's.
+            crate::cursors::set(ui.ctx(), crate::cursors::Cursor::SplitterEw);
+        }
         let color = if r.hovered() || r.dragged() {
             theme::text()
         } else {
@@ -1116,7 +1118,7 @@ fn slide(
         && let Some(p) = resp.interact_pointer_pos()
     {
         let moved = along(p) - along(p - resp.drag_delta());
-        let k = if ui.input(|i| i.modifiers.ctrl) {
+        let k = if ui.input(|i| i.modifiers.command) {
             1.0 / 32.0
         } else {
             1.0
@@ -2631,7 +2633,7 @@ fn hsl_curves(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, column_rect: Rect
             view.shift = 0.0;
         }
         if turn.hovered() || turn.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            crate::cursors::system(ui.ctx(), egui::CursorIcon::ResizeHorizontal);
         }
         turn.on_hover_text(tr(
             "Drag sideways to turn the hues round · double-click: back",
@@ -2849,7 +2851,8 @@ pub(crate) fn pick_on_preview(
     let over = pos.is_some_and(|q| frame.contains(q))
         && (nav.hovered() || nav.is_pointer_button_down_on());
     if over {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        // VEGAS's color picker's dropper.
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::Dropper);
     }
     // A point on screen as a pixel of the effect's picture (its canonical
     // coordinates count up from the bottom, in full-size pixels).

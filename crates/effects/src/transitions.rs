@@ -432,7 +432,7 @@ fn render(kind: Kind, fx: Fx, args: Props) -> OfxStatus {
 
 /// The factory presets of transition `kind`.
 pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
-    match kind {
+    let own = match kind {
         Kind::LinearWipe
         | Kind::ClockWipe
         | Kind::Iris
@@ -454,5 +454,24 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
         Kind::Blinds3D | Kind::Cascade3D | Kind::FlyInOut3D | Kind::Shuffle3D => {
             cards::presets(kind)
         }
-    }
+    };
+    // The transition at its defaults first, as VEGAS lists a transition
+    // none of whose presets is its default: "Default" for the ones it
+    // names so (the 3D ones, Venetian Blinds, Portals), "(Default)" for
+    // the others.
+    let name = match kind {
+        Kind::Blinds3D
+        | Kind::Cascade3D
+        | Kind::FlyInOut3D
+        | Kind::Shuffle3D
+        | Kind::VenetianBlinds
+        | Kind::Portals => "Default",
+        _ => "(Default)",
+    };
+    std::iter::once(Preset {
+        name,
+        values: Vec::new(),
+    })
+    .chain(own)
+    .collect()
 }

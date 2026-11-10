@@ -387,15 +387,17 @@ impl Binding {
         s
     }
 
-    /// What the user sees: `"Ctrl+Alt+Para a esquerda"`, `"Ctrl+´"`…
+    /// What the user sees: `"Ctrl+Alt+Para a esquerda"`, `"Ctrl+´"`… (on
+    /// macOS `"Cmd+Option+…"`: BananaV's Ctrl is the Command key there).
     pub fn label(&self) -> String {
         let name = |k: BindKey| match k {
             BindKey::Key(k) => key_label(k),
             BindKey::Special(s) => tr(s).to_string(),
         };
+        let mods = crate::i18n::system_keys(&self.mods()).to_string();
         match self.then {
-            Some(t) => format!("{}{}, {}", self.mods(), name(self.key), name(t)),
-            None => format!("{}{}", self.mods(), name(self.key)),
+            Some(t) => format!("{mods}{}, {}", name(self.key), name(t)),
+            None => format!("{mods}{}", name(self.key)),
         }
     }
 
@@ -404,6 +406,13 @@ impl Binding {
         let key = match physical {
             Some(p) if PHYSICAL.iter().any(|(k, _)| *k == p) => p,
             _ => key,
+        };
+        // A Mac's delete key is the PC's Backspace: it deletes, as on the
+        // Mac's programs (fn+delete is Delete too).
+        let key = if cfg!(target_os = "macos") && key == Key::Backspace {
+            Key::Delete
+        } else {
+            key
         };
         Binding {
             ctrl: m.ctrl || m.command,
@@ -1830,8 +1839,9 @@ fn global_id(cmd: Cmd) -> String {
         | Cmd::Preferences
         | Cmd::CustomizeKeyboard
         | Cmd::CustomizeToolbar
-        | Cmd::CustomizeTimelineToolbar => "Options",
-        Cmd::HelpContents | Cmd::KeyboardShortcuts | Cmd::About => "Help",
+        | Cmd::CustomizeTimelineToolbar
+        | Cmd::EnvelopeAppearance => "Options",
+        Cmd::HelpContents | Cmd::KeyboardShortcuts | Cmd::CheckUpdates | Cmd::About => "Help",
         _ => "Edit",
     };
     format!("{group}.{leaf}")
@@ -2753,5 +2763,100 @@ mod tests {
             },
         );
         assert_eq!(events(&h), before + 2, "pasted again");
+    }
+}
+
+/// macOS: a click with the Control key is the right click Macs make, and
+/// the Control key held alone changes nothing a drag or a click does
+/// (BananaV's Ctrl is the Command key there: `Modifiers::command`); keys
+/// keep it, so Control+S saves too. `held`: a right click made of a
+/// Control-click, whose release is still to come.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn mac_control_click(raw: &mut egui::RawInput, held: &mut bool) {
+    for e in &mut raw.events {
+        match e {
+            egui::Event::PointerButton {
+                button,
+                pressed,
+                modifiers,
+                ..
+            } => {
+                if *button == egui::PointerButton::Primary {
+                    if *pressed && modifiers.ctrl && !modifiers.mac_cmd {
+                        *button = egui::PointerButton::Secondary;
+                        *held = true;
+                    } else if !*pressed && *held {
+                        *button = egui::PointerButton::Secondary;
+                        *held = false;
+                    }
+                }
+                modifiers.ctrl = false;
+            }
+            egui::Event::ModifiersChanged(m) => m.ctrl = false,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod mac_click_tests {
+    use super::mac_control_click;
+    use crate::egui::{self, Event, Modifiers, PointerButton, pos2};
+
+    fn click(pressed: bool, modifiers: Modifiers) -> Event {
+        Event::PointerButton {
+            pos: pos2(10.0, 10.0),
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn a_control_click_is_a_right_click_and_command_stays() {
+        let control = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let mut raw = egui::RawInput {
+            events: vec![
+                Event::ModifiersChanged(control),
+                click(true, control),
+                click(false, control),
+            ],
+            ..Default::default()
+        };
+        let mut held = false;
+        mac_control_click(&mut raw, &mut held);
+        let Event::ModifiersChanged(held_keys) = &raw.events[0] else {
+            panic!("the keys held");
+        };
+        assert!(!held_keys.ctrl);
+        for e in &raw.events[1..] {
+            let Event::PointerButton {
+                button, modifiers, ..
+            } = e
+            else {
+                panic!("a click");
+            };
+            assert_eq!(*button, PointerButton::Secondary);
+            assert!(!modifiers.ctrl);
+        }
+        assert!(!held, "the release ended it");
+        // Command+click stays a click with the command key.
+        let cmd = Modifiers::MAC_CMD | Modifiers::COMMAND;
+        let mut raw = egui::RawInput {
+            events: vec![click(true, cmd)],
+            ..Default::default()
+        };
+        mac_control_click(&mut raw, &mut held);
+        let Event::PointerButton {
+            button, modifiers, ..
+        } = &raw.events[0]
+        else {
+            panic!("a click");
+        };
+        assert_eq!(*button, PointerButton::Primary);
+        assert!(modifiers.command);
     }
 }

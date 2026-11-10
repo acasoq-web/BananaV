@@ -2,7 +2,7 @@
 //! does on the processor.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bv_core::{ImageRgbaF32, PixelFormat, PlaneData, TransferCharacteristic, VideoFrame};
 use bv_media::{Ask, Picture, VideoPool, Want};
@@ -47,6 +47,11 @@ const KEEP_FREE: u64 = 384 << 20;
 pub enum Output {
     /// RGBA, 8 bits, encoded with a transfer curve: for the screen.
     Display(TransferCharacteristic),
+    /// As `Display`, for a screen showing the frame in a room of that many
+    /// pixels: drawn at its size (its effects as at that size), it comes
+    /// back reduced on the card to [`room_size`] — a 4K frame shown in a
+    /// third of it brings back a ninth of the bytes.
+    DisplayIn(TransferCharacteristic, (u32, u32)),
     /// Linear light, 32-bit float: for files.
     Linear,
     /// Y′CbCr 4:2:0 in BT.709 colors and limited range, packed for the
@@ -54,6 +59,75 @@ pub enum Output {
     /// or P010 with `ten_bit`; with `video_levels` the frame is studio RGB,
     /// its levels kept. The frame must be opaque, its sides even.
     Yuv420 { ten_bit: bool, video_levels: bool },
+}
+
+/// Frames' bytes given back by those done showing them ([`give_back`]),
+/// for the next frames of their size.
+static SPARE: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// How many frames' bytes are kept for the next frames.
+const SPARE_FRAMES: usize = 4;
+
+/// A frame's bytes no longer needed (the preview's, once shown and let
+/// go): the next frame of its size is copied into them. A 4K frame is
+/// 33 MB, and fresh memory for every frame cost the processor more than
+/// the copy (the system hands out each page zeroed as it is first touched).
+pub fn give_back(bytes: Vec<u8>) {
+    if bytes.len() < 1 << 20 {
+        return;
+    }
+    if let Ok(mut spare) = SPARE.lock() {
+        // The newest last; the others' sizes go first.
+        if spare.len() >= SPARE_FRAMES {
+            let len = bytes.len();
+            match spare.iter().position(|b| b.len() != len) {
+                Some(i) => drop(spare.remove(i)),
+                None => drop(spare.remove(0)),
+            }
+        }
+        spare.push(bytes);
+    }
+}
+
+/// `len` bytes for a frame: given back ones of that size (their old
+/// pixels, all to be written over), else new ones.
+fn frame_bytes(len: usize) -> Vec<u8> {
+    let kept = SPARE.lock().ok().and_then(|mut spare| {
+        let i = spare.iter().rposition(|b| b.len() == len)?;
+        Some(spare.swap_remove(i))
+    });
+    kept.unwrap_or_else(|| vec![0u8; len])
+}
+
+/// A plane's bytes as the kernels read them (16-bit samples little-endian:
+/// as they are on the processors BananaV runs on, else turned).
+fn plane_bytes(data: &PlaneData) -> std::borrow::Cow<'_, [u8]> {
+    match data {
+        PlaneData::U8(d) => std::borrow::Cow::Borrowed(d),
+        PlaneData::U16(d) if cfg!(target_endian = "little") => {
+            std::borrow::Cow::Borrowed(bytemuck::cast_slice(d))
+        }
+        PlaneData::U16(d) => {
+            std::borrow::Cow::Owned(d.iter().flat_map(|v| v.to_le_bytes()).collect())
+        }
+    }
+}
+
+/// The size a `w` × `h` frame comes back at for a screen showing it in a
+/// room of `rw` × `rh` pixels ([`Output::DisplayIn`]): its own when the
+/// room is as large (or empty), else reduced by sixteenths, its shape
+/// kept — at least the room's pixels on both sides, and the same size
+/// while the room changes a little (a window being resized).
+pub fn room_size((w, h): (u32, u32), (rw, rh): (u32, u32)) -> (u32, u32) {
+    if rw == 0 || rh == 0 || w == 0 || h == 0 {
+        return (w, h);
+    }
+    let k = (f64::from(rw) / f64::from(w)).max(f64::from(rh) / f64::from(h));
+    let n = (k * 16.0).ceil().max(1.0) as u32;
+    if n >= 16 {
+        return (w, h);
+    }
+    ((w * n).div_ceil(16).max(1), (h * n).div_ceil(16).max(1))
 }
 
 /// A frame drawn by the card.
@@ -233,8 +307,12 @@ impl Compositor {
                 label: Some("frame"),
             });
         let out = draw(self, &mut enc);
+        let out = match output {
+            Output::DisplayIn(_, room) => self.for_room(&mut enc, out, room),
+            _ => out,
+        };
         let (result_buf, bytes) = match output {
-            Output::Display(tc) => {
+            Output::Display(tc) | Output::DisplayIn(tc, _) => {
                 let words = self.buffer(out.w as u64 * out.h as u64 * 4);
                 let lut = self.lut(true, tc);
                 let top = bv_color::transfer::EncodeLut::shared(tc).max();
@@ -344,8 +422,8 @@ impl Compositor {
                 .get_mapped_range(..bytes)
                 .map_err(|e| GpuError::Failed(e.to_string()))?;
             match output {
-                Output::Display(_) => {
-                    let mut rgba = vec![0u8; view.len()];
+                Output::Display(_) | Output::DisplayIn(..) => {
+                    let mut rgba = frame_bytes(view.len());
                     copy_in_bands(&mut rgba, &view);
                     Rendered::Display {
                         width: w,
@@ -897,6 +975,24 @@ impl Compositor {
                 }
                 self.transition(enc, *kind, &a, &b, *progress)
             }
+            TrackContent::Crossfade {
+                from,
+                to,
+                out,
+                into,
+            } => {
+                let a = self.event_layer(enc, scene, from, pool, below);
+                let b = self.event_layer(enc, scene, to, pool, below);
+                let dst = self.image(a.w, a.h);
+                self.kernel(
+                    enc,
+                    K::Crossfade,
+                    Params::sized(a.w, a.h).with_f(&[*out, *into]),
+                    &[&a.buf, &b.buf, &dst.buf],
+                    Grid::Pixels(a.w, a.h),
+                );
+                dst
+            }
         }
     }
 
@@ -1021,8 +1117,10 @@ impl Compositor {
             .filter(|_| !scene.video_gamma && space.is_none());
         let how = |img: &Img| m.deinterlaced(img.h);
         // BananaV's own generators draw here, on the card, as their
-        // plug-ins draw them for the processor.
+        // plug-ins draw them for the processor: in the values the project
+        // composites on (video's encoded values, or light).
         let generated = self.own_generator(enc, m);
+        let own = generated.is_some();
         let src = match generated {
             Some(img) => {
                 if let Some(p) = light {
@@ -1053,7 +1151,7 @@ impl Compositor {
         // values (on a copy: the picture may be kept for the next frame);
         // under ACES those values enter its working space, or a media's
         // file values through its color space's conversion.
-        let img = if scene.video_gamma || space.is_some() {
+        let img = if (scene.video_gamma || space.is_some()) && !own {
             let img = self.copy(enc, &src);
             self.kernel(
                 enc,
@@ -1133,7 +1231,7 @@ impl Compositor {
         );
         // Reduce Interlace Flicker: on the framed picture, before the
         // event's effects.
-        if m.clip.reduce_flicker {
+        if m.reduce_flicker {
             let out = self.image(img.w, img.h);
             self.kernel(
                 enc,
@@ -1287,24 +1385,14 @@ impl Compositor {
             return up;
         }
         // The three planes one after another, each from a word boundary.
-        let mut bytes = Vec::new();
         let mut starts = [0u32; 3];
+        let mut total = 0usize;
         for (n, p) in f.planes.iter().enumerate() {
-            starts[n] = bytes.len() as u32;
-            match &p.data {
-                PlaneData::U8(d) => bytes.extend_from_slice(d),
-                PlaneData::U16(d) => {
-                    for v in d {
-                        bytes.extend_from_slice(&v.to_le_bytes());
-                    }
-                }
-            }
-            while bytes.len() % 4 != 0 {
-                bytes.push(0);
-            }
+            starts[n] = total as u32;
+            total = (total + plane_bytes(&p.data).len()).next_multiple_of(4);
         }
-        let planes = self.buffer(bytes.len() as u64);
-        self.gpu.queue.write_buffer(&planes, 0, &bytes);
+        let planes = self.buffer(total as u64);
+        self.write_planes(&planes, f, &starts, total);
         let lut = self.lut(false, f.color.transfer);
         let (ow, oh) = (f.width.div_ceil(factor), f.height.div_ceil(factor));
         let out = self.image(ow, oh);
@@ -1365,6 +1453,36 @@ impl Compositor {
         out
     }
 
+    /// Writes a picture's planes into `planes` from `starts` (`total`
+    /// bytes, the gaps zero): straight into the card's upload memory — a 4K
+    /// picture is 12 MB, and gathering it first took a copy more (and
+    /// allocations as it grew) for every frame of the video.
+    fn write_planes(&self, planes: &wgpu::Buffer, f: &VideoFrame, starts: &[u32; 3], total: usize) {
+        let Some(size) = wgpu::BufferSize::new(total as u64) else {
+            return;
+        };
+        let zeros = [0u8; 3];
+        if let Some(mut view) = self.gpu.queue.write_buffer_with(planes, 0, size) {
+            for (n, p) in f.planes.iter().enumerate() {
+                let at = starts[n] as usize;
+                let bytes = plane_bytes(&p.data);
+                let end = at + bytes.len();
+                view.slice(at..end).copy_from_slice(&bytes);
+                let gap = end.next_multiple_of(4).min(total) - end;
+                view.slice(end..end + gap).copy_from_slice(&zeros[..gap]);
+            }
+            return;
+        }
+        // No upload memory to write into: gathered first.
+        let mut bytes = vec![0u8; total];
+        for (n, p) in f.planes.iter().enumerate() {
+            let at = starts[n] as usize;
+            let b = plane_bytes(&p.data);
+            bytes[at..at + b.len()].copy_from_slice(&b);
+        }
+        self.gpu.queue.write_buffer(planes, 0, &bytes);
+    }
+
     /// Halves the source while it is more than twice the size it shows at
     /// (always a copy: effects then change it).
     fn reduce_for_display(
@@ -1380,6 +1498,44 @@ impl Compositor {
             halved = true;
         }
         if halved { img } else { self.copy(enc, &img) }
+    }
+
+    /// `img` for a screen showing it in `room` pixels: as it is when it
+    /// fits, else reduced to [`room_size`] (2 × 2 averages, then bicubic,
+    /// as Best reduces pictures).
+    fn for_room(&mut self, enc: &mut wgpu::CommandEncoder, img: Img, room: (u32, u32)) -> Img {
+        let (tw, th) = room_size((img.w, img.h), room);
+        if (tw, th) == (img.w, img.h) {
+            return img;
+        }
+        let mut s = img;
+        while s.w >= tw * 2 && s.h >= th * 2 && s.w > 1 && s.h > 1 {
+            s = self.half(enc, &s);
+        }
+        if (s.w, s.h) == (tw, th) {
+            return s;
+        }
+        let out = self.image(tw, th);
+        // From the room's pixels to the picture's, its edges held.
+        let mut p = Params::sized(tw, th).with_f(&[
+            s.w as f32 / tw as f32,
+            0.0,
+            0.0,
+            0.0,
+            s.h as f32 / th as f32,
+            0.0,
+        ]);
+        (p.sw, p.sh) = (s.w, s.h);
+        p.i = [0, 0, tw as i32, th as i32];
+        p.j[0] = 2;
+        self.kernel(
+            enc,
+            K::PlaceHard,
+            p,
+            &[&s.buf, &out.buf],
+            Grid::Pixels(tw, th),
+        );
+        out
     }
 
     fn half(&mut self, enc: &mut wgpu::CommandEncoder, src: &Img) -> Img {
@@ -1446,7 +1602,19 @@ impl Compositor {
         ]);
         (p.sw, p.sh) = (s.w, s.h);
         p.i = place.pixels((w, h));
+        // A pixel for a pixel (as `bv_render::place_box`): as it is — the
+        // nearest pixel is that pixel, one read instead of bicubic's
+        // sixteen (a 4K event filling the frame, every frame).
+        let whole = |v: f64| (v - v.round()).abs() < 1e-9;
+        let one_to_one = place.to_box.is_none()
+            && m[0] == 1.0
+            && m[1] == 0.0
+            && m[3] == 0.0
+            && m[4] == 1.0
+            && whole(m[2])
+            && whole(m[5]);
         p.j[0] = match quality {
+            _ if one_to_one => 0,
             RenderQuality::Draft => 0,
             RenderQuality::Preview | RenderQuality::Good => 1,
             RenderQuality::Best => 2,

@@ -27,6 +27,7 @@ use bv_core::{TICKS_PER_SECOND, Tick};
 use bv_timeline::{Gesture, Project, TrackId, TrackKind};
 
 use crate::app::BananaApp;
+use crate::cursors::{self, Cursor};
 use crate::egui::{self, Pos2, Rect, pos2};
 use crate::i18n::tr;
 use crate::keymap::Context;
@@ -252,6 +253,9 @@ pub struct TimelineView {
     /// the one a menu is for.
     pub(crate) ofx_hover: Option<(String, String, egui::Pos2)>,
     pub(crate) ofx_menu: Option<ofx_envelopes::OfxHit>,
+    /// The effects' keyframe or envelope under the pointer, or dragged,
+    /// this frame: its pointer shows over the tracks' under it.
+    pub(crate) ofx_spot: Option<ofx_envelopes::OfxSpot>,
     /// The envelopes the keyframes areas hide, and a point's value being
     /// typed (Set to…).
     pub(crate) ofx_hidden: std::collections::HashSet<ofx_envelopes::EnvelopeKey>,
@@ -262,6 +266,9 @@ pub struct TimelineView {
     /// drawn last (screen tests).
     pub(crate) ofx_painted: Vec<(usize, egui::Pos2)>,
     pub(crate) ofx_areas: Vec<egui::Rect>,
+    /// The headers' sliders that take the wheel (drawn last frame): the
+    /// tracks do not scroll under them.
+    pub(crate) wheel_sliders: Vec<egui::Rect>,
     pub(crate) surround_drag: Option<surround_keys::KeyDrag>,
     pub(crate) surround_pick: Option<(bv_timeline::SurroundOwner, usize)>,
     pub(crate) surround_menu: Option<(bv_timeline::SurroundOwner, usize)>,
@@ -526,11 +533,13 @@ impl Default for TimelineView {
             ofx_drags: 0,
             ofx_hover: None,
             ofx_menu: None,
+            ofx_spot: None,
             ofx_hidden: Default::default(),
             ofx_set_to: None,
             env_set_to: None,
             ofx_painted: Vec::new(),
             ofx_areas: Vec::new(),
+            wheel_sliders: Vec::new(),
             surround_drag: None,
             surround_pick: None,
             surround_menu: None,
@@ -1359,6 +1368,9 @@ impl TimelineView {
         marker_tool::button(self, ui, &l);
         ofx_envelopes::interact(self, ui, app, &l);
         lanes::interact(self, ui, app, &l);
+        // The effects' keyframes and envelopes take the press before the
+        // tracks under them: their pointer too.
+        ofx_envelopes::show_pointer(self, ui);
         toolbar::scrollbars(self, ui, app, &l);
 
         // Desenha o estado já atualizado.
@@ -1395,7 +1407,7 @@ impl TimelineView {
     /// The splitter between the track list and the lanes, dark from the
     /// timeline's top to its bottom as VEGAS's: dragged, the list's width
     /// (its buttons give way as it narrows); double-clicked, the full width
-    /// or only the color bars, in turn.
+    /// or only the color bars, in turn. Its pointer is the splitter's ↔.
     fn list_border(&mut self, ui: &egui::Ui, app: &mut BananaApp, l: &Layout) {
         let edge = Rect::from_min_max(
             pos2(l.headers.right(), l.tc_box.top()),
@@ -1408,7 +1420,7 @@ impl TimelineView {
             egui::Sense::click_and_drag(),
         );
         if resp.hovered() || resp.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            cursors::set(ui.ctx(), Cursor::SplitterEw);
         }
         let left = l.headers.left();
         if resp.dragged()
@@ -1541,6 +1553,21 @@ impl BananaApp {
         ))
     }
 
+    /// Where `seconds` is in the space below the last track (the timeline
+    /// as last drawn), for screen tests; `None` without room there.
+    pub fn below_tracks_spot_for_review(&self, seconds: f64) -> Option<Pos2> {
+        let view = &self.timeline;
+        let l = view.layout(view.last_rect, self.project());
+        let bottom = l
+            .rows
+            .iter()
+            .map(|r| r.top + r.height)
+            .fold(l.lanes.top(), f32::max);
+        let y = bottom + 12.0;
+        (y < l.lanes.bottom() - 2.0)
+            .then(|| pos2(view.x_of(&l, Tick::from_seconds_f64(seconds)), y))
+    }
+
     /// Where `seconds` is on the ruler (the timeline as last drawn), for
     /// screen tests.
     pub fn ruler_spot_for_review(&self, seconds: f64) -> Pos2 {
@@ -1655,5 +1682,147 @@ impl BananaApp {
             .iter()
             .map(|t| (t.kind == bv_timeline::TrackKind::Video, t.clips.len()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egui::{Event, Modifiers, PointerButton, vec2};
+    use egui_kittest::Harness;
+
+    /// BananaV's pointer the last frame asked for (`None`: the system's).
+    fn shown(h: &Harness<'_, BananaApp>) -> Option<Cursor> {
+        let img = h.output().platform_output.cursor_image.clone()?;
+        Cursor::ALL
+            .into_iter()
+            .find(|&c| std::sync::Arc::ptr_eq(&img.rgba, &cursors::image(c, img.size[0]).rgba))
+    }
+
+    /// The pointer over `at`.
+    fn over(h: &mut Harness<'_, BananaApp>, at: Pos2) -> Option<Cursor> {
+        h.event(Event::PointerMoved(at));
+        h.run_steps(2);
+        shown(h)
+    }
+
+    fn button(h: &mut Harness<'_, BananaApp>, at: Pos2, pressed: bool) {
+        h.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        });
+        h.step();
+    }
+
+    /// A drag from `from` by `by`, a few steps at a time: the pointer on
+    /// the way, at its end.
+    fn drag(h: &mut Harness<'_, BananaApp>, from: Pos2, by: egui::Vec2) -> Option<Cursor> {
+        over(h, from);
+        button(h, from, true);
+        let mut at = from;
+        for _ in 0..6 {
+            at += by / 6.0;
+            h.event(Event::PointerMoved(at));
+            h.step();
+        }
+        let during = shown(h);
+        button(h, at, false);
+        h.run_steps(2);
+        during
+    }
+
+    /// The timeline's zones show VEGAS's pointers, drawn by BananaV: the
+    /// splitters' (the track list's border, a track's and a bus track's
+    /// bottom edges, the bus tracks' top), ↔ on the loop region's edges, the
+    /// arrow with ↔ on what a drag moves along the bars (kept while it is
+    /// dragged anywhere), the arrow on the ruler.
+    #[test]
+    fn the_zones_point_as_vegas_does() {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let s = Tick::from_seconds;
+        let marker = app.modify(|p| {
+            p.add_bus();
+            p.add_marker(s(6))
+        });
+        app.set_loop_region(Some(bv_core::TimeRange::new(s(2), s(3))));
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let layout = |h: &Harness<'_, BananaApp>| {
+            let view = &h.state().timeline;
+            view.layout(view.last_rect, h.state().project())
+        };
+        let l = layout(&h);
+        let x = |t: Tick| h.state().timeline.x_of(&l, t);
+        let row = &l.rows[0];
+        let border = pos2(
+            (l.headers.right() + l.lanes.left()) / 2.0,
+            l.lanes.center().y,
+        );
+        let edge = pos2(l.headers.left() + 80.0, row.top + row.height - 1.0);
+        let flag = pos2(x(s(6)) + 4.0, l.marker_bar.center().y);
+        let ruler = pos2(x(s(8)), l.ruler.center().y);
+        let loop_edge = pos2(x(s(2)), l.loop_bar.center().y);
+        let loop_middle = pos2(x(Tick::from_seconds_f64(3.5)), l.loop_bar.center().y);
+        assert_eq!(over(&mut h, border), Some(Cursor::SplitterEw), "border");
+        assert_eq!(over(&mut h, edge), Some(Cursor::SplitterNs), "track edge");
+        assert_eq!(over(&mut h, flag), Some(Cursor::ArrowLeftRight), "marker");
+        assert_eq!(over(&mut h, loop_edge), Some(Cursor::ResizeEw), "loop edge");
+        assert_eq!(
+            over(&mut h, loop_middle),
+            Some(Cursor::ArrowLeftRight),
+            "loop middle"
+        );
+        assert_eq!(over(&mut h, ruler), None, "ruler");
+        assert_eq!(
+            h.output().platform_output.cursor_icon,
+            egui::CursorIcon::Default
+        );
+        // Dragged, a marker keeps its pointer over the tracks too, and
+        // moves as before.
+        assert_eq!(
+            drag(&mut h, flag, vec2(30.0, 120.0)),
+            Some(Cursor::ArrowLeftRight)
+        );
+        let moved = h.state().project().markers.iter().find(|m| m.id == marker);
+        assert_ne!(moved.map(|m| m.time), Some(s(6)), "the marker moved");
+        // A track's height, dragged.
+        let before = h.state().timeline.track_heights.clone();
+        assert_eq!(
+            drag(&mut h, edge, vec2(0.0, 24.0)),
+            Some(Cursor::SplitterNs)
+        );
+        assert_ne!(h.state().timeline.track_heights, before, "it resized");
+        // The bus tracks: their splitter and a bus track's bottom edge.
+        h.state_mut().timeline.show_bus_tracks = true;
+        h.run_steps(2);
+        let l = layout(&h);
+        let bus = &l.bus_rows[0];
+        let bus_top = l.bus_split.center();
+        let bus_edge = pos2(
+            l.bus_headers.left() + 80.0,
+            bus.top + bus.height - bus.keys - 1.0,
+        );
+        assert_eq!(over(&mut h, bus_edge), Some(Cursor::SplitterNs), "bus edge");
+        assert_eq!(over(&mut h, bus_top), Some(Cursor::SplitterNs), "bus top");
+        let area = h.state().timeline.bus_area;
+        assert_eq!(
+            drag(&mut h, bus_top, vec2(0.0, -20.0)),
+            Some(Cursor::SplitterNs)
+        );
+        assert!(h.state().timeline.bus_area > area, "the bus area grew");
     }
 }

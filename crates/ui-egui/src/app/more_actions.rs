@@ -78,7 +78,14 @@ pub(crate) fn open_externally(path: &Path) -> std::io::Result<()> {
             .spawn()
             .map(|_| ())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
             .arg(path)
@@ -97,7 +104,16 @@ pub(crate) fn reveal_in_folder(path: &Path) -> std::io::Result<()> {
             .spawn()
             .map(|_| ())
     }
-    #[cfg(not(windows))]
+    // Finder, the file picked.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         open_externally(path.parent().unwrap_or(path))
     }

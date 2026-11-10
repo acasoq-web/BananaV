@@ -1923,7 +1923,7 @@ fn blur_columns(src: &Buf, r: usize) -> Buf {
     out
 }
 
-/// VEGAS's Linear Blur: its Gaussian (`recursive_gauss`) along the line
+/// VEGAS's Linear Blur: the Gaussian (`recursive_gauss`) along the line
 /// Angle gives (turning clockwise from across), worked out as VEGAS does:
 /// the picture sheared so the line runs along its rows (or columns, nearer
 /// upright), blurred along them by Amount × the frame's longer side times

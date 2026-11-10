@@ -1,8 +1,8 @@
 //! A project written as a `.veg`: the chunks in the order VEGAS Pro 23
 //! writes them, each structure with VEGAS's own defaults where BananaV has
 //! nothing to say (the values a new project's have), so that it opens it.
-//! What this does not write of BananaV's (its audio effects' chains,
-//! generated media…) is left out.
+//! What this does not write of BananaV's (its audio effects' chains, its
+//! older built-in generators…) is left out.
 
 use std::collections::HashMap;
 
@@ -27,6 +27,10 @@ pub struct WriteOptions<'a> {
     /// Each of BananaV's effects as another program's plug-in (`None`: it
     /// has none, and the effect is left out).
     pub effect: &'a dyn Fn(&Effect) -> Option<DocEffect>,
+    /// Each of BananaV's generators as another program's (an OpenFX
+    /// plug-in's settings, or a record of the file's own kind); `None`:
+    /// its media is left out.
+    pub generator: &'a dyn Fn(&crate::fx::PluginFx) -> Option<DocEffect>,
 }
 
 impl std::fmt::Debug for WriteOptions<'_> {
@@ -311,10 +315,22 @@ fn param_body(value: &ParamValue, keys: &[DocKey]) -> Vec<u8> {
 }
 
 fn effect_chunk(e: &DocEffect) -> Vec<u8> {
+    if e.native.is_some() {
+        return native_chunk(e);
+    }
     let mut d = Data::new(0x30);
     d.u32(0x00, 0x30)
         .bytes(0x04, &OFX_HOST.0)
-        .u32(0x14, if e.transition { 5 } else { 2 })
+        .u32(
+            0x14,
+            if e.transition {
+                5
+            } else if e.generator {
+                11
+            } else {
+                2
+            },
+        )
         .u32(0x18, 1)
         .u32(
             0x20,
@@ -348,6 +364,180 @@ fn effect_chunk(e: &DocEffect) -> Vec<u8> {
     d.push(&(e.params.len() as u32).to_le_bytes());
     d.push(&params);
     d.0
+}
+
+/// A plug-in of the file's own kind (a generator's): its class, its
+/// preset's name, its record and its keyframes (each the whole record).
+fn native_chunk(e: &DocEffect) -> Vec<u8> {
+    let class = e.native.as_deref().unwrap_or_default();
+    // A class as GUIDs are written (hex digits, dashes at their places).
+    let well_formed = class.len() == 36
+        && class.bytes().enumerate().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                c == b'-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        });
+    let guid = if well_formed {
+        Guid::parse(class)
+    } else {
+        Guid([0; 16])
+    };
+    let preset = if e.preset.is_empty() {
+        "(Default)"
+    } else {
+        &e.preset
+    };
+    let mut d = Data::new(0x38);
+    let last = e.native_keys.last().map_or(0, |k| k.time);
+    d.u32(0x00, 0x38)
+        .bytes(0x04, &guid.0)
+        .u32(0x14, e.native_data.len() as u32)
+        .u32(0x18, e.native_keys.len() as u32)
+        .i64(0x20, last)
+        .u32(0x28, 11)
+        .u32(0x2C, native_kind(class));
+    let bytes = d.text(preset, false);
+    d.u32(0x34, bytes);
+    d.push(&e.native_data);
+    for k in &e.native_keys {
+        let mut h = Data::new(0x1C);
+        h.u32(0x00, 0x1C)
+            .i64(0x04, k.time)
+            .u32(0x0C, k.curve)
+            .u32(0x14, k.flags)
+            .u32(0x18, k.data.len() as u32);
+        d.push(&h.0);
+        d.push(&k.data);
+    }
+    d.0
+}
+
+/// The number a record of the file's own kind carries for its class (as
+/// the files have it).
+fn native_kind(class: &str) -> u32 {
+    if class.eq_ignore_ascii_case("02FD3B60-986B-11D4-9F6F-00485481BD31") {
+        0x11A
+    } else {
+        0x10E
+    }
+}
+
+/// A generated media's entry: the media's structure and its path (the
+/// generator's), the generator's header (its length, number and name), its
+/// stream (its frame's size, at a thousand frames a second), the generator
+/// itself and the stream's structure (its fields, alpha, pixels' shape and
+/// rotation).
+fn generated_entry(m: &MediaInfo, id: u32, o: &WriteOptions<'_>) -> Option<Vec<u8>> {
+    use crate::model::{AlphaChannel, Generator, MediaRotation};
+    let MediaSource::Generated(Generator::Plugin(fx)) = &m.source else {
+        return None;
+    };
+    let v = m.video?;
+    let mut e = (o.generator)(fx)?;
+    e.generator = true;
+    let mut d = Data::new(0x80);
+    d.u32(0x00, 0x80)
+        .u32(0x18, 1)
+        .u32(0x20, 3)
+        .u32(0x30, u32::MAX)
+        .u32(0x38, 1)
+        .u32(0x3C, id)
+        .f64(0x68, 1.0)
+        .u32(0x70, u32::MAX)
+        .u64(0x78, u64::MAX);
+    let n = id.saturating_sub(1);
+    let unique = match &e.native {
+        Some(class) => format!("{{{class}}}"),
+        None => format!("{{Svfx:{}}}", e.plugin),
+    };
+    let bytes = d.text(&format!("META:\\Video Generator\\{unique} ({n})[0]"), false);
+    d.u32(0x24, bytes);
+    // The header: its length, number and name.
+    let mut h = Data::new(0x224);
+    h.u64(0x00, 0x224)
+        .i64(0x08, units(m.duration))
+        .i64(0x10, i64::from(n))
+        .u32(0x18, 1);
+    let name: Vec<u16> = fx.name.encode_utf16().take(259).collect();
+    for (k, u) in name.iter().enumerate() {
+        h.u16(0x1C + 2 * k, *u);
+    }
+    d.push(&h.0);
+    // The stream: the generator's own frame (before its rotation), the
+    // size asked (in square pixels), a thousand frames a second.
+    let turned = v.reading.rotation.quarters() % 2 == 1;
+    let (w, ht) = if turned {
+        (v.height, v.width)
+    } else {
+        (v.width, v.height)
+    };
+    let aspect = f64::from(v.pixel_aspect.num) / f64::from(v.pixel_aspect.den.max(1));
+    let asked = ((f64::from(w) / aspect).round() as i32).max(1);
+    let format = |par: f64| {
+        let mut f = Data::new(0x40);
+        f.u32(0x00, 0x40)
+            .i32(0x04, -1)
+            .f64(0x10, 1000.0)
+            .f64(0x18, par)
+            .u32(0x28, 2);
+        f.0
+    };
+    let mut s = Data::new(0xB0);
+    s.u64(0x00, 0xB0)
+        .u32(0x08, 2)
+        .i32(0x0C, w as i32)
+        .i32(0x10, ht as i32)
+        .i32(0x14, asked)
+        .i32(0x18, ht as i32)
+        .bytes(0x1C, &format(1.0))
+        .bytes(0x5C, &format(aspect))
+        .u64(
+            0x9C,
+            (units(m.duration) as f64 * 1000.0 / 10_000_000.0).round() as u64,
+        )
+        .i64(0xA4, i64::from(n))
+        .u32(0xAC, 2);
+    d.push(&s.0);
+    // The generator.
+    d.push(&1u32.to_le_bytes());
+    d.push(&effect_chunk(&e));
+    // The stream's structure.
+    let mut st = Data::new(0x98);
+    st.u32(0x00, 0x98)
+        .u32(0x04, VIDEO)
+        .u32(0x0C, 1)
+        .u32(
+            0x18,
+            match v.field_order {
+                bv_core::FieldOrder::UpperFirst => 1,
+                bv_core::FieldOrder::LowerFirst => 2,
+                _ => 0,
+            },
+        )
+        .u32(
+            0x1C,
+            match v.reading.alpha {
+                AlphaChannel::None => 0,
+                AlphaChannel::Straight => 1,
+                AlphaChannel::PremultipliedDirty => 3,
+                _ => 2,
+            },
+        )
+        .f64(0x38, aspect)
+        .u32(
+            0x40,
+            match v.reading.rotation {
+                MediaRotation::Clockwise => 1,
+                MediaRotation::Inverted => 2,
+                MediaRotation::Counterclockwise => 3,
+                _ => 0,
+            },
+        )
+        .u64(0x8C, u64::MAX);
+    d.push(&st.0);
+    Some(d.0)
 }
 
 /// A list of effects: those switched off in it too, the first `before`
@@ -716,10 +906,15 @@ fn event(
         .u32(0x48, group)
         .u32(0x4C, 2)
         .u32(0x50, 1);
-    // The fades: their curves (and the pair the other way round), lengths.
+    // The fades: their curves, their reciprocal curves (the other fade's
+    // when the event has none of its own), lengths.
     let (curve_in, curve_out) = (
         fade_curve_number(c.fade_in_curve),
         fade_curve_number(c.fade_out_curve),
+    );
+    let (reciprocal_in, reciprocal_out) = (
+        fade_curve_number(c.fade_in_reciprocal.unwrap_or(c.fade_out_curve)),
+        fade_curve_number(c.fade_out_reciprocal.unwrap_or(c.fade_in_curve)),
     );
     let mut fades = Data::new(0x48);
     fades
@@ -728,8 +923,8 @@ fn event(
         .f32(0x10, c.normalize.unwrap_or(1.0))
         .i32(0x14, curve_in)
         .i32(0x18, curve_out)
-        .i32(0x1C, curve_out)
-        .i32(0x20, curve_in)
+        .i32(0x1C, reciprocal_in)
+        .i32(0x20, reciprocal_out)
         .i64(0x28, units(c.fade_in))
         .i64(0x30, units(c.fade_out));
     h.push(&fades.0);
@@ -817,16 +1012,26 @@ fn event(
                 Some(ResampleMode::FrameBlend) => 0x80,
                 Some(ResampleMode::OpticalFlow) => 0x800,
             };
-            let transition = c.transition_fx.as_ref().and_then(|fx| {
-                let mut doc = (o.effect)(&Effect::plugin((**fx).clone()))?;
+            // Its transitions: the one it comes in with, the one it goes out
+            // with (the same chunk; the file keeps each in its fade's list).
+            let chunk = |fx: &crate::fx::PluginFx, bypass: bool| {
+                let mut doc = (o.effect)(&Effect::plugin(fx.clone()))?;
                 doc.transition = true;
-                doc.bypass = c.transition_bypass;
+                doc.bypass = bypass;
                 // Where it is along the transition, first as the file has it.
                 doc.params.retain(|(n, _)| n != "Transition");
                 doc.params
                     .insert(0, ("Transition".to_string(), ParamValue::Number(0.0)));
                 Some(effect_chunk(&doc))
-            });
+            };
+            let transition = c
+                .transition_fx
+                .as_ref()
+                .and_then(|fx| chunk(fx, c.transition_bypass));
+            let exit = c
+                .out_transition
+                .as_deref()
+                .and_then(|out| chunk(out.fx.as_deref()?, out.bypass));
             let mut v = Data::new(0x90);
             v.u32(0x00, 0x90)
                 .u32(
@@ -838,32 +1043,49 @@ fn event(
                 .f64(0x08, 1.0)
                 .f64(0x10, 1.0)
                 .u32(0x70, u32::from(transition.is_some()))
+                .u32(0x74, u32::from(exit.is_some()))
                 .f64(0x78, f64::from(c.undersample))
                 .f64(0x88, 1.0);
-            if let Some(t) = &transition {
+            for t in [&transition, &exit].into_iter().flatten() {
                 v.push(t);
             }
             w.begin_list(VIDEO_EVENT_LIST);
             w.block(VIDEO_EVENT, &v.0);
-            if let (Some(env), true) = (
-                c.envelope(EnvelopeKind::TransitionProgress),
-                transition.is_some() && c.fade_in > Tick::ZERO,
-            ) {
-                let length = c.fade_in.0 as f64;
-                let points = env
-                    .points
-                    .iter()
-                    .map(|p| {
-                        let place = (p.at.0 as f64 / length * 1_000_000.0).round() as i64;
-                        (place, p.value, key_curve_number(p.curve))
-                    })
-                    .collect();
-                event_envelopes(
-                    w,
-                    VIDEO_EVENT_ENVELOPES_1,
-                    (units(c.start), 1_000_000),
-                    &[(TRANSITION_PROGRESS, (0.0, 1.0, 0.5), points)],
-                );
+            // Its transition progress envelope: the fade in's part and the
+            // fade out's, each in its own list as its fade's parts of a
+            // million (where a fade has none, VEGAS's: 0 to 1 coming in, 1
+            // to 0 going out, smooth).
+            if let Some(env) = c.envelope(EnvelopeKind::TransitionProgress) {
+                let smooth = key_curve_number(crate::fx::KeyCurve::Smooth);
+                for (list, from, span, ends) in [
+                    (VIDEO_EVENT_ENVELOPES_1, Tick::ZERO, c.fade_in, (0.0, 1.0)),
+                    (
+                        VIDEO_EVENT_ENVELOPES_2,
+                        c.duration - c.fade_out,
+                        c.fade_out,
+                        (1.0, 0.0),
+                    ),
+                ] {
+                    let mut points: Vec<_> = env
+                        .points
+                        .iter()
+                        .filter(|p| span > Tick::ZERO && p.at >= from && p.at <= from + span)
+                        .map(|p| {
+                            let share = (p.at - from).0 as f64 / span.0 as f64;
+                            let place = (share * 1_000_000.0).round() as i64;
+                            (place, p.value, key_curve_number(p.curve))
+                        })
+                        .collect();
+                    if points.is_empty() {
+                        points = vec![(0, ends.0, smooth), (1_000_000, ends.1, smooth)];
+                    }
+                    event_envelopes(
+                        w,
+                        list,
+                        (units(c.start), 1_000_000),
+                        &[(TRANSITION_PROGRESS, (0.0, 1.0, 0.5), points)],
+                    );
+                }
             }
             w.end();
             if c.effects.iter().any(|e| (o.effect)(e).is_some()) {
@@ -1219,7 +1441,7 @@ pub fn write(p: &Project, o: &WriteOptions<'_>) -> Vec<u8> {
         .enumerate()
         .filter_map(|(i, m)| {
             let id = 20 + i as u32;
-            let e = media_entry(m, id)?;
+            let e = media_entry(m, id).or_else(|| generated_entry(m, id, o))?;
             ids.media.insert(m.id, id);
             Some((id, e))
         })

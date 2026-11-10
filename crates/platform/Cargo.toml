@@ -12,6 +12,8 @@ layer = 1
 
 [dependencies]
 bv-core.workspace = true
+# Mach-O libraries read on any system; Core Foundation on macOS.
+bv-apple.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -46,3 +48,45 @@ libc = "0.2"
 x11-dl = "2.21"
 # The same ALSA bindings the audio output uses (cpal): the MIDI ports.
 alsa = "0.11"
+
+# macOS: AppKit and Foundation through objc2 (the windows, the mouse, the
+# displays, the trash, the color sampler, the Dock), the kernel's calls.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSFileManager",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSOperation",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSColor",
+    "NSColorSampler",
+    "NSColorSpace",
+    "NSDockTile",
+    "NSEvent",
+    "NSGraphics",
+    "NSImage",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSSound",
+    "NSView",
+    "NSWindow",
+] }

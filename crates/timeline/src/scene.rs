@@ -22,6 +22,8 @@ pub enum FxOwner {
     Output,
     /// The transition an event comes in with.
     Transition(ClipId),
+    /// The transition an event goes out with, over its fade-out.
+    TransitionOut(ClipId),
     /// A track's compositor: its Compositing Mode's (`false`) or, a
     /// compositing parent's, its Parent Composite Mode's (`true`).
     Compositor(TrackId, bool),
@@ -416,6 +418,15 @@ pub enum TrackContent<'a> {
         to: EventLayer<'a>,
         progress: f32,
     },
+    /// The top event over the one before it with no transition: the two
+    /// summed, `from` times `out` and `to` times `into` (each channel at
+    /// most 1), as VEGAS's crossfades are.
+    Crossfade {
+        from: EventLayer<'a>,
+        to: EventLayer<'a>,
+        out: f32,
+        into: f32,
+    },
 }
 
 /// An event's picture placed in the frame.
@@ -469,6 +480,14 @@ pub struct MediaLayer<'a> {
     /// The project's video levels pixel format: Y′CbCr comes in as studio
     /// RGB.
     pub video_levels: bool,
+    /// The project's pictures hold 8 bits a channel, and it composites on
+    /// the encoded values (video gamma): generated media are drawn as an
+    /// 8-bit editor's, in those values.
+    pub eight_bit: bool,
+    pub encoded: bool,
+    /// The event's Reduce Interlace Flicker blurs it (a pixel up and down
+    /// a quarter each): in an interlaced project only, as VEGAS's.
+    pub reduce_flicker: bool,
 }
 
 impl MediaLayer<'_> {
@@ -553,6 +572,7 @@ impl<'a> FrameScene<'a> {
                 TrackContent::Nothing => [None, None],
                 TrackContent::Event(e) => [Some(e), None],
                 TrackContent::Transition { from, to, .. } => [from.as_mut(), Some(to)],
+                TrackContent::Crossfade { from, to, .. } => [Some(from), Some(to)],
             };
             for e in layers.into_iter().flatten() {
                 if let Some(m) = &mut e.source {
@@ -572,6 +592,7 @@ impl<'a> FrameScene<'a> {
                 TrackContent::Nothing => (None, None),
                 TrackContent::Event(e) => (None, Some(e)),
                 TrackContent::Transition { from, to, .. } => (from.as_ref(), Some(to)),
+                TrackContent::Crossfade { from, to, .. } => (Some(from), Some(to)),
             };
             a.into_iter()
                 .chain(b)
@@ -949,12 +970,9 @@ fn track_content<'a>(
     let progressed = b
         .envelope(crate::envelope::EnvelopeKind::TransitionProgress)
         .is_some();
-    let plugin = |length: Tick| {
+    let plugin = |length: Tick, progress: f32| {
         let time = if progressed {
-            Tick(
-                (b.transition_progress(t - b.start, length) as f64 * length.0 as f64).round()
-                    as i64,
-            )
+            Tick((progress as f64 * length.0 as f64).round() as i64)
         } else {
             t - b.start
         };
@@ -981,23 +999,90 @@ fn track_content<'a>(
     } else {
         b.transition
     };
+    // As VEGAS's: with a transition the fades' curves count for nothing —
+    // it goes on as far as its fade has gone, or as its progress envelope
+    // says —; without one, each fade is its curve.
+    let entrance = b.has_entrance_transition();
     if let Some(a) = below {
-        // The automatic crossfade where the event overlaps the one before.
-        return Some(TrackContent::Transition {
-            kind,
-            plugin: plugin(a.end() - b.start),
-            from: Some(event_layer(project, a, t, width, height)),
+        // The automatic crossfade where the event overlaps the one before:
+        // this event's fade-in says how (the one before's fade-out counts
+        // for nothing).
+        let length = a.end() - b.start;
+        let u = ratio(t - b.start, length);
+        let from = event_layer(project, a, t, width, height);
+        if entrance {
+            let progress = b.progress_at(t - b.start, u);
+            return Some(TrackContent::Transition {
+                kind,
+                plugin: plugin(length, progress),
+                from: Some(from),
+                to: layer_b,
+                progress,
+            });
+        }
+        // The two summed: the coming event by its fade-in's curve, the one
+        // going by that fade-in's reciprocal curve.
+        return Some(TrackContent::Crossfade {
+            from,
             to: layer_b,
-            progress: b.transition_progress(t - b.start, a.end() - b.start),
+            out: 1.0 - video_curve(b.fade_in_reciprocal.unwrap_or(a.fade_out_curve), u),
+            into: video_curve(b.fade_in_curve, u),
         });
     }
     if fade_in > Tick::ZERO && t < b.start + fade_in {
+        let u = ratio(t - b.start, fade_in);
+        if entrance {
+            let progress = b.progress_at(t - b.start, u);
+            return Some(TrackContent::Transition {
+                kind,
+                plugin: plugin(fade_in, progress),
+                from: None,
+                to: layer_b,
+                progress,
+            });
+        }
+        let k = video_curve(b.fade_in_curve, u);
+        layer_b.fade = Some(layer_b.fade.unwrap_or(1.0) * k);
+        return Some(TrackContent::Event(layer_b));
+    }
+    // Its exit transition over its fade-out: from the event (going) to what
+    // is below it (coming), not played backwards, as VEGAS's.
+    if b.has_exit_transition()
+        && let Some(out) = b.out_transition.as_deref()
+        && fade_out > Tick::ZERO
+        && t >= b.end() - fade_out
+    {
+        let begins = b.end() - fade_out;
+        layer_b.fade = None;
+        let progress = b.progress_at(t - b.start, ratio(t - begins, fade_out));
+        let plugin = out.fx.as_deref().map(|fx| {
+            Box::new(PluginCall {
+                fx,
+                owner: FxOwner::TransitionOut(b.id),
+                index: 0,
+                time: if progressed {
+                    Tick((progress as f64 * fade_out.0 as f64).round() as i64)
+                } else {
+                    t - begins
+                },
+                duration: fade_out,
+                timeline: t + project.ruler_offset,
+                rate: project.settings.frame_rate,
+                full_size: (project.settings.width, project.settings.height),
+                source: None,
+            })
+        });
         return Some(TrackContent::Transition {
-            kind,
-            plugin: plugin(fade_in),
-            from: None,
-            to: layer_b,
-            progress: video_curve(b.fade_in_curve, b.transition_progress(t - b.start, fade_in)),
+            kind: out.kind,
+            plugin,
+            from: Some(layer_b),
+            to: EventLayer {
+                clip: b.id,
+                source: None,
+                level: 1.0,
+                fade: None,
+            },
+            progress,
         });
     }
     Some(TrackContent::Event(layer_b))
@@ -1046,6 +1131,10 @@ fn event_layer<'a>(
             // as it is.
             video_levels: project.settings.pixel_format.is_video_levels()
                 || info.video.is_some_and(|v| v.full_range),
+            eight_bit: project.settings.pixel_format.is_eight_bit(),
+            encoded: project.settings.composites_in_video_gamma(),
+            reduce_flicker: clip.reduce_flicker
+                && project.settings.field_order != bv_core::FieldOrder::Progressive,
         })
     });
     EventLayer {
@@ -1224,7 +1313,7 @@ impl<'a> FrameScene<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CompositeMode, Generator, ProjectSettings, TrackKind};
+    use crate::{CompositeMode, FadeCurve, Generator, OutTransition, ProjectSettings, TrackKind};
 
     fn project() -> (Project, crate::MediaId) {
         let mut p = Project::new(ProjectSettings::default());
@@ -1616,7 +1705,85 @@ mod tests {
         };
         assert_eq!(shown(&p), (Transition::FadeThroughBlack, true));
         p.clip_mut(b).unwrap().transition_bypass = true;
-        assert_eq!(shown(&p), (Transition::default(), false));
+        assert!(matches!(
+            frame_scene(&p, s(4), 64, 36).tracks[0].content,
+            TrackContent::Crossfade { .. }
+        ));
+    }
+
+    /// An event going out with a transition over its fade-out: from the
+    /// event to nothing, as far on as the fade has gone in time — the fade's
+    /// curve counts for nothing then, as VEGAS's —; switched off, a plain
+    /// fade; split, the right part keeps it.
+    #[test]
+    fn an_exit_transition_plays_over_the_fade_out() {
+        let (mut p, m) = project();
+        let v = p.tracks[0].id;
+        let s = Tick::from_seconds;
+        let a = p.insert_media(m, Tick::ZERO, Some(v), None).unwrap()[0];
+        let end = p.clip(a).unwrap().end();
+        p.clip_mut(a).unwrap().fade_out = s(1);
+        let plain = |p: &Project, t: Tick| match frame_scene(p, t, 64, 36).tracks[0].content {
+            TrackContent::Event(ref e) => e.fade,
+            _ => panic!("a plain fade expected"),
+        };
+        let half = end - Tick(Tick::SECOND.0 / 2);
+        let quarter = end - Tick(Tick::SECOND.0 * 3 / 4);
+        p.clip_mut(a).unwrap().fade_out_curve = FadeCurve::Fast;
+        let faded = plain(&p, half).expect("fading");
+        let c = p.clip_mut(a).unwrap();
+        c.out_transition = Some(Box::new(OutTransition {
+            kind: Transition::FadeThroughBlack,
+            fx: Some(Box::new(PluginFx {
+                id: "test.Wipe".into(),
+                version: [1, 0],
+                name: "Wipe".into(),
+                params: Default::default(),
+            })),
+            bypass: false,
+        }));
+        let shown = |p: &Project, t: Tick| {
+            let sc = frame_scene(p, t, 64, 36);
+            let TrackContent::Transition {
+                kind,
+                plugin,
+                from,
+                to,
+                progress,
+            } = &sc.tracks[0].content
+            else {
+                panic!("an exit transition expected");
+            };
+            let from = from.as_ref().expect("the event goes out");
+            assert!(from.fade.is_none() && to.source.is_none(), "to nothing");
+            let owner = plugin.as_ref().map(|c| (c.owner, c.time, c.duration));
+            (*kind, owner, *progress)
+        };
+        let (kind, owner, progress) = shown(&p, half);
+        assert_eq!(kind, Transition::FadeThroughBlack);
+        assert_eq!(
+            owner,
+            Some((FxOwner::TransitionOut(a), Tick(Tick::SECOND.0 / 2), s(1)))
+        );
+        assert!((progress - 0.5).abs() < 1e-6, "{progress}");
+        assert!((shown(&p, quarter).2 - 0.25).abs() < 1e-6, "in time");
+        assert!(shown(&p, end - s(1)).2 < 1e-6, "it begins at nothing gone");
+        // Before the fade-out, the event as it is.
+        assert!(matches!(
+            frame_scene(&p, s(1), 64, 36).tracks[0].content,
+            TrackContent::Event(_)
+        ));
+        p.clip_mut(a)
+            .unwrap()
+            .set_transition_plugin(true, None, false);
+        assert_eq!(plain(&p, half), Some(faded), "taken out: the plain fade");
+        let c = p.clip_mut(a).unwrap();
+        c.out_transition = Some(Box::default());
+        c.out_transition.as_mut().unwrap().bypass = true;
+        assert_eq!(plain(&p, half), Some(faded), "switched off: the plain fade");
+        let right = p.split(a, s(1)).unwrap()[0];
+        assert!(p.clip(a).unwrap().out_transition.is_none());
+        assert!(p.clip(right).unwrap().out_transition.is_some());
     }
 
     #[test]
@@ -1627,6 +1794,8 @@ mod tests {
         let s = Tick::from_seconds;
         p.insert_media(m, Tick::ZERO, Some(v), None).unwrap();
         let b = p.insert_media(m, s(3), Some(v), None).unwrap()[0];
+        // A transition's progress (without one, a crossfade is its curves).
+        p.clip_mut(b).unwrap().transition = Transition::FadeThroughBlack;
         let progress = |p: &Project, t: Tick| {
             let sc = frame_scene(p, t, 64, 36);
             let TrackContent::Transition { progress, .. } = &sc.tracks[0].content else {
@@ -1646,7 +1815,8 @@ mod tests {
             .envelope(EnvelopeKind::TransitionProgress)
             .unwrap();
         assert_eq!(env.points.len(), 2);
-        assert!((progress(&p, Tick::from_seconds_f64(3.5)) - 0.25).abs() < 1e-6);
+        // Smooth, as VEGAS's: a quarter of the way, 5/32 of it.
+        assert!((progress(&p, Tick::from_seconds_f64(3.5)) - 0.156_25).abs() < 1e-6);
         // Up to 100 % halfway, then back to 0.
         p.set_envelope_point(b, EnvelopeKind::TransitionProgress, s(1), 1.0)
             .unwrap();
@@ -1723,13 +1893,13 @@ mod tests {
         let sc = frame_scene(&p, s(1), 64, 36);
         assert_eq!(sc.tracks.len(), 1, "the empty track has no layer");
         assert!(matches!(sc.tracks[0].content, TrackContent::Event(_)));
-        // In the overlap: a crossfade halfway (3 to 5 s, at 4 s).
+        // In the overlap: a crossfade halfway (3 to 5 s, at 4 s), the two
+        // summed by the smooth curves (half and half there).
         let sc = frame_scene(&p, s(4), 64, 36);
-        let TrackContent::Transition { from, progress, .. } = &sc.tracks[0].content else {
+        let TrackContent::Crossfade { out, into, .. } = &sc.tracks[0].content else {
             panic!("crossfade expected");
         };
-        assert!(from.is_some());
-        assert!((progress - 0.5).abs() < 1e-6);
+        assert!((out - 0.5).abs() < 1e-6 && (into - 0.5).abs() < 1e-6);
         // Both pictures come from the same media, at different instants.
         let times: Vec<Tick> = sc.media_layers().map(|(_, l)| l.time).collect();
         assert_eq!(times, vec![s(4), s(1)]);
@@ -1759,7 +1929,7 @@ mod tests {
         // In it, the crossfade.
         assert!(matches!(
             frame_scene(&p, s(4), 64, 36).tracks[0].content,
-            TrackContent::Transition { from: Some(_), .. }
+            TrackContent::Crossfade { .. }
         ));
         // Without automatic crossfades, their own fades.
         p.auto_crossfade = false;

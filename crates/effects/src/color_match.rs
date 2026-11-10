@@ -356,7 +356,7 @@ impl Transfer {
         from_lab([if self.brightness { m(0) } else { v[0] }, m(1), m(2)])
     }
 
-    /// A premultiplied pixel, as VEGAS's float pictures: transparent ones
+    /// A premultiplied pixel, as 32-bit projects hold it: transparent ones
     /// go to nothing, opaque ones stay opaque, the others matched straight
     /// and premultiplied again; then `keep` of the pixel mixed back.
     fn pixel(&self, c: [f32; 4]) -> [f32; 4] {

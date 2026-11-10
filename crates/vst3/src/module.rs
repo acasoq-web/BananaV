@@ -30,6 +30,14 @@ pub enum Error {
     NoClass,
     /// It refused a step (what, and its result code).
     Refused(&'static str, i32),
+    /// It crashed, now or before (its module is switched off until
+    /// BananaV starts again).
+    Crashed,
+    /// A 32-bit module and no 32-bit bridge to run it in (or 32-bit
+    /// plug-ins turned off).
+    NeedsBridge,
+    /// The 32-bit bridge failed (its reason).
+    Bridge(String),
 }
 
 impl std::fmt::Display for Error {
@@ -39,6 +47,9 @@ impl std::fmt::Display for Error {
             Error::NoFactory => write!(f, "the library is no VST 3 module"),
             Error::NoClass => write!(f, "the module has no such effect"),
             Error::Refused(what, code) => write!(f, "the plug-in refused {what} ({code:#x})"),
+            Error::Crashed => write!(f, "the plug-in crashed and was switched off"),
+            Error::NeedsBridge => write!(f, "a 32-bit plug-in, and 32-bit plug-ins are off"),
+            Error::Bridge(why) => write!(f, "the 32-bit bridge failed: {why}"),
         }
     }
 }
@@ -79,6 +90,9 @@ pub struct Module {
     pub(crate) factory: ComPtr<IPluginFactoryVtbl>,
     /// The host application its objects are given.
     pub(crate) host: Own<HostApplication>,
+    /// One of its effects crashed (`guard.rs`): its code is not called
+    /// again.
+    crashed: std::sync::atomic::AtomicBool,
     _library: Option<std::mem::ManuallyDrop<libloading::Library>>,
 }
 
@@ -109,6 +123,17 @@ impl Module {
 
     pub fn classes(&self) -> &[ClassInfo] {
         &self.classes
+    }
+
+    /// Whether one of its effects crashed: it is switched off until
+    /// BananaV starts again.
+    pub fn crashed(&self) -> bool {
+        self.crashed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn switch_off(&self) {
+        self.crashed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Its audio effects.
@@ -229,6 +254,7 @@ impl Module {
             classes,
             factory,
             host,
+            crashed: std::sync::atomic::AtomicBool::new(false),
             _library: library.map(std::mem::ManuallyDrop::new),
         }
     }
@@ -246,10 +272,20 @@ fn architecture() -> String {
 
 /// The library to load for `path`: in a bundle (a folder) the one for
 /// this system — `Contents/x86_64-win/Name.vst3`,
-/// `Contents/x86_64-linux/Name.so` —, else the file itself.
+/// `Contents/x86_64-linux/Name.so`, macOS's `Contents/MacOS/Name` (its
+/// Info.plist's executable, one file for every processor) —, else the
+/// file itself.
 pub fn library_of(path: &Path) -> PathBuf {
     if !path.is_dir() {
         return path.to_path_buf();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(exe) = bv_apple::Bundle::open(path).and_then(|b| b.executable()) {
+        return exe;
+    }
+    if cfg!(target_os = "macos") {
+        let name = path.file_stem().map(PathBuf::from).unwrap_or_default();
+        return path.join("Contents").join("MacOS").join(name);
     }
     let name = if cfg!(windows) {
         path.file_name().map(PathBuf::from)
@@ -260,6 +296,46 @@ pub fn library_of(path: &Path) -> PathBuf {
     path.join("Contents")
         .join(architecture())
         .join(name.unwrap_or_default())
+}
+
+/// The processor number of the Windows library at `path` (its header's).
+fn pe_machine(path: &Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 64];
+    f.read_exact(&mut head).ok()?;
+    if &head[..2] != b"MZ" {
+        return None;
+    }
+    let pe = u32::from_le_bytes(head[60..64].try_into().ok()?);
+    f.seek(SeekFrom::Start(u64::from(pe))).ok()?;
+    let mut sig = [0u8; 6];
+    f.read_exact(&mut sig).ok()?;
+    (&sig[..4] == b"PE\0\0").then(|| u16::from_le_bytes([sig[4], sig[5]]))
+}
+
+/// The 32-bit Windows library of module `path`: a bundle's `x86-win` one,
+/// or the library itself.
+pub fn library_32(path: &Path) -> PathBuf {
+    if !path.is_dir() {
+        return path.to_path_buf();
+    }
+    path.join("Contents")
+        .join("x86-win")
+        .join(path.file_name().map(PathBuf::from).unwrap_or_default())
+}
+
+/// Whether module `path` (a bundle or a library) is a 32-bit Windows one
+/// with nothing for this 64-bit program: BananaV runs it in its 32-bit
+/// bridge.
+pub fn is_32bit(path: &Path) -> bool {
+    if !cfg!(windows) || std::env::consts::ARCH == "x86" {
+        return false;
+    }
+    if path.is_dir() && library_of(path).is_file() {
+        return false;
+    }
+    pe_machine(&library_32(path)) == Some(0x014C)
 }
 
 type Loaded = Result<Arc<Module>, Error>;
@@ -328,7 +404,56 @@ impl Drop for QuietErrors {
     }
 }
 
+/// A macOS bundle (`Name.vst3`): loaded through Core Foundation, which
+/// finds its executable; told its bundle as it starts (`bundleEntry`), as
+/// the SDK asks. A module made for the Mac's other processor is refused
+/// with the reason (an Intel-only one on Apple's chips runs with BananaV
+/// opened through Rosetta).
+#[cfg(target_os = "macos")]
+fn load_bundle(path: &Path) -> Result<Module, Error> {
+    // The guard's handlers before the plug-in's code (it may add its own).
+    bv_apple::guard::install();
+    let bundle = bv_apple::Bundle::open(path)
+        .ok_or_else(|| Error::Load("not a bundle with an executable".to_string()))?;
+    let cpus = bundle.architectures();
+    let me = bv_apple::macho::this_cpu();
+    if !cpus.is_empty() && !cpus.contains(&me) {
+        let made: Vec<&str> = cpus.iter().map(|&c| bv_apple::macho::cpu_name(c)).collect();
+        return Err(Error::Load(format!(
+            "made for {} only, not for this Mac's {} (open BananaV with Rosetta for Intel-only plug-ins)",
+            made.join(", "),
+            bv_apple::macho::cpu_name(me)
+        )));
+    }
+    bundle.load().map_err(Error::Load)?;
+    let factory = bundle
+        .function("GetPluginFactory")
+        .ok_or(Error::NoFactory)?;
+    // SAFETY: the module's entry points, with the types the SDK gives them
+    // (`bundleEntry` takes the bundle and says whether it started).
+    unsafe {
+        let entry = std::mem::transmute::<*mut std::ffi::c_void, GetFactoryProc>(factory.as_ptr());
+        if let Some(start) = bundle.function("bundleEntry") {
+            let start = std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn(*mut std::ffi::c_void) -> u8,
+            >(start.as_ptr());
+            if start(bundle.raw()) == 0 {
+                return Err(Error::Refused("to start (bundleEntry)", 0));
+            }
+        }
+        let factory = ComPtr::from_raw(entry()).ok_or(Error::NoFactory)?;
+        // Never unloaded.
+        let _ = bundle.leak();
+        Ok(Module::from_factory(path.to_path_buf(), factory, None))
+    }
+}
+
 fn load_library(path: &Path) -> Result<Module, Error> {
+    #[cfg(target_os = "macos")]
+    if path.is_dir() {
+        return load_bundle(path);
+    }
     let file = library_of(path);
     #[cfg(windows)]
     let _quiet = QuietErrors::new();

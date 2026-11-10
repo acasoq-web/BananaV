@@ -344,22 +344,34 @@ pub fn generator_values(
     )
 }
 
-/// Media a generator plug-in draws.
+/// Media a generator plug-in draws: its pictures in the values the
+/// project composites on, as an 8-bit editor's generators draw them there
+/// — video's encoded values in a project composited in video gamma (made
+/// light here, as every reader's pictures are), light in one composited
+/// in light.
 pub(crate) struct PluginVideo {
     instance: Instance,
     rate: FrameRate,
     size: (u32, u32),
     /// The length the instance was told, in frames.
     span: f64,
+    /// The project's: 8-bit pictures, composited on the encoded values.
+    eight_bit: bool,
+    encoded: bool,
+    /// How its Media Properties read its pictures' alpha.
+    alpha: bv_timeline::AlphaChannel,
     /// The last picture: its frame and size.
     cache: Option<(i64, (u32, u32), Arc<ImageRgbaF32>)>,
 }
 
 impl PluginVideo {
+    /// Generator `fx`'s pictures, `width` × `height` pixels shaped
+    /// `pixel_aspect` (width over height), at `rate`.
     pub(crate) fn new(
         fx: &PluginFx,
         width: u32,
         height: u32,
+        pixel_aspect: f64,
         rate: FrameRate,
     ) -> Result<PluginVideo> {
         let failed = |e: bv_ofx::Error| MediaError::Unsupported(format!("{}: {e}", fx.name));
@@ -374,12 +386,16 @@ impl PluginVideo {
             interactive: false,
         };
         let instance = Instance::new(&plugin, context, &setup).map_err(failed)?;
+        instance.set_media_pixel_aspect(pixel_aspect);
         sync_values(&instance, &fx.params, rate);
         Ok(PluginVideo {
             instance,
             rate,
             size: (width.max(1), height.max(1)),
             span,
+            eight_bit: false,
+            encoded: true,
+            alpha: bv_timeline::AlphaChannel::Undefined,
             cache: None,
         })
     }
@@ -395,6 +411,21 @@ impl VideoReader for PluginVideo {
         if span != self.span {
             self.span = span;
             self.instance.set_duration(span);
+            self.cache = None;
+        }
+    }
+
+    fn set_alpha(&mut self, alpha: bv_timeline::AlphaChannel, _background: [u8; 3]) {
+        if alpha != self.alpha {
+            self.alpha = alpha;
+            self.cache = None;
+        }
+    }
+
+    fn set_project(&mut self, eight_bit: bool, encoded: bool) {
+        if (eight_bit, encoded) != (self.eight_bit, self.encoded) {
+            (self.eight_bit, self.encoded) = (eight_bit, encoded);
+            self.instance.set_eight_bit(eight_bit);
             self.cache = None;
         }
     }
@@ -418,14 +449,51 @@ impl VideoReader for PluginVideo {
             sequential: false,
             timeline: None,
         };
-        let img = self
+        let mut img = self
             .instance
             .render(&req)
-            .map(Arc::new)
             .map_err(|e| MediaError::Corrupt(e.to_string()))?;
+        // A generator's pictures are premultiplied: read without alpha,
+        // every pixel is opaque; read as straight, its colors are taken
+        // as they are.
+        match self.alpha {
+            bv_timeline::AlphaChannel::None => {
+                img.data.iter_mut().for_each(|px| px[3] = 1.0);
+            }
+            bv_timeline::AlphaChannel::Straight => {
+                for px in &mut img.data {
+                    let a = px[3];
+                    px[0] *= a;
+                    px[1] *= a;
+                    px[2] *= a;
+                }
+            }
+            _ => {}
+        }
+        if self.encoded {
+            to_light(&mut img);
+        }
+        let img = Arc::new(img);
         self.cache = Some((frame, (w, h), Arc::clone(&img)));
         Ok(img)
     }
+}
+
+/// Premultiplied encoded values (video gamma, BT.709's) made light, on the
+/// straight colors.
+fn to_light(img: &mut ImageRgbaF32) {
+    let w = img.width as usize;
+    bv_color::convert::par_rows(&mut img.data, w, |_, row| {
+        for px in row {
+            let a = px[3];
+            if a <= 0.0 {
+                continue;
+            }
+            for c in &mut px[..3] {
+                *c = bv_color::transfer::bt709_to_linear((*c / a).clamp(0.0, 1.0)) * a;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

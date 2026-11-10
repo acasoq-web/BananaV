@@ -24,10 +24,12 @@ mod color_picker;
 mod command_ui;
 mod commands;
 mod compositors;
+mod cursors;
 mod customize_toolbar;
 mod dialogs;
 mod dock;
 mod ducking_ui;
+mod envelope_look;
 mod event_properties;
 mod external_monitor;
 mod floating;
@@ -44,6 +46,8 @@ mod header_buttons;
 mod history_label;
 mod icons;
 mod interchange_ui;
+mod interface_fonts;
+mod internal_prefs;
 mod keyboard_dialog;
 mod keymap;
 mod layouts;
@@ -84,6 +88,7 @@ mod proxies;
 mod realtime_ui;
 mod recording;
 mod render;
+mod safe_start;
 mod screen_capture;
 mod sequence_dialog;
 mod settings;
@@ -101,8 +106,12 @@ mod title_bar;
 mod toolbar_buttons;
 mod track_defaults;
 mod track_motion;
+mod transform_ui;
 mod transition_window;
 mod transport_buttons;
+mod updates;
+mod veg_generators;
+mod veg_rtf;
 mod veg_ui;
 mod view360;
 mod vst;
@@ -112,7 +121,14 @@ mod welcome;
 mod widgets;
 
 pub use app::BananaApp;
-pub use i18n::{Language, set_language};
+pub use i18n::{Language, set_language, tr};
+
+/// The computer's fonts for the letters egui's lack (Chinese, Japanese,
+/// Korean, other scripts) added to `ctx` now, in `lang`'s order — the
+/// program adds them as it starts; the captures call this.
+pub fn install_system_fonts(ctx: &egui::Context, lang: Language) {
+    interface_fonts::install_now(ctx, lang);
+}
 
 /// Aplica o tema do BananaV a um contexto egui (usado também nos testes).
 pub fn apply_theme(ctx: &egui::Context) {
@@ -143,13 +159,27 @@ fn event_loop_builder() -> Option<eframe::EventLoopBuilderHook> {
 }
 
 /// Opens the main window and runs until it is closed.
-/// When BananaV was started to describe or try OFX plug-ins in a process
-/// of its own (`--ofx-scan`, see `bv_ofx::scan`): does that, and gives the
-/// exit code.
+/// When BananaV was started to describe or try plug-ins in a process of
+/// its own — OFX ones (`--ofx-scan`, see `bv_ofx::scan`), a VST 3 module
+/// (`--vst3-scan`, see `bv_vst3::scan`) or a VST 2 library
+/// (`--vst2-scan`, see `bv_vst2::scan`): does that, and gives the exit
+/// code.
 pub fn plugin_scan_child() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    (args.first().map(String::as_str) == Some(bv_ofx::scan::CHILD_FLAG))
-        .then(|| bv_ofx::scan::child_main(&args[1..]))
+    let flags = [
+        bv_ofx::scan::CHILD_FLAG,
+        bv_vst3::scan::CHILD_FLAG,
+        bv_vst2::scan::CHILD_FLAG,
+    ];
+    if args.first().is_some_and(|a| flags.contains(&a.as_str())) {
+        bv_platform::background_process();
+    }
+    match args.first().map(String::as_str) {
+        Some(bv_ofx::scan::CHILD_FLAG) => Some(bv_ofx::scan::child_main(&args[1..])),
+        Some(bv_vst3::scan::CHILD_FLAG) => Some(bv_vst3::scan::child_main(&args[1..])),
+        Some(bv_vst2::scan::CHILD_FLAG) => Some(bv_vst2::scan::child_main(&args[1..])),
+        _ => None,
+    }
 }
 
 /// The program's icon, for the main window's title bar and taskbar button:
@@ -164,29 +194,41 @@ fn window_icon() -> Option<egui::IconData> {
     })
 }
 
-/// How the interface is drawn. On Windows through DirectX 12 (OpenGL where
-/// there is none), Windows' own way to the screen: with monitors on two
-/// graphics cards — one in the processor, one apart —, a window drawn on
-/// one card and shown on the other's monitor is copied by Windows itself,
-/// so dragging it from one monitor to the other stays smooth, as VEGAS's
-/// does. `WGPU_BACKEND` still picks another.
-fn interface_graphics() -> eframe::egui_wgpu::WgpuSetup {
+/// How the interface is drawn: through `graphics` (see
+/// [`safe_start::Graphics`]: on Windows DirectX 12, OpenGL where there is
+/// none, unless a start failed on it). `WGPU_BACKEND` still picks another.
+fn interface_graphics(graphics: safe_start::Graphics) -> eframe::egui_wgpu::WgpuSetup {
     let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
-    if cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
-        setup.instance_descriptor.backends =
-            eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+    if std::env::var_os("WGPU_BACKEND").is_none()
+        && let Some(backends) = graphics.window_backends()
+    {
+        setup.instance_descriptor.backends = backends;
     }
     eframe::egui_wgpu::WgpuSetup::CreateNew(setup)
 }
 
 pub fn run() -> eframe::Result {
+    // A start that ended early (a driver failing on DirectX 12) makes this
+    // one draw through another interface; crashes write Crash.log.
+    let graphics = safe_start::begin();
+    // macOS: Quit and the files Finder opens get BananaV's answers.
+    bv_platform::before_run();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("BananaV")
-        // The title bar is BananaV's, with the menus in it, as VEGAS 23's
-        // (`title_bar.rs`).
-        .with_decorations(false)
         .with_inner_size([1600.0, 960.0])
         .with_min_inner_size([1024.0, 640.0]);
+    viewport = if cfg!(target_os = "macos") {
+        // BananaV's bar under a clear title bar: the system's window
+        // buttons over its left end, as Mac programs have them.
+        viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
+    } else {
+        // The title bar is BananaV's, with the menus in it, as VEGAS 23's
+        // (`title_bar.rs`).
+        viewport.with_decorations(false)
+    };
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -198,7 +240,7 @@ pub fn run() -> eframe::Result {
         // follows the pointer a frame sooner.
         wgpu_options: eframe::WgpuConfiguration {
             surface: eframe::SurfaceConfig::LOW_LATENCY,
-            wgpu_setup: interface_graphics(),
+            wgpu_setup: interface_graphics(graphics),
             ..Default::default()
         },
         event_loop_builder: event_loop_builder(),
@@ -209,11 +251,33 @@ pub fn run() -> eframe::Result {
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
+            // Double-clicks as slow as the system takes them (Windows' half
+            // second; egui's own is 0.3 s, which missed many).
+            let delay = bv_platform::double_click_time().clamp(0.2, 0.9);
+            cc.egui_ctx
+                .options_mut(|o| o.input_options.max_double_click_delay = delay);
+            // What the system asks (Quit, a file to open) wakes the
+            // interface up.
+            let ctx = cc.egui_ctx.clone();
+            bv_platform::set_wake(move || ctx.request_repaint());
+            bv_platform::ui_thread_started();
             let mut app = BananaApp::new(cc.egui_ctx.clone());
+            // The computer's fonts behind egui's: Chinese, Japanese, Korean
+            // and other scripts show their letters, not boxes.
+            interface_fonts::install(&cc.egui_ctx, crate::i18n::language());
             app.startup(std::env::args_os().skip(1));
             Ok(Box::new(app))
         }),
     );
+    match &ran {
+        // Closed normally: the start counts as one that went well.
+        Ok(()) => safe_start::settle(),
+        // The window could not open on this interface: the next one is
+        // tried at once.
+        Err(e) => {
+            safe_start::window_failed(e);
+        }
+    }
     // The window and the engine are gone: the plug-ins loaded hear they
     // are done with (some close programs they started), a few seconds at
     // most.

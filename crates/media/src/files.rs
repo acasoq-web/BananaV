@@ -95,7 +95,7 @@ enum Kind {
 
 /// Whether the system's media framework decodes DTS: FFmpeg does, Windows
 /// has no decoder.
-const SYSTEM_DTS: bool = cfg!(target_os = "linux");
+const SYSTEM_DTS: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 /// The size of a picture the system reads.
 fn system_image_size(path: &str) -> std::result::Result<(u32, u32), String> {
@@ -1702,6 +1702,8 @@ mod tests {
             want: crate::Want::Linear,
             span: None,
             video_levels: false,
+            eight_bit: false,
+            encoded: true,
         };
         let linear = |p: crate::Picture| match p {
             crate::Picture::Linear(img) => img,

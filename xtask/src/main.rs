@@ -6,10 +6,14 @@
 //!   test         testes de todo o workspace
 //!   layers       confere a regra de camadas entre crates
 //!   wasm         compila para wasm32 as crates marcadas com `wasm = true`
-//!   ci           tudo acima, na ordem
+//!   ci           tudo acima, na ordem (e, no Windows, a ponte de 32 bits)
 //!   i18n         lists, per interface language, the texts its catalog
 //!                lacks and the entries no text uses (also written to
 //!                `target/i18n/<tag>.txt`)
+//!   perf         the performance guards in an optimized build of their
+//!                own (`target/perf`): the interface's frame budget while
+//!                the preview plays, and with `BV_PLAY_FILE=<video>` how
+//!                fast the preview plays that file
 
 #![allow(clippy::print_stdout)]
 
@@ -25,7 +29,9 @@ const HELP: &str = "uso: cargo xtask <comando>
   layers       confere a regra de camadas entre crates
   wasm         compila para wasm32 as crates marcadas com `wasm = true`
   ci           tudo acima, na ordem
-  i18n         texts each interface language lacks (target/i18n/<tag>.txt)";
+  i18n         texts each interface language lacks (target/i18n/<tag>.txt)
+  perf         the interface's frame budget while playing, in an optimized
+               build (BV_PLAY_FILE=<video>: the preview playing that file)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -39,6 +45,7 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "ci" => ci(),
         "i18n" => i18n(),
+        "perf" => perf(),
         _ => {
             println!("{HELP}");
             Ok(())
@@ -66,6 +73,66 @@ fn cargo(args: &[&str]) -> Result<()> {
         Ok(())
     } else {
         Err(format!("`cargo {}` falhou", args.join(" ")))
+    }
+}
+
+/// `cargo` with `envs` set.
+fn cargo_env(args: &[&str], envs: &[(&str, &str)]) -> Result<()> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    eprintln!("$ cargo {}", args.join(" "));
+    let status = Command::new(cargo)
+        .args(args)
+        .envs(envs.iter().copied())
+        .status()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`cargo {}` failed", args.join(" ")))
+    }
+}
+
+/// The performance guards, measured in an optimized build of their own in
+/// `target/perf` (no link-time optimization, so that it builds in minutes;
+/// with line tables, so that `tools/stacks.cs` names what a run of it
+/// spends its time on): the interface's frame budget while the preview
+/// plays (`frame_budget`), and with `BV_PLAY_FILE` set, the preview
+/// playing that file in the engine (`play_file`, its other variables in
+/// that test).
+fn perf() -> Result<()> {
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("perf");
+    let target = target.to_string_lossy().into_owned();
+    let envs = [
+        ("CARGO_PROFILE_RELEASE_LTO", "off"),
+        ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16"),
+        ("CARGO_PROFILE_RELEASE_DEBUG", "line-tables-only"),
+        ("CARGO_TARGET_DIR", target.as_str()),
+    ];
+    let guard = |package: &str, test: &str| {
+        cargo_env(
+            &[
+                "test",
+                "--release",
+                "-p",
+                package,
+                "--test",
+                test,
+                "--",
+                "--ignored",
+                "--nocapture",
+            ],
+            &envs,
+        )
+    };
+    guard("bv-ui-egui", "frame_budget")?;
+    if std::env::var_os("BV_PLAY_FILE").is_some() {
+        guard("bv-engine", "play_file")
+    } else {
+        println!("(BV_PLAY_FILE=<video> also times the preview playing that file)");
+        Ok(())
     }
 }
 
@@ -115,7 +182,36 @@ fn ci() -> Result<()> {
     print_layers(&table);
     lint()?;
     test()?;
-    wasm()
+    wasm()?;
+    bridge32()
+}
+
+/// BananaV's 32-bit bridge (`apps/bridge32`), built for 32-bit Windows on a
+/// Windows computer whose Rust has that target (`rustup target add
+/// i686-pc-windows-msvc`); elsewhere a note says it was left out.
+fn bridge32() -> Result<()> {
+    const TARGET: &str = "i686-pc-windows-msvc";
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let installed = std::path::Path::new(&sysroot)
+        .join("lib")
+        .join("rustlib")
+        .join(TARGET)
+        .is_dir();
+    if !installed {
+        eprintln!(
+            "(the 32-bit bridge was not built: `rustup target add {TARGET}` adds its target)"
+        );
+        return Ok(());
+    }
+    cargo(&["build", "--target", TARGET, "-p", "bananav-bridge32"])
 }
 
 #[derive(Debug)]

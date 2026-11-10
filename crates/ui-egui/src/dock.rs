@@ -41,13 +41,16 @@ pub enum Tab {
     LoudnessMeters,
     /// The compositor plug-ins (a track's Custom compositing mode).
     Compositors,
+    /// The Transform window: the controls of the event the Video Preview's
+    /// Transform mode works on (`tabs::transform`).
+    Transform,
     /// The timeline: fixed in its place (no tab, never closed or floated),
     /// the other windows docked around it, as VEGAS's.
     Timeline,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 18] = [
+    pub const ALL: [Tab; 19] = [
         Tab::Explorer,
         Tab::ProjectMedia,
         Tab::Generators,
@@ -66,6 +69,7 @@ impl Tab {
         Tab::MixingConsole,
         Tab::LoudnessMeters,
         Tab::Compositors,
+        Tab::Transform,
     ];
 
     pub fn title(self) -> &'static str {
@@ -88,6 +92,7 @@ impl Tab {
             Tab::MixingConsole => tr("Mixing Console"),
             Tab::LoudnessMeters => tr("Loudness Meters"),
             Tab::Compositors => tr("Compositors"),
+            Tab::Transform => tr("Transform"),
             Tab::Timeline => tr("Timeline"),
         }
     }
@@ -182,6 +187,10 @@ pub enum DockRequest {
     All,
     Maximize(Tab),
     Restore,
+    /// A window taken out into a window of the system's own (it goes to
+    /// another monitor), and back into the layout.
+    Float(Tab),
+    Dock(Tab),
 }
 
 /// `area`'s windows (on that side of the timeline, as last drawn) taken
@@ -304,6 +313,68 @@ fn apply(dock: &mut DockState<Tab>, app: &mut BananaApp, req: DockRequest) {
         DockRequest::All => toggle_all(dock, &mut app.docks_hidden),
         DockRequest::Maximize(tab) => app.dock_maximized = maximize(dock, tab),
         DockRequest::Restore => {}
+        DockRequest::Float(tab) => {
+            if tab != Tab::Timeline
+                && let Some(path) = dock.find_tab(&tab)
+            {
+                dock.remove_tab(path);
+                if !app.floating_panels.contains(&tab) {
+                    app.floating_panels.push(tab);
+                }
+            }
+        }
+        DockRequest::Dock(tab) => {
+            app.floating_panels.retain(|t| *t != tab);
+            if dock.find_tab(&tab).is_none() {
+                open_tab(dock, tab);
+            }
+        }
+    }
+}
+
+impl BananaApp {
+    /// The window titled `title` floating in a window of its own (screen
+    /// tests).
+    pub fn float_for_review(&mut self, title: &str) {
+        if let Some(tab) = Tab::ALL.into_iter().find(|t| t.title() == title) {
+            self.dock_request = Some(DockRequest::Float(tab));
+        }
+    }
+}
+
+/// The windows taken out of the layout into windows of the system's own
+/// (the tab's menu: Float in Its Own Window): each one resizable and
+/// movable to any monitor, with Dock to put it back where windows open;
+/// closing it closes the window, as a docked tab's close button does.
+pub fn floating_windows(ctx: &crate::egui::Context, app: &mut BananaApp) {
+    for tab in app.floating_panels.clone() {
+        let mut open = true;
+        let mut dock = false;
+        crate::floating::Window::new(tab.tab_label())
+            .id(Id::new(("floating-panel", tab)))
+            .resizable(true)
+            .default_size(vec2(560.0, 420.0))
+            .min_size(vec2(240.0, 160.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(tr("Dock"))
+                        .on_hover_text(tr("Puts this window back into the layout."))
+                        .clicked()
+                    {
+                        dock = true;
+                    }
+                });
+                ui.separator();
+                let mut t = tab;
+                Viewer { app: &mut *app }.ui(ui, &mut t);
+            });
+        if dock {
+            app.dock_request = Some(DockRequest::Dock(tab));
+        } else if !open {
+            app.floating_panels.retain(|t| *t != tab);
+        }
     }
 }
 
@@ -351,6 +422,37 @@ pub fn open_tab(dock: &mut DockState<Tab>, tab: Tab) {
             }
             None => tree.push_to_first_leaf(tab),
         },
+    }
+}
+
+/// `tab` opened in the window of the Explorer and the other browsers
+/// (Project Media, Media Generators, Transitions, Video FX, Color Grading):
+/// a tab beside theirs, wherever they are; where none is, as
+/// [`open_tab`].
+pub fn open_beside_browsers(dock: &mut DockState<Tab>, tab: Tab) {
+    const BROWSERS: [Tab; 6] = [
+        Tab::Explorer,
+        Tab::ProjectMedia,
+        Tab::Generators,
+        Tab::Transitions,
+        Tab::VideoFx,
+        Tab::ColorGrading,
+    ];
+    let place = BROWSERS.iter().find_map(|b| dock.find_tab(b));
+    match place {
+        Some(path) => {
+            if let Some(tree) = dock
+                .get_surface_mut(path.surface)
+                .and_then(|s| s.node_tree_mut())
+            {
+                tree[path.node].append_tab(tab);
+                tree.set_focused_node(path.node);
+            }
+            if let Some(path) = dock.find_tab(&tab) {
+                let _ = dock.set_active_tab(path);
+            }
+        }
+        None => open_tab(dock, tab),
     }
 }
 
@@ -509,6 +611,15 @@ impl TabViewer for Viewer<'_> {
         *tab != Tab::Timeline
     }
 
+    /// The tab's menu (with Close and Undock): a window of the system's
+    /// own, which goes to another monitor.
+    fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, _path: egui_dock::NodePath) {
+        if *tab != Tab::Timeline && ui.button(tr("Float in Its Own Window")).clicked() {
+            self.app.dock_request = Some(DockRequest::Float(*tab));
+            ui.close();
+        }
+    }
+
     /// The timeline fills its window: no margin, the timeline's color. The
     /// Video Scopes' black reaches their window's sides, as VEGAS's.
     fn tab_style_override(&self, tab: &Tab, global: &TabStyle) -> Option<TabStyle> {
@@ -593,6 +704,7 @@ impl TabViewer for Viewer<'_> {
             Tab::PluginManager => tabs::plugins::ui(ui, app),
             Tab::Scopes => tabs::scopes::ui(ui, app),
             Tab::SurroundPanner => tabs::surround::ui(ui, app),
+            Tab::Transform => tabs::transform::ui(ui, app),
             Tab::EditDetails => tabs::details::ui(ui, app),
             Tab::MixingConsole => tabs::console::ui(ui, app),
             Tab::LoudnessMeters => tabs::loudness::ui(ui, app),
@@ -604,7 +716,24 @@ impl TabViewer for Viewer<'_> {
                 app.timeline = timeline;
             }
         }
+        // Something dragged (media, an effect, a transition…) over a
+        // window that takes none: the arrow saying it can't go there. Files
+        // dragged in from the system have the system's pointer.
+        if app.media_drag.is_some()
+            && app.os_drag.is_none()
+            && !takes_drops(*tab)
+            && ui.rect_contains_pointer(ui.max_rect())
+        {
+            crate::cursors::set(ui.ctx(), crate::cursors::Cursor::ArrowNo);
+        }
     }
+}
+
+/// Whether a window takes something dragged onto it: the timeline (media,
+/// effects, transitions…) and Project Media (media into its bins and
+/// storyboards, which say where themselves); the others take nothing.
+fn takes_drops(tab: Tab) -> bool {
+    matches!(tab, Tab::Timeline | Tab::ProjectMedia)
 }
 
 /// The Master Bus's width, in points: VEGAS's narrow strip at the right.
@@ -651,7 +780,7 @@ pub fn show(ui: &mut Ui, dock: &mut DockState<Tab>, app: &mut BananaApp) {
     // floating one docks with "Allow floating windows to dock", Ctrl
     // turning it around.
     let at_bottom = !prefs.tabs_at_top;
-    let floating_dock = prefs.floating_dock != ui.input(|i| i.modifiers.ctrl);
+    let floating_dock = prefs.floating_dock != ui.input(|i| i.modifiers.command);
     let style = style(ui, at_bottom);
     // Two strips side by side with the Preview fader.
     let strips = if app.settings.preview_fader { 2.0 } else { 1.0 };
@@ -674,6 +803,8 @@ pub fn show(ui: &mut Ui, dock: &mut DockState<Tab>, app: &mut BananaApp) {
     if let Some(req) = app.dock_request.take() {
         apply(dock, app, req);
     }
+    // A layout recalled with a window that floats on its own: the layout's.
+    app.floating_panels.retain(|t| dock.find_tab(t).is_none());
     let menu = &mut dock.translations.tab_context_menu;
     menu.close_button = tr("Close").into();
     menu.eject_button = tr("Undock").into();
@@ -719,12 +850,41 @@ fn style(ui: &Ui, at_bottom: bool) -> Style {
     style.separator.color_idle = bar;
     style.separator.color_hovered = theme::banana_dim();
     style.separator.width = 4.0;
+    // A tab dragged, as Premiere's and Resolve's windows dock: the room it
+    // would take lit up as the pointer moves (the middle of a window: a tab
+    // beside its own; a side: a window of its own there), the window under
+    // the pointer outlined.
+    let o = &mut style.overlay;
+    o.overlay_type = egui_dock::OverlayType::HighlightedAreas;
+    o.selection_color = theme::selection().gamma_multiply(0.45);
+    o.selection_stroke_width = 2.0;
+    o.hovered_leaf_highlight.color = theme::selection().gamma_multiply(0.12);
+    o.hovered_leaf_highlight.stroke = Stroke::new(1.5, theme::selection());
+    o.hovered_leaf_highlight.expansion = 0.0;
     style
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Float in Its Own Window takes a window out of the layout; Dock puts
+    /// it back; the timeline never floats.
+    #[test]
+    fn a_window_floats_on_its_own_and_docks_back() {
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        let mut dock = default_layout();
+        assert!(dock.find_tab(&Tab::Explorer).is_some());
+        apply(&mut dock, &mut app, DockRequest::Float(Tab::Explorer));
+        assert!(dock.find_tab(&Tab::Explorer).is_none());
+        assert_eq!(app.floating_panels, vec![Tab::Explorer]);
+        apply(&mut dock, &mut app, DockRequest::Dock(Tab::Explorer));
+        assert!(dock.find_tab(&Tab::Explorer).is_some());
+        assert!(app.floating_panels.is_empty());
+        apply(&mut dock, &mut app, DockRequest::Float(Tab::Timeline));
+        assert!(dock.find_tab(&Tab::Timeline).is_some());
+        assert!(app.floating_panels.is_empty());
+    }
     use crate::egui::{self, pos2, vec2};
     use egui_kittest::Harness;
 
@@ -865,7 +1025,7 @@ mod tests {
             .with_step_dt(1.0 / 60.0)
             .build_ui_state(
                 move |ui, dock: &mut DockState<&'static str>| {
-                    let ctrl = ui.input(|i| i.modifiers.ctrl);
+                    let ctrl = ui.input(|i| i.modifiers.command);
                     DockArea::new(dock)
                         .floating_tabs_dock(floating_dock != ctrl)
                         .show_inside(ui, &mut Plain);
@@ -879,8 +1039,9 @@ mod tests {
             .rect()
             .unwrap()
             .center();
+        // Ctrl as Windows gives it (the command key: Cmd on a Mac).
         let modifiers = if ctrl {
-            egui::Modifiers::CTRL
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND
         } else {
             egui::Modifiers::NONE
         };
@@ -1223,5 +1384,16 @@ mod tests {
         let fits = body_height(vec!["A", "B"], true);
         assert_eq!(body_height(long.clone(), true), fits, "shortened titles");
         assert!(body_height(long, false) < fits, "egui_dock's scroll bar");
+    }
+
+    /// What is dragged (media, effects, transitions…) goes onto the
+    /// timeline or into Project Media; over the other windows, which take
+    /// none of it, the pointer says it can't go there.
+    #[test]
+    fn only_the_timeline_and_project_media_take_what_is_dragged() {
+        assert!(takes_drops(Tab::Timeline));
+        for tab in Tab::ALL {
+            assert_eq!(takes_drops(tab), tab == Tab::ProjectMedia, "{tab:?}");
+        }
     }
 }

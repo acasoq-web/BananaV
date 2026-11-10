@@ -1,10 +1,11 @@
 //! The Video Media Generators window, as VEGAS's: a generated event's
-//! generator — the frame size, the event's length, the preset (saved and
-//! deleted here too) and the plug-in's settings (an OFX generator's as it
-//! describes them), its Media Properties and Replace Plug-In (another
-//! generator in its place). The event's Generated Media button opens it,
-//! and a preset's + in the Media Generator window (which adds the event at
-//! the cursor first).
+//! generator and its settings' columns; the frame size and the generated
+//! media's duration, with the plug-in's help (Titles & Text), Replace
+//! Plug-In (another generator in its place), Match Event Length and Media
+//! Properties; the preset (saved and deleted here too); and the plug-in's
+//! settings (an OFX generator's as it describes them). The event's
+//! Generated Media button opens it, and a preset's + in the Media
+//! Generator window (which adds the event at the cursor first).
 
 use bv_core::{Tick, timecode};
 use bv_timeline::{ClipId, Generator, MediaId, MediaSource, Project};
@@ -22,13 +23,28 @@ use crate::widgets::icon_button_ex;
 #[derive(Debug)]
 pub struct GeneratedMediaWindow {
     clip: ClipId,
-    /// The event's length, as typed.
+    /// The generated media's duration, as typed.
     length: String,
     /// The preset's name, as typed (to save it).
     preset: String,
     /// A color being chosen: which (0: the color, or the gradient's first;
     /// 1: its second) and the picker.
     picking: Option<(usize, ColorPicker)>,
+    /// The settings' width measured last frame: the bars above take it.
+    width: f32,
+}
+
+/// The window's least width (VEGAS's).
+const LEAST_WIDTH: f32 = 500.0;
+
+/// How long generated media lasts: its own duration when it has one (a
+/// `.veg`'s, or one typed here), else its event's.
+fn own_length(info: &bv_timeline::MediaInfo, event: Tick) -> Tick {
+    if info.duration < Generator::DURATION {
+        info.duration
+    } else {
+        event
+    }
 }
 
 /// A ▾ opening the presets' list.
@@ -51,13 +67,15 @@ pub(crate) fn list_button(ui: &mut egui::Ui) -> egui::Response {
     resp.on_hover_text(tr("Presets"))
 }
 
-/// Transfer Text Properties, as VEGAS's: the other Titles & Text events of
-/// `clip`'s track take `fx`'s settings, each its own text kept. Returns
+/// Transfer Text Properties, as VEGAS's: the other events of `clip`'s
+/// track made by `fx`'s plug-in take `fx`'s settings, each keeping its own
+/// values of the parameters `keep` names (Titles & Text's text). Returns
 /// how many changed.
 pub(crate) fn transfer_text_properties(
     p: &mut Project,
     clip: ClipId,
     fx: &bv_timeline::PluginFx,
+    keep: &[String],
 ) -> usize {
     let Some(track) = p.clip_track(clip) else {
         return 0;
@@ -79,11 +97,12 @@ pub(crate) fn transfer_text_properties(
         if theirs.id != fx.id {
             continue;
         }
-        let text = theirs.params.get("text").cloned();
         let mut params = fx.params.clone();
-        params.remove("text");
-        if let Some(t) = text {
-            params.insert("text".into(), t);
+        for name in keep {
+            params.remove(name);
+            if let Some(own) = theirs.params.get(name) {
+                params.insert(name.clone(), own.clone());
+            }
         }
         if theirs.params != params {
             theirs.params = params;
@@ -149,7 +168,10 @@ impl BananaApp {
         let Some(MediaSource::Generated(g)) = p.media(c.media).map(|m| m.source.clone()) else {
             return;
         };
-        let length = timecode::format(c.duration, self.frame_rate());
+        let length = p
+            .media(c.media)
+            .map_or(c.duration, |m| own_length(m, c.duration));
+        let length = timecode::format(length, self.frame_rate());
         let (_, _, presets) = crate::tabs::generators::plugin_of(self, &g);
         let preset = presets
             .into_iter()
@@ -161,6 +183,7 @@ impl BananaApp {
             length,
             preset,
             picking: None,
+            width: LEAST_WIDTH,
         });
     }
 
@@ -172,7 +195,11 @@ impl BananaApp {
             p.clips()
                 .find(|(_, c)| {
                     p.media(c.media).is_some_and(|m| match &m.source {
-                        MediaSource::Generated(Generator::Gradient { .. }) => true,
+                        MediaSource::Generated(Generator::Plugin(fx))
+                            if fx.id == "org.bananav.ColorGradient" =>
+                        {
+                            true
+                        }
                         MediaSource::Generated(_) => !gradient,
                         MediaSource::File { .. } => false,
                     })
@@ -223,7 +250,6 @@ impl GeneratedMediaWindow {
         let mut length: Option<Tick> = None;
         let mut save = false;
         let mut delete = false;
-        let mut transfer: Option<bv_timeline::PluginFx> = None;
         let mut properties = false;
         let mut replacing: Option<Generator> = None;
         let replacements = crate::tabs::generators::replacements(app, video.is_some());
@@ -232,130 +258,153 @@ impl GeneratedMediaWindow {
             .generator_presets
             .iter()
             .any(|s| s.plugin == key && s.name == self.preset.trim());
+        // Titles & Text has the plug-in's help, as VEGAS's.
+        let help = match &generator {
+            Generator::Plugin(fx) if fx.id == bv_engine::plugins::TITLES_ID => {
+                crate::ofx::generators()
+                    .into_iter()
+                    .find(|p| p.identifier == fx.id)
+            }
+            _ => None,
+        };
+        let is_plugin = matches!(generator, Generator::Plugin(_));
+        let mut match_length = false;
+        let mut measured: Option<f32> = None;
         crate::floating::Window::new(title)
             .id(egui::Id::new("generated-media-window"))
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.set_width(400.0);
-                egui::Grid::new("generated-media-top")
-                    .num_columns(2)
-                    .spacing([10.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label(if video.is_some() {
-                            tr("Video Media Generator:")
-                        } else {
-                            tr("Audio Media Generator:")
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&plugin).strong());
-                            ui.add_space(6.0);
-                            // VEGAS's buttons: the media's properties, and
-                            // another generator in this one's place.
-                            if icon_button_ex(ui, Icon::Settings, tr("Media Properties"), false, true)
-                                .clicked()
-                            {
-                                properties = true;
-                            }
-                            let replace = icon_button_ex(
-                                ui,
-                                Icon::Generator,
-                                tr("Replace Plug-In"),
-                                false,
-                                !replacements.is_empty(),
-                            );
-                            egui::Popup::menu(&replace).show(|ui| {
-                                for (name, g) in &replacements {
-                                    if crate::menus::item(ui, name) {
-                                        replacing = Some(g.clone());
-                                    }
-                                }
-                            });
-                        });
-                        ui.end_row();
-                        if let Some(v) = video {
-                            ui.label(tr("Frame Size:"));
-                            ui.horizontal(|ui| {
-                                let (mut w, mut h) = (v.width, v.height);
-                                let a = ui.add(egui::DragValue::new(&mut w).range(16..=8192));
-                                ui.label("x");
-                                let b = ui.add(egui::DragValue::new(&mut h).range(16..=8192));
-                                if a.changed() || b.changed() {
-                                    size = Some((w & !1, h & !1));
-                                }
-                            });
-                            ui.end_row();
-                        }
-                        ui.label(tr("Length:"));
-                        let r = ui.add(
-                            egui::TextEdit::singleline(&mut self.length)
-                                .desired_width(110.0)
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if r.lost_focus() {
-                            length =
-                                timecode::parse(&self.length, rate).filter(|d| *d > Tick::ZERO);
-                            if length.is_none() {
-                                self.length = timecode::format(duration, rate);
-                            }
-                        }
-                        ui.end_row();
-                        ui.label(tr("Preset:"));
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.preset)
-                                    .desired_width(190.0)
-                                    .hint_text(tr("(Custom)")),
-                            );
-                            let list = list_button(ui);
-                            egui::Popup::menu(&list).show(|ui| {
-                                for (name, g) in &presets {
-                                    if crate::menus::check_item(ui, name, *g == generator, true, "")
-                                    {
-                                        chosen = Some(g.clone());
-                                        self.preset = name.clone();
-                                    }
-                                }
-                            });
-                            let named = !self.preset.trim().is_empty();
-                            if icon_button_ex(ui, Icon::Save, tr("Save Preset"), false, named)
-                                .clicked()
-                            {
-                                save = true;
-                            }
-                            if icon_button_ex(
-                                ui,
-                                Icon::Delete,
-                                tr("Delete Preset"),
-                                false,
-                                user_preset,
-                            )
-                            .clicked()
-                            {
-                                delete = true;
-                            }
-                        });
-                        ui.end_row();
-                    });
-                ui.separator();
+                let width = self.width.max(LEAST_WIDTH);
+                ui.set_width(width);
+                // Which generator, and its settings' columns on the right.
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&plugin).size(16.0).strong());
-                    // Titles & Text: this event's look for the track's others.
-                    if let Generator::Plugin(fx) = &generator
-                        && fx.id == bv_engine::plugins::TITLES_ID
-                        && ui
-                            .button(tr("Transfer Text Properties"))
-                            .on_hover_text(tr(
-                                "The other Titles & Text events of this track take this one's look (font, size, colors, place…), keeping their own text.",
-                            ))
-                            .clicked()
-                    {
-                        transfer = Some((**fx).clone());
+                    let which = if video.is_some() {
+                        tr("Video Media Generator:")
+                    } else {
+                        tr("Audio Media Generator:")
+                    };
+                    ui.label(RichText::new(which).strong());
+                    ui.label(&plugin);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for n in (1..=3u8).rev() {
+                            let on = app.settings.fx_columns.clamp(1, 3) == n;
+                            if crate::fx_window::columns_button(ui, n, on, is_plugin).clicked() {
+                                app.settings.fx_columns = n;
+                            }
+                        }
+                    });
+                });
+                ui.separator();
+                // The frame's size and the media's duration; the help,
+                // Replace Plug-In, Match Event Length and Media Properties
+                // on the right.
+                ui.horizontal(|ui| {
+                    use crate::ofx_controls::field;
+                    let id =
+                        |name: &str| egui::Id::new(("generated-media-field", name.to_string()));
+                    if let Some(v) = video {
+                        ui.label(tr("Frame Size:"));
+                        // Even sizes, 16 to 8192 pixels.
+                        let typed = |t: String| {
+                            t.trim().parse::<u32>().ok().map(|n| n.clamp(16, 8192) & !1)
+                        };
+                        let w = field(ui, id("width"), &v.width.to_string(), 52.0, tr("Width"))
+                            .and_then(typed);
+                        ui.label("x");
+                        let h = field(ui, id("height"), &v.height.to_string(), 52.0, tr("Height"))
+                            .and_then(typed);
+                        if w.is_some() || h.is_some() {
+                            size = Some((w.unwrap_or(v.width), h.unwrap_or(v.height)));
+                        }
+                        ui.add_space(10.0);
                     }
+                    ui.label(tr("Duration:"));
+                    let shown = self.length.clone();
+                    if let Some(t) = field(ui, id("duration"), &shown, 84.0, tr("Duration:")) {
+                        length = timecode::parse(&t, rate).filter(|d| *d > Tick::ZERO);
+                        self.length = match length {
+                            Some(d) => timecode::format(d, rate),
+                            None => timecode::format(own_length(&info, duration), rate),
+                        };
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if icon_button_ex(ui, Icon::Settings, tr("Media Properties"), false, true)
+                            .clicked()
+                        {
+                            properties = true;
+                        }
+                        if icon_button_ex(
+                            ui,
+                            Icon::FitLength,
+                            tr("Match Event Length"),
+                            false,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            match_length = true;
+                        }
+                        let replace = icon_button_ex(
+                            ui,
+                            Icon::FxAdd,
+                            tr("Replace Plug-In"),
+                            false,
+                            !replacements.is_empty(),
+                        );
+                        egui::Popup::menu(&replace).show(|ui| {
+                            for (name, g) in &replacements {
+                                if crate::menus::item(ui, name) {
+                                    replacing = Some(g.clone());
+                                }
+                            }
+                        });
+                        if let Some(info) = &help {
+                            let r = icon_button_ex(ui, Icon::Help, tr("Plug-In Help"), false, true);
+                            egui::Popup::menu(&r).width(320.0).show(|ui| {
+                                ui.label(RichText::new(&plugin).strong());
+                                ui.label(tr(&info.description));
+                            });
+                        }
+                    });
+                });
+                // The preset, saved and deleted here.
+                ui.horizontal(|ui| {
+                    ui.label(tr("Preset:"));
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button_ex(ui, Icon::Delete, tr("Delete Preset"), false, user_preset)
+                            .clicked()
+                        {
+                            delete = true;
+                        }
+                        let named = !self.preset.trim().is_empty();
+                        if icon_button_ex(ui, Icon::Save, tr("Save Preset"), false, named).clicked()
+                        {
+                            save = true;
+                        }
+                        ui.add_space(4.0);
+                        let list = list_button(ui);
+                        egui::Popup::menu(&list).show(|ui| {
+                            for (name, g) in &presets {
+                                if crate::menus::check_item(ui, name, *g == generator, true, "") {
+                                    chosen = Some(g.clone());
+                                    self.preset = name.clone();
+                                }
+                            }
+                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.preset)
+                                .desired_width(ui.available_width())
+                                .hint_text(tr("(Custom)")),
+                        );
+                    });
                 });
                 ui.add_space(4.0);
+                let top = ui.min_rect().width();
                 match &generator {
                     // An OFX generator's settings, as it describes them.
                     Generator::Plugin(fx) => {
@@ -364,9 +413,10 @@ impl GeneratedMediaWindow {
                             index: 0,
                             id: fx.id.clone(),
                         };
+                        let columns = usize::from(app.settings.fx_columns.clamp(1, 3));
                         if let Some(place) = place
                             && let Some(new) =
-                                crate::ofx::params(ui, &mut app.ofx, key, fx, &place, 1)
+                                crate::ofx::params(ui, &mut app.ofx, key, fx, &place, columns)
                         {
                             chosen = Some(Generator::Plugin(Box::new(new)));
                         }
@@ -380,7 +430,15 @@ impl GeneratedMediaWindow {
                             });
                     }
                 }
+                measured = Some(ui.min_rect().width().max(top));
             });
+        // The window as wide as its settings (VEGAS's least at least).
+        if let Some(w) = measured
+            && (w - self.width).abs() > 1.0
+        {
+            self.width = w.max(LEAST_WIDTH);
+            ctx.request_repaint();
+        }
         // A color being chosen.
         if let Some((which, picker)) = &mut self.picking {
             match picker.show(ctx) {
@@ -423,14 +481,24 @@ impl GeneratedMediaWindow {
                 }
             });
         }
+        // The generated media's own duration: typed, or its event's.
+        if match_length {
+            length = Some(duration);
+        }
         if let Some(d) = length {
-            let clip = self.clip;
-            app.edit(|p| p.set_clip_duration(clip, d));
+            app.modify_merged(field("duration"), |p| {
+                if let Some(m) = p.media.iter_mut().find(|m| m.id == media) {
+                    m.duration = d;
+                }
+            });
             self.length = timecode::format(d, rate);
         }
-        if let Some(fx) = transfer {
+        // Transfer Text Properties: the plug-in's button asked.
+        if let Some(t) = app.ofx.take_transfer()
+            && t.owner == crate::ofx::EditorOwner::Generator(media)
+        {
             let clip = self.clip;
-            let n = app.modify(|p| transfer_text_properties(p, clip, &fx));
+            let n = app.modify(|p| transfer_text_properties(p, clip, &t.fx, &t.keep));
             app.notify(trn!(
                 n,
                 "{} Titles & Text event took this look.",

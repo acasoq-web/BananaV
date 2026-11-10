@@ -6,7 +6,10 @@
 //! Needs `ffmpeg` on the PATH; run with
 //! `cargo test -p bv-mf --test audio_continuidade -- --ignored --nocapture`.
 
-#![cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#![cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 
 use std::path::PathBuf;
 use std::process::Command;

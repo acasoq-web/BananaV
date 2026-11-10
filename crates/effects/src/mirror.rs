@@ -1,7 +1,7 @@
 //! Mirror: VEGAS's. One side of a line through Center kept, the other
 //! showing it reflected.
 //!
-//! VEGAS's math, in its floats: in the frame's pixels, rows from the top,
+//! As VEGAS's renders show: in the frame's pixels, rows from the top,
 //! the line passes through `((w − 1) Center x, (1 − Center y)(h − 1))`.
 //! Within half a degree of 0 it keeps the rows above and shows each below
 //! the row as far above, between the two rows there; of 180, the rows

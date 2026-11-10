@@ -11,8 +11,9 @@
 //! the other two channels, so the intensity stays: Red 0.1 in the middle
 //! tones raises red by 0.1 and lowers green and blue by 0.05 (without it,
 //! only red rises, by 0.1). The sliders run from −0.5 to 0.5, as VEGAS's.
-//! The result is not clipped (VEGAS's float effects keep what passes white
-//! or black; 8-bit projects hold each effect's result within 0–1).
+//! The result is not clipped (in 32-bit projects VEGAS's effects keep what
+//! passes white or black; 8-bit projects hold each effect's result within
+//! 0–1).
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_void};

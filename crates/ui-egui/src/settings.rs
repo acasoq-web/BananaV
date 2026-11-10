@@ -43,6 +43,9 @@ pub struct Session {
     /// The View menu's switches of the timeline.
     #[serde(default)]
     pub timeline: crate::timeline::TimelineSwitches,
+    /// The windows floating in windows of the system's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floating: Vec<crate::dock::Tab>,
 }
 
 /// A video template saved in File › Properties › Video (Save Template).
@@ -634,8 +637,20 @@ fn color32([r, g, b, a]: [u8; 4]) -> egui::Color32 {
 }
 
 /// The usual VST search folders: the system's shared VST3 folder on
-/// Windows; the user's and the system's VST3 and VST folders on Linux.
+/// Windows; the user's and the system's VST3 and VST folders on macOS
+/// (`Library/Audio/Plug-Ins`) and on Linux.
 pub fn default_vst_folders() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let home = bv_platform::home_dir().unwrap_or_default();
+        let user = home.join("Library").join("Audio").join("Plug-Ins");
+        let system = PathBuf::from("/Library/Audio/Plug-Ins");
+        return vec![
+            user.join("VST3"),
+            system.join("VST3"),
+            user.join("VST"),
+            system.join("VST"),
+        ];
+    }
     if !cfg!(windows) {
         let home = bv_platform::home_dir().unwrap_or_default();
         return vec![
@@ -661,6 +676,8 @@ pub struct Prefs {
     /// General: "Automatically open last project on startup" (the project
     /// open when BananaV was closed).
     pub open_last_project: bool,
+    /// General (BananaV's own): "Check for updates when BananaV starts".
+    pub check_updates: bool,
     /// General: "Confirm media file deletion when still in use".
     pub confirm_media_removal: bool,
     /// General: "Save active prerenders on project close".
@@ -859,10 +876,15 @@ pub struct Prefs {
     pub midi_thru: Vec<MidiRoute>,
 
     /// VST Effects: the folders searched for VST plug-ins, the plug-ins
-    /// left out (by file), "Generic VST editor".
+    /// left out (by file; VST 3 effects by class, wherever installed),
+    /// "Generic VST editor".
     pub vst_folders: Vec<PathBuf>,
     pub vst_left_out: Vec<PathBuf>,
+    pub vst_effects_off: Vec<String>,
     pub vst_generic_editor: bool,
+    /// VST Effects: "Enable support for 32-bit VST plug-ins" (run in
+    /// BananaV's 32-bit bridge).
+    pub vst_32bit: bool,
 
     /// Editing: "Enable looping on events by default".
     pub loop_events: bool,
@@ -914,6 +936,23 @@ pub struct Prefs {
     /// automation is turned off".
     pub thin_automation: bool,
     pub automation_off_defaults: bool,
+    /// Options › Internal (no tab has these, as VEGAS's): "Enable Envelope
+    /// Painting" (Shift and a drag on an envelope's line paint it), and
+    /// "Thinning gap threshold (ms)" (how far apart two points of a stroke
+    /// may be before thinning keeps both, where 20 pixels of the zoom make
+    /// no time).
+    pub envelope_painting: bool,
+    pub thinning_gap_ms: u32,
+    /// Options › Internal: "Dim Attenuation", Dim Output's cut in dB.
+    pub dim_db: u32,
+    /// Options › Internal: the least and the most Video's "Maximum number
+    /// of rendering threads" goes to ("Minimum Video Render Threads", "Max
+    /// For Maximum Video Render Threads").
+    pub min_render_threads: u32,
+    pub render_threads_limit: u32,
+    /// Options › Internal: "Number of Control Plug-ins allowed", how many
+    /// control surfaces External Control & Automation takes.
+    pub max_control_devices: u32,
     /// External Control & Automation: the control surfaces added; Options
     /// › External Control: they are in use.
     pub control_devices: Vec<ControlDevice>,
@@ -959,8 +998,14 @@ pub struct Prefs {
     /// Display: the colors of the line shown where an edit snaps, by what
     /// it snapped to, in [`SnapKind::ALL`]'s order.
     pub snap_colors: Vec<[u8; 4]>,
+    /// Options › Envelope Appearance… (BananaV's own): the envelopes' line
+    /// width, reach, point size and shape.
+    pub envelope_look: crate::envelope_look::EnvelopeLook,
     /// Display: "Icon color strength" (0–100 %).
     pub icon_strength: u8,
+    /// Display (BananaV's own): "Interface brightness", −40 to 40 (%): the
+    /// interface type's greys lighter or darker.
+    pub interface_brightness: i8,
     /// Display: "Button Highlight Color" (active toolbar buttons).
     pub button_highlight: [u8; 4],
     /// Display: "Interface Type".
@@ -1004,6 +1049,7 @@ impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
             open_last_project: true,
+            check_updates: true,
             confirm_media_removal: true,
             keep_prerenders: true,
             release_media_inactive: true,
@@ -1095,7 +1141,9 @@ impl Default for Prefs {
             midi_thru: Vec::new(),
             vst_folders: default_vst_folders(),
             vst_left_out: Vec::new(),
+            vst_effects_off: Vec::new(),
             vst_generic_editor: false,
+            vst_32bit: true,
             loop_events: true,
             preserve_pitch: true,
             group_edits: true,
@@ -1120,6 +1168,12 @@ impl Default for Prefs {
             click_moves_cursor: true,
             thin_automation: true,
             automation_off_defaults: true,
+            envelope_painting: true,
+            thinning_gap_ms: 250,
+            dim_db: 20,
+            min_render_threads: 1,
+            render_threads_limit: 48,
+            max_control_devices: 6,
             control_devices: Vec::new(),
             external_control: false,
             new_audio_envelopes: bv_timeline::KeyCurve::Smooth,
@@ -1150,7 +1204,9 @@ impl Default for Prefs {
                 .map(EnvelopeColor::default_color)
                 .collect(),
             snap_colors: SnapKind::ALL.map(SnapKind::default_color).to_vec(),
+            envelope_look: crate::envelope_look::EnvelopeLook::default(),
             icon_strength: 100,
+            interface_brightness: 0,
             button_highlight: crate::theme::DEFAULT_HIGHLIGHT,
             interface: crate::theme::Interface::Dark,
             auto_hide_dock: false,
@@ -1278,6 +1334,7 @@ impl Prefs {
         self.envelope_colors = d.envelope_colors;
         self.snap_colors = d.snap_colors;
         self.icon_strength = d.icon_strength;
+        self.interface_brightness = d.interface_brightness;
         self.button_highlight = d.button_highlight;
         self.interface = d.interface;
         self.auto_hide_dock = d.auto_hide_dock;

@@ -637,7 +637,7 @@ impl AudioPool {
         };
         let rate = project.settings.sample_rate.0;
         if !ch.fx_post_fader {
-            self.run_fx(key, &fx, rate, s0, s1, &mut buf.channels);
+            self.run_fx(key, &fx, &ch.envelopes, rate, s0, s1, &mut buf.channels);
         }
         let pre = tap.then(|| buf.clone());
         if silent {
@@ -660,7 +660,7 @@ impl AudioPool {
             follow_envelopes(ch, project.settings.sample_rate, s0, buf, surround);
         }
         if ch.fx_post_fader {
-            self.run_fx(key, &fx, rate, s0, s1, &mut buf.channels);
+            self.run_fx(key, &fx, &ch.envelopes, rate, s0, s1, &mut buf.channels);
         }
         pre
     }
@@ -723,10 +723,14 @@ impl AudioPool {
         entry.0.latency()
     }
 
+    /// Runs chain `key` (`effects`, FX automation's `envelopes`) on
+    /// `channels`, the timeline's samples `[s0, s1)` at `rate`.
+    #[allow(clippy::too_many_arguments)]
     fn run_fx(
         &mut self,
         key: FxKey,
         effects: &[&Effect],
+        envelopes: &[bv_timeline::Envelope],
         rate: u32,
         s0: i64,
         s1: i64,
@@ -749,6 +753,11 @@ impl AudioPool {
         }
         entry.0.set_tempo(self.tempo);
         entry.0.sync(effects, rate, channels.len(), keep);
+        // The VST 3 plug-ins: where the block lies, and FX automation
+        // sample by sample.
+        entry.0.locate(s0);
+        let frames = channels.first().map_or(0, Vec::len);
+        entry.0.automate(effects, envelopes, s0, frames, rate);
         let owner = match key {
             FxKey::Clip(c) => modern_eq::TapOwner::Clip(c),
             FxKey::Track(t) => modern_eq::TapOwner::Track(t),
@@ -1044,7 +1053,7 @@ pub fn finish_mix(
     };
     let rate = project.settings.sample_rate.0;
     if !project.master_fx_post_fader {
-        pool.run_fx(FxKey::Master, &fx, rate, start, end, &mut out.channels);
+        pool.run_fx(FxKey::Master, &fx, &[], rate, start, end, &mut out.channels);
     }
     scale(&mut out, db_to_gain(project.master.gain_db));
     // A 5.1 master's channels, each by its own fader.
@@ -1057,7 +1066,7 @@ pub fn finish_mix(
         }
     }
     if project.master_fx_post_fader {
-        pool.run_fx(FxKey::Master, &fx, rate, start, end, &mut out.channels);
+        pool.run_fx(FxKey::Master, &fx, &[], rate, start, end, &mut out.channels);
     }
     pool.lfe_lowpass(project, start, end, &mut out);
     pool.meters.measure(meters::MeterOf::Master, start, &out);
@@ -1242,6 +1251,7 @@ fn add_track(
                 pool.run_fx(
                     FxKey::Clip(clip.id),
                     &effects,
+                    &[],
                     rate.0,
                     s0 + late,
                     s1 + late,
@@ -1256,6 +1266,7 @@ fn add_track(
             pool.run_fx(
                 FxKey::Track(track.id),
                 &track_fx,
+                &track.envelopes,
                 rate.0,
                 start,
                 block_end,

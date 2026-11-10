@@ -61,6 +61,15 @@ not to be confused with BananaV:
 You may say, truthfully, that your program is "based on BananaV", and you
 must keep the copyright and license notices the GPL asks for.
 
+## Other makers' names
+
+BananaV names other makers' formats and products only to say what it works
+with. **VST** is a trademark of Steinberg Media Technologies GmbH. BananaV is
+not made, endorsed or certified by Steinberg: it hosts VST 3 plug-ins through
+the VST 3 SDK's MIT-licensed interfaces, and VST 2 plug-ins through a
+compatibility layer of its own, written without Steinberg's VST 2 SDK, its
+code or its headers. BananaV uses no VST logo.
+
 ## Asking for permission, reporting misuse
 
 Send a private message to a maintainer on the [Discord server](https://discord.gg/vtC7Yasz98). We are happy to say yes to uses that help

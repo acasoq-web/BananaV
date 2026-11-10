@@ -1,0 +1,17 @@
+[package]
+name = "bv-apple"
+description = "What BananaV's plug-in hosts and OS services share on macOS: Core Foundation's strings, numbers and dictionaries, bundles (a plug-in's executable and Info.plist, loading it, its functions), work sent to the main thread, the guard around calls into plug-ins; and Mach-O files read without running them (the processors a file is for, the functions it exports), on every system."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

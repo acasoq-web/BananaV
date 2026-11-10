@@ -52,6 +52,8 @@ fn found_as_saved(doc: &Document) -> Vec<Option<MediaInfo>> {
 /// markers as met), so two projects that say the same compare equal.
 fn canonical(p: &Project) -> Value {
     let mut p = p.clone();
+    // Older built-in generators come back as the plug-ins that draw them.
+    p.upgrade_generators();
     let mut names: Vec<(String, MediaId)> =
         p.media.iter().map(|m| (m.name.clone(), m.id)).collect();
     names.sort();
@@ -625,7 +627,14 @@ fn another_programs_timeline() {
     assert_eq!(v.clips[0].fade_in, f(12));
     assert_eq!(v.clips[1].rate, 0.5);
     let bars = p.media(v.clips[2].media).unwrap();
-    assert_eq!(bars.source, MediaSource::Generated(Generator::ColorBars));
+    // The bars as BananaV's Test Pattern draws them.
+    assert_eq!(
+        Some(&bars.source),
+        Generator::ColorBars
+            .as_plugin(p.settings.width)
+            .map(MediaSource::Generated)
+            .as_ref()
+    );
     // The sound, grouped with its picture.
     assert_eq!(a.clips.len(), 1);
     assert_eq!((a.clips[0].start, a.clips[0].duration), (f(24), f(54)));

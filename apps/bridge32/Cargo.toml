@@ -1,0 +1,18 @@
+[package]
+name = "bananav-bridge32"
+description = "BananaV's 32-bit bridge: runs a 32-bit plug-in in a process of its own for BananaV (built for 32-bit Windows)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 7
+
+[dependencies]
+bv-vst2.workspace = true
+bv-vst3.workspace = true
+
+[lints]
+workspace = true

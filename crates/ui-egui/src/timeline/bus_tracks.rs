@@ -21,6 +21,7 @@ use super::headers::{MAX_GAIN, MUTE_ON, STRIP_W, Thumb, automation_tip, letter_b
 use super::{Layout, TimelineView};
 use crate::app::BananaApp;
 use crate::automation::{AutoOwner, TrackControl};
+use crate::cursors::{self, Cursor};
 use crate::egui::{self, Align2, Color32, FontId, Rect, Sense, Stroke, pos2, vec2};
 use crate::fx_window::FxTarget;
 use crate::i18n::tr;
@@ -218,7 +219,7 @@ impl TimelineView {
 }
 
 /// The splitter between the tracks and the bus tracks: dragged, it sizes
-/// their area.
+/// their area. Its pointer is the splitter's ↕, as VEGAS's.
 fn splitter(view: &mut TimelineView, ui: &egui::Ui, l: &Layout) {
     let resp = ui.interact(
         l.bus_split,
@@ -233,7 +234,7 @@ fn splitter(view: &mut TimelineView, ui: &egui::Ui, l: &Layout) {
         Stroke::new(1.0, theme::separator()),
     );
     if resp.hovered() || resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        cursors::set(ui.ctx(), Cursor::SplitterNs);
     }
     if resp.dragged() {
         view.bus_area = (view.bus_area - resp.drag_delta().y).max(MIN_AREA);
@@ -704,7 +705,8 @@ fn video_header(
     bottom_edge(view, ui, r, BusTrack::Video, id("edge"));
 }
 
-/// A bus track's bottom edge: dragged, its height.
+/// A bus track's bottom edge: dragged, its height (the splitter's ↕, as a
+/// track's).
 fn bottom_edge(view: &mut TimelineView, ui: &egui::Ui, r: Rect, track: BusTrack, id: egui::Id) {
     let edge = Rect::from_min_max(
         pos2(r.left(), r.bottom() - 3.0),
@@ -712,7 +714,7 @@ fn bottom_edge(view: &mut TimelineView, ui: &egui::Ui, r: Rect, track: BusTrack,
     );
     let e = ui.interact(edge, id, Sense::drag());
     if e.hovered() || e.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        cursors::set(ui.ctx(), Cursor::SplitterNs);
     }
     if e.dragged() {
         let h = (height_of(view, track) + e.drag_delta().y).clamp(MIN_BUS_H, super::MAX_TRACK_H);
@@ -818,6 +820,22 @@ fn header_menu(
     }
 }
 
+/// The pointer over a bus track's envelope (`None`: the arrow), as over a
+/// track's with VEGAS's defaults: the arrow over its line or a point; the
+/// hand with ↕ while the button is held on its line before the pointer
+/// moves; the hand with four arrows while a point is `dragged` (the one a
+/// drag of the line adds too). Shift paints nothing here: it changes
+/// nothing.
+fn envelope_pointer(dragged: bool, held_on_line: bool) -> Option<Cursor> {
+    if dragged {
+        Some(Cursor::HandMove)
+    } else if held_on_line {
+        Some(Cursor::HandUpDown)
+    } else {
+        None
+    }
+}
+
 /// A bus track's lane: its envelopes, drawn and edited.
 fn lane(
     view: &mut TimelineView,
@@ -906,11 +924,6 @@ fn lane(
             view.bus_drag = None;
         }
     } else if let (Some(h), Some(p)) = (hit, pointer) {
-        ui.ctx().set_cursor_icon(if h.point.is_some() {
-            egui::CursorIcon::Move
-        } else {
-            egui::CursorIcon::PointingHand
-        });
         let spot = h.point.map(|_| {
             pos2(
                 view.x_of(l, h.at),
@@ -919,6 +932,21 @@ fn lane(
         });
         let time = app.ruler_text(h.at);
         paint_value(ui, l, project, p, owner, (h.kind, &time, h.value), spot);
+    }
+    // The pointer, as over a track's envelopes.
+    let dragged = resp.dragged() && view.bus_drag.is_some_and(|d| d.track == track);
+    let held_on_line = !dragged
+        && resp.is_pointer_button_down_on()
+        && ui.input(|i| i.pointer.primary_down())
+        && ui
+            .input(|i| i.pointer.press_origin())
+            .and_then(|o| super::envelopes::strip_hit(view, l, env, envelopes, o))
+            .is_some_and(|h| h.point.is_none());
+    if dragged || held_on_line || hit.is_some() {
+        match envelope_pointer(dragged, held_on_line) {
+            Some(c) => cursors::set(ui.ctx(), c),
+            None => cursors::system(ui.ctx(), egui::CursorIcon::Default),
+        }
     }
     // A double-click on the line: a point there.
     if resp.double_clicked()
@@ -1024,6 +1052,11 @@ fn envelope_menu(ui: &mut egui::Ui, view: &mut TimelineView, app: &mut BananaApp
         view.bus_point = None;
         ui.close();
     }
+    ui.separator();
+    if ui.button(tr("Envelope Appearance…")).clicked() {
+        app.open_envelope_look();
+        ui.close();
+    }
 }
 
 /// The tooltip of the envelope `kind` under the pointer `at` (its time
@@ -1066,6 +1099,18 @@ fn needles(ui: &egui::Ui, app: &BananaApp, view: &TimelineView, l: &Layout) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bus track's envelope shows a track's pointers with VEGAS's
+    /// defaults: the arrow over it, the hand with ↕ while the button is
+    /// held on its line, the hand with four arrows while a point moves
+    /// (held or not before).
+    #[test]
+    fn bus_envelopes_point_as_tracks_do() {
+        assert_eq!(envelope_pointer(false, false), None);
+        assert_eq!(envelope_pointer(false, true), Some(Cursor::HandUpDown));
+        assert_eq!(envelope_pointer(true, false), Some(Cursor::HandMove));
+        assert_eq!(envelope_pointer(true, true), Some(Cursor::HandMove));
+    }
 
     /// Ctrl+Shift+Up/Down with the bus area in focus size every bus track,
     /// within their limits.

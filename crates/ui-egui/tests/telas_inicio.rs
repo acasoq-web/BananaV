@@ -124,7 +124,7 @@ fn captura_area_inicial() {
     settle(&mut h);
     h.get_by_label("Credit Roll").click();
     settle(&mut h);
-    hover(&mut h, "Over Black");
+    hover(&mut h, "Plain Scrolling on Black");
     snap(&mut h, "geradores_credit_roll");
     h.get_by_label("Noise Texture").click();
     settle(&mut h);

@@ -126,6 +126,7 @@ pub(crate) enum K {
     Sharpen,
     AddGlow,
     Dissolve,
+    Crossfade,
     FadeThroughBlack,
     Wipe,
     PushSlide,
@@ -256,6 +257,7 @@ pub(crate) enum K {
     KitVignette,
     KitMirror,
     KitCheckerboard,
+    KitColorGradient,
     KitTestPattern,
     KitNoiseTexture,
     KitDisplace,
@@ -298,7 +300,22 @@ pub(crate) enum K {
 }
 
 impl K {
-    pub const ALL: [K; 198] = [
+    /// The kernels Direct3D's compiler takes longest on (a release build,
+    /// 2026-11-07: Page Peel/Roll/Loop's 5.2 s, the moving transitions'
+    /// 2.7 s, Light Rays' 1.7 s, then about half a second each), longest
+    /// first: [`crate::Gpu::warm_up`] begins with them, so they are ready
+    /// soonest and the others share the remaining threads meanwhile.
+    pub const SLOWEST: [K; 7] = [
+        K::TrPages,
+        K::TrMoves,
+        K::KitLightRays,
+        K::TrCards,
+        K::KitDenoiseNlm,
+        K::Grade,
+        K::TrIris,
+    ];
+
+    pub const ALL: [K; 200] = [
         K::Fill,
         K::Scale,
         K::ToVideoGamma,
@@ -331,6 +348,7 @@ impl K {
         K::Sharpen,
         K::AddGlow,
         K::Dissolve,
+        K::Crossfade,
         K::FadeThroughBlack,
         K::Wipe,
         K::PushSlide,
@@ -460,6 +478,7 @@ impl K {
         K::KitVignette,
         K::KitMirror,
         K::KitCheckerboard,
+        K::KitColorGradient,
         K::KitTestPattern,
         K::KitNoiseTexture,
         K::KitDisplace,
@@ -509,8 +528,9 @@ impl K {
             | ColorSecondary | ColorEnter | ViewBegin | ViewEnd | ViewMatrix | ViewRange
             | ViewPower | ViewCurve | AcesGamutCompress | AppleLog | KitThreshold
             | KitBlackRestore | KitChannelBlend | KitMaskGenerator | KitBroadcastColors
-            | KitLabAdjust | KitColorMatch | KitSoftTone | KitVignette | KitCheckerboard
-            | KitTestPattern | KitNoiseTexture | KitFlickerAdd => Sig::InPlace,
+            | KitLabAdjust | KitColorMatch | KitSoftTone | KitVignette | KitFlickerAdd => {
+                Sig::InPlace
+            }
             CopyInto | Place | PlaceHard | PlaceSoft | HalfSize | Composite | Rotate | Mirror
             | FlickerFilter | InterpolateFields | Blend | BoxH | BoxV | BlockAverage
             | BlockFill | Sharpen | AddGlow | Curves | FieldAlpha | FieldBoxH | FieldBoxV
@@ -525,11 +545,12 @@ impl K {
             | KitFillApply | KitBoxRows | KitBoxColumns | KitGaussRows | KitGaussColumns
             | FftImage | FftKernel | FftPass | FftCrop | KitRaysLights | KitGlintLights
             | KitFlickerMatch | KitFlickerFinish | KitDenoisePlanes | KitDenoiseNlm
-            | KitDenoiseRgb | KitDenoiseSharpen => Sig::Pair,
-            Dissolve | FadeThroughBlack | Wipe | PushSlide | Iris | Clock | Zoom | LayerSurface
-            | LayerUnder | FillCombine | BezierMaskFx | KitMedian | KitConvH | KitConvV
-            | KitDisplace | KitHeights | KitHeightMap | KitBumpWith | KitFillMap | KitWave
-            | KitFilmGrain | KitLightRays | KitLightRaysFinish | KitGradientMap
+            | KitDenoiseRgb | KitDenoiseSharpen | KitCheckerboard | KitColorGradient
+            | KitTestPattern | KitNoiseTexture => Sig::Pair,
+            Dissolve | Crossfade | FadeThroughBlack | Wipe | PushSlide | Iris | Clock | Zoom
+            | LayerSurface | LayerUnder | FillCombine | BezierMaskFx | KitMedian | KitConvH
+            | KitConvV | KitDisplace | KitHeights | KitHeightMap | KitBumpWith | KitFillMap
+            | KitWave | KitFilmGrain | KitLightRays | KitLightRaysFinish | KitGradientMap
             | KitFilmEffects | KitTvSimulator | KitNewsprintCells | KitNewsprint | KitLensFlare
             | FftMultiply | FftAdd | KitSoftDiffuse | KitSoftVignette | KitRays | KitSwirl
             | KitPinchPunch | KitMotionBlurPick | KitFlickerGather | KitMeshWarp
@@ -578,6 +599,7 @@ impl K {
             Sharpen => "sharpen",
             AddGlow => "add_glow",
             Dissolve => "dissolve",
+            Crossfade => "crossfade",
             FadeThroughBlack => "fade_through_black",
             Wipe => "wipe",
             PushSlide => "push_slide",
@@ -707,6 +729,7 @@ impl K {
             KitVignette => "kit_vignette",
             KitMirror => "kit_mirror",
             KitCheckerboard => "kit_checkerboard",
+            KitColorGradient => "kit_color_gradient",
             KitTestPattern => "kit_test_pattern",
             KitNoiseTexture => "kit_noise_texture",
             KitDisplace => "kit_displace",
@@ -1073,6 +1096,41 @@ mod tests {
                     module.entry_points.iter().any(|e| e.name == k.entry()),
                     "{k:?}: no entry point {} in {sig:?}",
                     k.entry()
+                );
+            }
+        }
+    }
+
+    /// The kernels as macOS runs them: within what Metal's shading language
+    /// can say, and written in it as wgpu writes them for a Mac (the
+    /// language of macOS 11, BananaV's oldest), every kernel of every
+    /// module.
+    #[test]
+    fn every_kernel_translates_to_metal() {
+        use naga::back::msl;
+        for sig in Sig::ALL {
+            let source = sig.module();
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{sig:?}: {}", e.emit_to_string(&source)));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                msl::supported_capabilities(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{sig:?} needs what Metal lacks: {e:?}"));
+            let options = msl::Options {
+                lang_version: (2, 3),
+                fake_missing_bindings: true,
+                zero_initialize_workgroup_memory: false,
+                ..Default::default()
+            };
+            let (text, _) =
+                msl::write_string(&module, &info, &options, &msl::PipelineOptions::default())
+                    .unwrap_or_else(|e| panic!("{sig:?} in Metal: {e:?}"));
+            for k in K::ALL.into_iter().filter(|k| k.sig() == sig) {
+                assert!(
+                    text.contains("kernel void"),
+                    "{k:?}: no kernel written for {sig:?}"
                 );
             }
         }

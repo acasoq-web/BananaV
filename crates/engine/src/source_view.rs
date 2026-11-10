@@ -194,6 +194,8 @@ fn run(shared: &Shared, repaint: &RepaintFn) {
             want: Want::Linear,
             span: Some(request.span),
             video_levels: request.video_levels,
+            eight_bit: false,
+            encoded: true,
         };
         pool.begin_frame();
         pool.set_patience(Some(Instant::now() + PATIENCE));

@@ -657,26 +657,42 @@ impl ParameterChanges {
     /// The block's changes: each parameter's new value from its first
     /// sample (the last given for a parameter wins).
     pub(crate) fn set(&self, changes: &[(u32, f64)]) {
-        let mut queues = lock(&self.queues);
-        let mut ids: Vec<u32> = Vec::new();
-        for &(id, v) in changes {
-            let i = match ids.iter().position(|&x| x == id) {
+        let points: Vec<(u32, i32, f64)> = changes.iter().map(|&(id, v)| (id, 0, v)).collect();
+        self.set_points(&points);
+    }
+
+    /// The block's changes as points (parameter, sample in the block,
+    /// value): each parameter's queue holds its points in the order of
+    /// their samples, the last given for a sample winning — the plug-in
+    /// goes from one to the next (a ramp, sample by sample).
+    pub(crate) fn set_points(&self, changes: &[(u32, i32, f64)]) {
+        let mut by_id: Vec<(u32, Vec<(i32, f64)>)> = Vec::new();
+        for &(id, at, v) in changes {
+            let i = match by_id.iter().position(|(x, _)| *x == id) {
                 Some(i) => i,
                 None => {
-                    ids.push(id);
-                    if queues.len() < ids.len() {
-                        queues.push(ParamValueQueue::new());
-                    }
-                    ids.len() - 1
+                    by_id.push((id, Vec::new()));
+                    by_id.len() - 1
                 }
             };
-            let q = queues[i].get();
-            q.id.store(id, Ordering::Release);
-            let mut p = lock(&q.points);
-            p.clear();
-            p.push((0, v));
+            let points = &mut by_id[i].1;
+            match points.iter_mut().find(|(o, _)| *o == at) {
+                Some(p) => p.1 = v,
+                None => points.push((at, v)),
+            }
         }
-        self.used.store(ids.len(), Ordering::Release);
+        let n = by_id.len();
+        let mut queues = lock(&self.queues);
+        while queues.len() < n {
+            queues.push(ParamValueQueue::new());
+        }
+        for (k, (id, mut points)) in by_id.into_iter().enumerate() {
+            points.sort_by_key(|p| p.0);
+            let q = queues[k].get();
+            q.id.store(id, Ordering::Release);
+            *lock(&q.points) = points;
+        }
+        self.used.store(n, Ordering::Release);
     }
 
     pub(crate) fn count(&self) -> usize {

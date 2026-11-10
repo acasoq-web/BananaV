@@ -281,6 +281,10 @@ impl Template {
             Encoder::Qualcomm => {
                 format!(" {}", tr("Encoded by the Qualcomm graphics card (Adreno)."))
             }
+            Encoder::Apple => format!(
+                " {}",
+                tr("Encoded by the Mac's media engine (VideoToolbox).")
+            ),
         };
         let text = match self.format {
             FileFormat::AvcMp4 => {
@@ -412,6 +416,7 @@ fn encoder_id(e: Encoder) -> &'static str {
         Encoder::Amd => "amd",
         Encoder::Intel => "qsv",
         Encoder::Qualcomm => "qcom",
+        Encoder::Apple => "vt",
     }
 }
 

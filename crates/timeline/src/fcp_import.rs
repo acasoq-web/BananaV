@@ -44,7 +44,8 @@ pub(crate) fn track(kind: TrackKind, events: Vec<DocEvent>) -> DocTrack {
 /// BananaV's Titles & Text plug-in (`bv_effects::TITLES_ID`).
 pub const TITLES_PLUGIN: &str = "org.bananav.TitlesText";
 
-/// A title saying `text`: BananaV's Titles & Text, its other settings at
+/// A title saying `text`: BananaV's Titles & Text in 12 points (a
+/// twentieth of the frame's height and a bit), its other settings at
 /// their defaults.
 pub(crate) fn title(text: &str) -> MediaRefSource {
     let mut params = BTreeMap::new();
@@ -55,9 +56,16 @@ pub(crate) fn title(text: &str) -> MediaRefSource {
             keys: Vec::new(),
         },
     );
+    params.insert(
+        "size".to_string(),
+        PluginParam {
+            value: PluginValue::Num(vec![12.0]),
+            keys: Vec::new(),
+        },
+    );
     MediaRefSource::Generated(Generator::Plugin(Box::new(PluginFx {
         id: TITLES_PLUGIN.to_string(),
-        version: [1, 0],
+        version: [2, 0],
         name: "Titles & Text".to_string(),
         params,
     })))

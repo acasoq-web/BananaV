@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -149,9 +150,20 @@ struct ServiceState<K, V> {
     quit: bool,
 }
 
+/// Playback or a render under way: video thumbnails wait (their decoding
+/// takes the processor's cores the preview and the render need); the
+/// nearest ones made before show meanwhile.
+static HOLD_THUMBNAILS: AtomicBool = AtomicBool::new(false);
+
+/// Holds the video thumbnails' work while `busy` (playback, a render).
+pub(crate) fn hold_thumbnails(busy: bool) {
+    HOLD_THUMBNAILS.store(busy, Ordering::Relaxed);
+}
+
 impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K, V> {
-    /// A service keeping at most `cap` results.
-    fn new(name: &str, cap: usize, repaint: RepaintFn) -> Service<K, V> {
+    /// A service keeping at most `cap` results; with `holds`, its work
+    /// waits while [`hold_thumbnails`] says so.
+    fn new(name: &str, cap: usize, repaint: RepaintFn, holds: bool) -> Service<K, V> {
         let shared: Arc<(Mutex<ServiceState<K, V>>, Condvar)> = Arc::new((
             Mutex::new(ServiceState {
                 queue: VecDeque::new(),
@@ -190,6 +202,16 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
                                 drop(st);
                                 close_thread_readers();
                                 st = lock.lock().expect("fila");
+                                continue;
+                            }
+                            if holds
+                                && !st.queue.is_empty()
+                                && HOLD_THUMBNAILS.load(Ordering::Relaxed)
+                            {
+                                st = cv
+                                    .wait_timeout(st, std::time::Duration::from_millis(100))
+                                    .expect("fila")
+                                    .0;
                                 continue;
                             }
                             if let Some(j) = st.queue.pop_back() {
@@ -300,9 +322,9 @@ pub(crate) struct Thumbs {
 impl Thumbs {
     pub(crate) fn new(repaint: RepaintFn) -> Thumbs {
         Thumbs {
-            images: Service::new("bv-thumbs", 4096, repaint.clone()),
-            waves: Service::new("bv-waveforms", usize::MAX, repaint.clone()),
-            chunks: Service::new("bv-wave-detail", 128, repaint),
+            images: Service::new("bv-thumbs", 4096, repaint.clone(), true),
+            waves: Service::new("bv-waveforms", usize::MAX, repaint.clone(), false),
+            chunks: Service::new("bv-wave-detail", 128, repaint, false),
             shown: Mutex::new(HashMap::new()),
         }
     }
@@ -882,7 +904,7 @@ mod tests {
 
     #[test]
     fn service_keeps_at_most_its_cap() {
-        let s: Service<u32, u32> = Service::new("test", 2, Arc::new(|| {}));
+        let s: Service<u32, u32> = Service::new("test", 2, Arc::new(|| {}), false);
         for k in 0..3u32 {
             s.get(k, move || Some(k));
             // Wait for the worker.

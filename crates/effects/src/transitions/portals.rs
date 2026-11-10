@@ -1,6 +1,6 @@
 //! Portals as VEGAS draws it: squares of the second picture come in over
-//! the first one at random places — seeded random numbers (R250, a shift
-//! register of 250 words), so a seed always gives the same pattern —, each
+//! the first one at random places — BananaV's seeded random numbers
+//! (`r250.rs`), so a seed always gives the same pattern —, each
 //! showing a part of the picture
 //! moved and scaled a little by Max offset and Max scale, as transparent
 //! as Max transparency says. Over the first half they appear one after

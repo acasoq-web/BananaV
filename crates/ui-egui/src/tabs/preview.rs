@@ -119,6 +119,9 @@ const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 pub struct PreviewState {
     texture: Option<TextureHandle>,
+    /// The image the texture was last given (its pixels used again for
+    /// the next frame of its size).
+    image: Option<std::sync::Arc<ColorImage>>,
     pub(crate) shown: Option<(u64, Tick, u32, u32)>,
     /// Overlays (the # button), and which: the grid, the safe areas, the
     /// closed captioning channels (CC1 to CC4), one channel of the picture.
@@ -150,7 +153,12 @@ pub struct PreviewState {
     split_from: Option<Pos2>,
     /// The last snapshot copied: what Split-Screen View's Clipboard shows.
     snapshot: Option<TextureHandle>,
+    /// The size the last frame shown was drawn at (the status line's
+    /// "Preview").
     last_frame_size: (u32, u32),
+    /// The pixels the frame was last shown in: frames drawn larger come
+    /// back reduced to them (Full, Half and Quarter in a smaller window).
+    room: (u32, u32),
     /// When the frames shown during the last second of playback came: the
     /// rate the preview keeps up with (VEGAS shows it beside "Preview").
     shown_at: std::collections::VecDeque<std::time::Instant>,
@@ -170,6 +178,11 @@ pub struct PreviewState {
     /// The main window's pass that last asked the engine for a frame (the
     /// Video Scopes ask themselves while the preview does not).
     pub(crate) requested_at: u64,
+    /// Transform mode (the button by Preview Quality): the event at the
+    /// cursor moved, resized and turned on the picture; the drag under
+    /// way.
+    pub(crate) transform: bool,
+    pub(crate) transform_drag: Option<crate::transform_ui::Drag>,
     /// The 360° View (360° projects): the frame seen through a camera
     /// looking around in it, and where the camera looks; and whether the
     /// texture repeats across for it.
@@ -182,6 +195,7 @@ impl Default for PreviewState {
     fn default() -> PreviewState {
         PreviewState {
             texture: None,
+            image: None,
             shown: None,
             overlays: false,
             grid: true,
@@ -199,6 +213,7 @@ impl Default for PreviewState {
             split_from: None,
             snapshot: None,
             last_frame_size: (0, 0),
+            room: (0, 0),
             shown_at: std::collections::VecDeque::new(),
             slow: 0,
             slow_check: None,
@@ -207,6 +222,8 @@ impl Default for PreviewState {
             area: Rect::NOTHING,
             frame: Rect::NOTHING,
             requested_at: 0,
+            transform: false,
+            transform_drag: None,
             view_360: false,
             look: Default::default(),
             repeats: false,
@@ -332,6 +349,23 @@ impl PreviewState {
     pub fn size(&self) -> (u32, u32) {
         let (w, h) = self.last_frame_size;
         (w.max(320), h.max(180))
+    }
+
+    /// The pixels the frames are shown in (see `room`).
+    pub(crate) fn room(&self) -> (u32, u32) {
+        self.room
+    }
+
+    /// Different frames shown a second during the last second of
+    /// playback (`None` before there are a few).
+    pub(crate) fn shown_rate(&self) -> Option<f64> {
+        let shown = &self.shown_at;
+        match (shown.front(), shown.back()) {
+            (Some(a), Some(b)) if shown.len() > 2 && *b > *a => {
+                Some((shown.len() - 1) as f64 / (*b - *a).as_secs_f64())
+            }
+            _ => None,
+        }
     }
 
     /// The zoom `step` percent in (or out), on the middle of the window;
@@ -503,11 +537,11 @@ fn navigate(ui: &egui::Ui, app: &mut BananaApp, nav: &egui::Response, area: Rect
     } else {
         p.wheel_rest = 0.0;
     }
-    if nav.dragged_by(egui::PointerButton::Middle) {
+    let dragging = nav.dragged_by(egui::PointerButton::Middle);
+    if dragging {
         let size = fit * p.shown_zoom() as f32 / 100.0;
         let d = nav.drag_delta();
         p.center -= vec2(d.x / size.x.max(1.0), d.y / size.y.max(1.0));
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
     // A double click a plug-in's overlay took is its own (a point put
     // back), not the zoom's; nor is a Color Grading picker's click.
@@ -516,6 +550,29 @@ fn navigate(ui: &egui::Ui, app: &mut BananaApp, nav: &egui::Response, area: Rect
         || (nav.double_clicked() && !p.split.on && !overlay)
     {
         p.reset_zoom();
+    }
+    // The pointer over the picture as it is now (`view_cursor`).
+    let size = fit * app.preview.shown_zoom() as f32 / 100.0;
+    let (frame, _) = place_frame(area, size, app.preview.center);
+    let larger = size.x > area.width() + 0.5 || size.y > area.height() + 0.5;
+    let over = nav.hover_pos().is_some_and(|q| frame.contains(q));
+    if let Some(c) = view_cursor(dragging, larger, over) {
+        crate::cursors::set(ui.ctx(), c);
+    }
+}
+
+/// The Video Preview's pointer, as VEGAS's: dragged with the wheel held
+/// (the 360° View: with either button), the closed hand; over a picture
+/// larger than the window (zoomed in; the 360° View's, always), the open
+/// hand; else none of BananaV's.
+fn view_cursor(dragging: bool, larger: bool, over: bool) -> Option<crate::cursors::Cursor> {
+    use crate::cursors::Cursor;
+    if dragging {
+        Some(Cursor::HandClosed)
+    } else if larger && over {
+        Some(Cursor::HandOpen)
+    } else {
+        None
     }
 }
 
@@ -531,11 +588,13 @@ fn navigate_360(ui: &egui::Ui, app: &mut BananaApp, nav: &egui::Response, width:
         }
     }
     let middle = egui::PointerButton::Middle;
-    if nav.dragged_by(egui::PointerButton::Primary) || nav.dragged_by(middle) {
+    let dragging = nav.dragged_by(egui::PointerButton::Primary) || nav.dragged_by(middle);
+    if dragging {
         look.drag(nav.drag_delta(), width);
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if nav.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    // The camera's view is dragged round wherever it shows.
+    if let Some(c) = view_cursor(dragging, true, nav.hovered()) {
+        crate::cursors::set(ui.ctx(), c);
     }
     if nav.double_clicked() || nav.double_clicked_by(middle) {
         *look = crate::view360::Look::default();
@@ -961,6 +1020,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             quality_menu(ui, app);
             zoom_box(ui, app);
             overlays_menu(ui, app);
+            crate::transform_ui::toolbar_button(ui, app);
             if icon_button(ui, Icon::Copy, tr("Copy Snapshot to Clipboard")).clicked() {
                 // Over black, as the preview shows it.
                 match app
@@ -1144,7 +1204,8 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         let left = egui::PointerButton::Primary;
         let over = nav.hover_pos().is_some_and(|q| frame_rect.contains(q));
         if (over && !nav.dragged()) || nav.dragged_by(left) {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            // The system's crosshair (VEGAS's preview uses the system's).
+            crate::cursors::system(ui.ctx(), egui::CursorIcon::Crosshair);
         }
         let in_frame = |q: Pos2| {
             pos2(
@@ -1204,8 +1265,21 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             None => {
                 let look = app.preview.look(PreviewQuality { level, ..quality });
                 app.engine.set_preview_look(look);
+                // Drawn at the quality's size, the frame comes back at the
+                // size it shows at: the screen's pixels it covers (zoomed
+                // in, more than the window; the 360° View magnifies the
+                // part it shows, so it takes the whole frame).
+                let room = if view_360 || quality.size == PreviewSize::Auto {
+                    (0, 0)
+                } else {
+                    (
+                        (frame_rect.width() * ppp).ceil().max(2.0) as u32,
+                        (frame_rect.height() * ppp).ceil().max(2.0) as u32,
+                    )
+                };
+                app.preview.room = room;
                 app.engine
-                    .request_preview(app.display_time(), max_w.max(2), max_h.max(2));
+                    .request_preview_in(app.display_time(), max_w.max(2), max_h.max(2), room);
             }
         }
         app.preview.requested_at = ui.ctx().cumulative_pass_nr_for(egui::ViewportId::ROOT);
@@ -1218,7 +1292,11 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     if let Some(f) = rendered.or(frame).filter(|_| !hold) {
         let key = (f.generation, f.time, f.width, f.height);
         if app.preview.shown != Some(key) || app.preview.repeats != view_360 {
-            let image = frame_image([f.width as usize, f.height as usize], &f.rgba);
+            let image = frame_image_reusing(
+                [f.width as usize, f.height as usize],
+                &f.rgba,
+                &mut app.preview.image,
+            );
             // Draft shows the pixels as they are; the 360° View's frame
             // repeats across (its left and right edges meet).
             let options = match (quality.level == RenderQuality::Draft, view_360) {
@@ -1235,7 +1313,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
                 }
             }
             app.preview.shown = Some(key);
-            app.preview.last_frame_size = (f.width, f.height);
+            app.preview.last_frame_size = f.drawn;
             if app.is_playing() {
                 app.preview.shown_at.push_back(std::time::Instant::now());
             }
@@ -1350,6 +1428,9 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         } else if app.motion.open {
             // Motion Tracking's region, while its window is open.
             crate::motion_tracking::overlay(ui, app, frame_rect, image_area);
+        } else if app.preview.transform {
+            // Transform mode: the event's box over its picture.
+            crate::transform_ui::overlay(ui, app, frame_rect, image_area);
         } else {
             crate::ofx::overlay_ui(ui, app, &nav, frame_rect, image_area);
         }
@@ -1451,13 +1532,9 @@ fn status_ui(ui: &mut egui::Ui, app: &mut BananaApp, full: Rect, status_h: f32, 
     let frame_no = app.frame_rate().frame_at(app.display_time());
     let s = app.project().settings;
     let rate = crate::fmt::num(s.frame_rate.as_f64(), 3);
-    let shown = &app.preview.shown_at;
-    let preview_rate = match (shown.front(), shown.back()) {
-        (Some(a), Some(b)) if shown.len() > 2 && *b > *a => {
-            let r = (shown.len() - 1) as f64 / (*b - *a).as_secs_f64();
-            crate::fmt::num(r, 3)
-        }
-        _ => rate.clone(),
+    let preview_rate = match app.preview.shown_rate() {
+        Some(r) => crate::fmt::num(r, 3),
+        None => rate.clone(),
     };
     let (dw, dh) = ((fit.x * ppp).round() as u32, (fit.y * ppp).round() as u32);
     let scaled = (dw, dh) != (fw, fh);
@@ -1546,15 +1623,50 @@ fn status_ui(ui: &mut egui::Ui, app: &mut BananaApp, full: Rect, status_h: f32, 
     }
 }
 
+/// Whether every pixel of RGBA bytes is opaque.
+fn opaque(rgba: &[u8]) -> bool {
+    rgba.as_chunks::<4>()
+        .0
+        .chunks(1024)
+        .all(|c| c.iter().fold(255u8, |a, p| a & p[3]) == 255)
+}
+
+/// [`frame_image`] into the image the last frame was shown with, once the
+/// texture took its pixels (no one else holds it): a 4K frame is 33 MB,
+/// and fresh memory for each one cost more than the copy.
+pub(crate) fn frame_image_reusing(
+    size: [usize; 2],
+    rgba: &[u8],
+    last: &mut Option<std::sync::Arc<ColorImage>>,
+) -> egui::ImageData {
+    let reused = rgba.len() == size[0] * size[1] * 4
+        && opaque(rgba)
+        && match last.as_mut().and_then(std::sync::Arc::get_mut) {
+            Some(img) if img.size == size => {
+                bytemuck::cast_slice_mut::<Color32, u8>(&mut img.pixels).copy_from_slice(rgba);
+                true
+            }
+            _ => false,
+        };
+    if !reused {
+        *last = Some(std::sync::Arc::new(frame_image(size, rgba)));
+    }
+    match last {
+        Some(img) => egui::ImageData::Color(img.clone()),
+        None => egui::ImageData::Color(std::sync::Arc::new(frame_image(size, rgba))),
+    }
+}
+
 /// A frame as an image for the screen. Almost every frame is opaque: no
 /// color then needs working out, the pixels are copied.
 pub(crate) fn frame_image(size: [usize; 2], rgba: &[u8]) -> ColorImage {
-    let opaque = rgba
-        .as_chunks::<4>()
-        .0
-        .chunks(1024)
-        .all(|c| c.iter().fold(255u8, |a, p| a & p[3]) == 255);
-    if opaque {
+    let opaque = opaque(rgba);
+    if opaque && rgba.len() == size[0] * size[1] * 4 {
+        // Opaque: the bytes are premultiplied pixels already, egui's own
+        // layout — copied whole (egui's conversion went pixel by pixel:
+        // a quarter of the interface's time at 1080p).
+        ColorImage::new(size, bytemuck::cast_slice::<u8, Color32>(rgba).to_vec())
+    } else if opaque {
         ColorImage::from_rgba_premultiplied(size, rgba)
     } else {
         ColorImage::from_rgba_unmultiplied(size, rgba)
@@ -1675,5 +1787,18 @@ mod tests {
         };
         assert_eq!(q.label(), "Best (Full)");
         assert_eq!(PreviewQuality::default().label(), "Preview (Auto)");
+    }
+
+    /// As VEGAS's preview: the open hand over a picture larger than the
+    /// window, the closed one while it is dragged (larger or not), none
+    /// otherwise.
+    #[test]
+    fn a_zoomed_picture_shows_the_hand() {
+        use crate::cursors::Cursor;
+        assert_eq!(view_cursor(false, true, true), Some(Cursor::HandOpen));
+        assert_eq!(view_cursor(false, true, false), None);
+        assert_eq!(view_cursor(false, false, true), None);
+        assert_eq!(view_cursor(true, false, false), Some(Cursor::HandClosed));
+        assert_eq!(view_cursor(true, true, true), Some(Cursor::HandClosed));
     }
 }

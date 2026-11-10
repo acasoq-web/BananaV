@@ -88,9 +88,11 @@ pub struct ExplorerState {
     show_regions: bool,
     show_summary: bool,
     /// The files read (their media information, `None` when unreadable),
-    /// and the reading of a folder's going on in the background.
+    /// and the reading of a folder's going on in the background (it ended:
+    /// `probed`).
     probes: HashMap<PathBuf, Option<MediaInfo>>,
     probing: Option<(PathBuf, std::sync::mpsc::Receiver<Probed>)>,
+    probed: bool,
 }
 
 /// What stands for a file in the lists: an icon, or BananaV's logo for its own
@@ -312,7 +314,16 @@ impl ExplorerState {
             show_summary: false,
             probes: HashMap::new(),
             probing: None,
+            probed: false,
         }
+    }
+
+    /// Whether the open folder's files are still being read in the
+    /// background (the thumbnails' pictures and lengths).
+    fn reading(&self) -> bool {
+        self.probing
+            .as_ref()
+            .is_some_and(|(dir, _)| *dir == self.dir && !self.probed)
     }
 
     /// The thumbnails' files read in the background, a folder at a time:
@@ -320,8 +331,17 @@ impl ExplorerState {
     /// started.
     fn read_files(&mut self) {
         if let Some((_, rx)) = &self.probing {
-            while let Ok((path, info)) = rx.try_recv() {
-                self.probes.insert(path, info);
+            loop {
+                match rx.try_recv() {
+                    Ok((path, info)) => {
+                        self.probes.insert(path, info);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.probed = true;
+                        break;
+                    }
+                }
             }
         }
         if self
@@ -351,6 +371,7 @@ impl ExplorerState {
             })
             .ok();
         self.probing = Some((self.dir.clone(), rx));
+        self.probed = false;
     }
 
     fn load(&mut self) {
@@ -537,6 +558,15 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             contents_ui(ui, &mut app.explorer, &favorites, auto_preview)
         };
     });
+    // While the folder's files are read in the background, the system's
+    // arrow with its busy mark over them, as VEGAS's Explorer while it
+    // loads (where nothing there chose its own pointer).
+    let free = ui
+        .ctx()
+        .output(|o| o.cursor_icon == egui::CursorIcon::Default && o.cursor_image.is_none());
+    if thumbnails && app.explorer.reading() && free && ui.rect_contains_pointer(list) {
+        crate::cursors::system(ui.ctx(), egui::CursorIcon::Progress);
+    }
     let mut top = list.bottom();
     for (on, regions) in [
         (app.explorer.show_regions, true),
@@ -1800,12 +1830,19 @@ mod tests {
         st.dir = dir.clone();
         st.load();
         st.view = View::Thumbnails;
-        // Read in the background: wait for it.
+        // Read in the background (the busy pointer meanwhile): wait for it.
+        st.read_files();
+        assert!(st.reading());
         let started = std::time::Instant::now();
         while !st.probes.contains_key(&wav) && started.elapsed().as_secs() < 30 {
             st.read_files();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        while st.reading() && started.elapsed().as_secs() < 30 {
+            st.read_files();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!st.reading(), "the reading ended");
         let info = st.probes.get(&wav).cloned().flatten().expect("read");
         let regions: Vec<_> = info.markers.iter().filter(|m| m.is_region()).collect();
         assert_eq!(regions.len(), 1);

@@ -25,6 +25,7 @@ use crate::egui::{
 };
 use crate::i18n::tr;
 use crate::icons::Icon;
+use crate::ofx_curves::Grab;
 use crate::ofx_keys::mix;
 use crate::theme;
 
@@ -669,6 +670,14 @@ impl KeyStrip {
         }
         if lanes_resp.drag_stopped() || ruler_resp.drag_stopped() {
             self.drag = None;
+        }
+        // The pointer, as the plug-ins' keyframe controller's: the system's
+        // ↔ while keyframes go along the time, the hand over one.
+        if matches!(self.drag, Some(StripDrag::Keys { .. })) {
+            Grab::Across.show(ui.ctx());
+        } else if self.drag.is_none() && lanes_resp.hover_pos().is_some_and(|p| key_at(p).is_some())
+        {
+            Grab::Over.show(ui.ctx());
         }
         // A click: on a keyframe it is picked (alone; with Ctrl, one more or
         // one less; with Shift, the run from the last one picked in its row)

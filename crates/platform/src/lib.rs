@@ -7,6 +7,7 @@
 //! It also tells how much room a disk has left and the time of day, and
 //! what long jobs need (see [`Usage`], [`taskbar_progress`]).
 
+mod crash;
 mod disc;
 mod library;
 mod midi;
@@ -14,30 +15,42 @@ mod monitor;
 mod plugin_window;
 mod screen;
 
+pub use crash::{on_crash, set_restart};
 pub use disc::{
     BurnError, Burner, CD_1X, CD_SECTOR, CdOptions, CdTrackData, DVD_1X, burn_audio_disc,
     burn_audio_track, burn_image, burners, close_disc, erase_disc, free_sectors,
 };
-pub use library::{Library, VersionTexts, read_library, version_texts};
+pub use library::{Library, VersionTexts, company_of_copyright, read_library, version_texts};
 pub use midi::{MidiHandler, MidiIn, MidiOut, midi_inputs, midi_outputs, unpack};
 pub use monitor::{Usage, notify_sound, shutdown_in, taskbar_progress};
-pub use plugin_window::{PLUGIN_WINDOWS, PluginWindow, Resizer};
+pub use plugin_window::{
+    EDITOR_POINTS, EMBEDDED_EDITORS, EmbeddedSizer, EmbeddedWindow, PLUGIN_WINDOWS, PluginWindow,
+    Resizer,
+};
 pub use screen::{AppWindow, Grab, app_windows, grab_area, grab_window};
 
 /// Where this user's settings go: `%APPDATA%` on Windows,
-/// `$XDG_CONFIG_HOME` (or `~/.config`) elsewhere.
+/// `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` (or
+/// `~/.config`) elsewhere.
 pub fn config_dir() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         return std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    }
+    if cfg!(target_os = "macos") {
+        return home_dir().map(|h| h.join("Library").join("Application Support"));
     }
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
 /// Where files that can be made again go (prerendered video):
-/// `%LOCALAPPDATA%` on Windows, `$XDG_CACHE_HOME` (or `~/.cache`) elsewhere.
+/// `%LOCALAPPDATA%` on Windows, `~/Library/Caches` on macOS,
+/// `$XDG_CACHE_HOME` (or `~/.cache`) elsewhere.
 pub fn cache_dir() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         return std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+    }
+    if cfg!(target_os = "macos") {
+        return home_dir().map(|h| h.join("Library").join("Caches"));
     }
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
@@ -71,8 +84,10 @@ pub enum UserDir {
 }
 
 /// Where the system keeps one of the user's folders: under the home folder
-/// on Windows; on Linux where `user-dirs.dirs` says (the names follow the
-/// system's language: `~/Vídeos`), else the English name.
+/// on Windows and macOS (videos in Movies there; Finder shows the folders'
+/// names in the system's language); on Linux where `user-dirs.dirs` says
+/// (the names follow the system's language: `~/Vídeos`), else the English
+/// name.
 pub fn user_dir(which: UserDir) -> Option<std::path::PathBuf> {
     let english = match which {
         UserDir::Desktop => "Desktop",
@@ -80,10 +95,11 @@ pub fn user_dir(which: UserDir) -> Option<std::path::PathBuf> {
         UserDir::Downloads => "Downloads",
         UserDir::Music => "Music",
         UserDir::Pictures => "Pictures",
+        UserDir::Videos if cfg!(target_os = "macos") => "Movies",
         UserDir::Videos => "Videos",
     };
     let home = home_dir()?;
-    if !cfg!(windows) {
+    if !cfg!(any(windows, target_os = "macos")) {
         let key = match which {
             UserDir::Desktop => "XDG_DESKTOP_DIR",
             UserDir::Documents => "XDG_DOCUMENTS_DIR",
@@ -131,6 +147,29 @@ pub fn screen_color(x: i32, y: i32) -> Option<[u8; 3]> {
 /// Whether the mouse's main button is down now, wherever the mouse is.
 pub fn main_button_down() -> bool {
     imp::main_button_down()
+}
+
+/// How far apart, in seconds, two clicks may be to make a double-click:
+/// the user's setting on Windows and macOS (Windows' default is half a
+/// second), 0.4 s elsewhere (GTK's).
+#[allow(unsafe_code)]
+pub fn double_click_time() -> f64 {
+    #[cfg(windows)]
+    {
+        // SAFETY: a plain query of the user's setting.
+        let ms = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
+        if ms > 0 {
+            return f64::from(ms) / 1000.0;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let s = mac::double_click_time();
+        if s > 0.0 {
+            return s;
+        }
+    }
+    0.4
 }
 
 /// Whether the numeric keypad's key `c` ('0'–'9', '+', '-', '*', '/',
@@ -340,15 +379,100 @@ fn find_window(title: &str) -> Option<isize> {
 }
 
 /// This process's window titled `title`, as the system's handle (its HWND
-/// on Windows; none elsewhere, where windows have no such handle to give).
+/// on Windows, its `NSWindow` on macOS — on the main thread —; none on
+/// Linux, where windows have no such handle to give).
 pub fn window_handle(title: &str) -> Option<isize> {
     #[cfg(windows)]
     return find_window(title);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return imp::find_window(title);
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = title;
         None
     }
+}
+
+/// Whether the system has a color sampler of its own that the eyedropper
+/// uses (macOS's: its magnifier takes a click anywhere on the screens)
+/// instead of reading the screen at the mouse ([`screen_color`]).
+pub const SYSTEM_COLOR_SAMPLER: bool = cfg!(target_os = "macos");
+
+/// Shows the system's color sampler ([`SYSTEM_COLOR_SAMPLER`]); whether it
+/// shows. Its answer comes through [`take_sampled_color`].
+pub fn start_color_sampler() -> bool {
+    #[cfg(target_os = "macos")]
+    return imp::start_color_sampler();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// The color sampler's answer once it has one: the color (8-bit sRGB), or
+/// `None` when the user cancelled it; `None` while it still shows.
+pub fn take_sampled_color() -> Option<Option<[u8; 3]>> {
+    #[cfg(target_os = "macos")]
+    return imp::take_sampled_color();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Whether the system asked the program to quit since the last call
+/// (macOS: the menu's Quit, the Dock's, logging out). The program then
+/// closes as its own Exit does, asking about unsaved changes first.
+pub fn take_quit_request() -> bool {
+    #[cfg(target_os = "macos")]
+    return imp::take_quit_request();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// The files the system asked the running program to open since the last
+/// call (macOS: a project double-clicked in Finder, or dropped on the
+/// Dock's icon; elsewhere they come as the program's arguments).
+pub fn take_opened_files() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    return imp::take_opened_files();
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// What wakes the interface up when the system asks something of it
+/// (Quit, a file to open): it then reads [`take_quit_request`] and
+/// [`take_opened_files`].
+static WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+/// Sets what wakes the interface up (once).
+pub fn set_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(wake));
+}
+
+/// Wakes the interface up (the system asked something of it).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn wake() {
+    if let Some(w) = WAKE.get() {
+        w();
+    }
+}
+
+/// Called on the main thread before the window library runs the program
+/// (macOS: Quit and the files Finder opens get BananaV's answers).
+pub fn before_run() {
+    #[cfg(target_os = "macos")]
+    imp::before_run();
+}
+
+/// This process shows nothing: a plug-in scan's child (macOS: no icon in
+/// the Dock while the plug-ins it loads start AppKit).
+pub fn background_process() {
+    #[cfg(target_os = "macos")]
+    imp::background_process();
+}
+
+/// Called once the interface runs, on its thread (macOS: the keypad's
+/// keys watched, the displays' names read).
+pub fn ui_thread_started() {
+    #[cfg(target_os = "macos")]
+    imp::ui_thread_started();
 }
 
 #[cfg(windows)]
@@ -1530,7 +1654,13 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod mac;
+#[cfg(target_os = "macos")]
+use mac as imp;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     pub fn removable_drives() -> Vec<super::Drive> {
         Vec::new()

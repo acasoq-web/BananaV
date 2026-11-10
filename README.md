@@ -9,7 +9,7 @@
 <h1 align="center">BananaV</h1>
 
 <p align="center">
-  <strong>A free and open-source video editor for Windows and Linux, written in Rust.</strong>
+  <strong>A free and open-source video editor for Windows, macOS and Linux, written in Rust.</strong>
 </p>
 
 <p align="center">
@@ -37,11 +37,16 @@ events on video and audio tracks, envelopes and keyframes, effects at every
 level (media, event, track and output), and a workflow you can drive from the
 keyboard. It is written from scratch in Rust: its compositing, audio mixing,
 color management and most of its file formats are its own code, and the
-interface speaks English and Brazilian Portuguese.
+interface speaks English and Brazilian Portuguese, with the essentials in
+Simplified and Traditional Chinese, Russian, Ukrainian, Spanish (Spain and
+Latin America), Portuguese (Portugal), German, Japanese, French, Italian,
+Polish, Czech, Hungarian, Swedish, Turkish, Thai and Korean.
 
-**New in 0.2.0:** 51 audio effects, compatibility with `.veg` projects, color
-correction with LUTs, a rebuilt Pan/Crop, smooth playback and an installer for
-Windows. BananaV has not reached 1.0, so save often: see the
+**New in 0.3.0:** macOS (experimental), smooth playback in 4K, VST 2 and VST 3
+plug-ins with their editors, a Transform mode on the preview, windows that
+dock where you drop them or float on another monitor, updates from within
+BananaV and 18 more interface languages. BananaV has not reached 1.0, so save
+often: see the
 [changelog](CHANGELOG.md) for what changed in each version and the
 [roadmap](docs/ROADMAP.md) for what comes next.
 
@@ -55,6 +60,7 @@ Get the latest version from the
 | Windows 10 or 11 (x64, ARM64) | `BananaV-…-windows-x64-setup.exe`, `…-windows-arm64-setup.exe` | Open the installer and follow the steps: no administrator password needed. |
 | Windows, without installing | `BananaV-…-windows-x64.zip`, `…-windows-arm64.zip` | Unzip and run `BananaV.exe`. |
 | Linux, glibc 2.35 or newer (x64, ARM64) | `BananaV-…-linux-x64.AppImage`, `…-linux-arm64.AppImage` | `chmod +x` the AppImage and run it. |
+| macOS 11 or later (Apple's chips and Intel, one app) — **experimental** | `BananaV-…-macos-universal.dmg` | Open the disk image and drag BananaV into Applications. If macOS stops it the first time, open it anyway from System Settings › Privacy & Security. Not yet tried on our own Macs: tell us what works and what does not. |
 
 You need a graphics card with Direct3D 12, Vulkan or OpenGL. The builds are not
 signed yet: if Windows warns you, choose **More info**, then **Run anyway**. Each
@@ -103,7 +109,7 @@ package has a README with the details and the licenses of what it includes.
   displays, windows, cameras and the computer's sound.
 - **Workspace** — dockable windows and saved layouts, customizable keyboard
   shortcuts, four interface color schemes from dark to white, English and
-  Brazilian Portuguese.
+  Brazilian Portuguese (and the essentials in eight more languages).
 
 ## Building from source
 

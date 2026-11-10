@@ -22,6 +22,8 @@ skrifa = "0.44"
 [dev-dependencies]
 bv-ofx.workspace = true
 bv-png.workspace = true
+# The measured renders' cases, read by a test left out by default.
+serde_json.workspace = true
 # wgpu's own shader compiler: GL Transition's code made WGSL, checked
 # without a graphics card.
 naga = { version = "30", features = ["wgsl-in"] }

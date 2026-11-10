@@ -1089,6 +1089,8 @@ impl Project {
             }
             left.duration = cut;
             left.fade_out = Tick::ZERO;
+            // Its exit transition goes with its end, to the right part.
+            left.out_transition = None;
             clamp_fades(left);
             self.tracks[t].clips.push(right);
             new_ids.push(new_id);

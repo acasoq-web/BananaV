@@ -18,11 +18,11 @@ use crate::app::BananaApp;
 use crate::i18n::tr;
 
 /// The id a `.veg` gives BananaV's own effects' twins.
-const VEG_PLUGINS: &str = "com.vegascreativesoftware:";
+pub(crate) const VEG_PLUGINS: &str = "com.vegascreativesoftware:";
 
 /// A name without its spaces, signs and case: "Brightness and Contrast"
 /// and `brightnessandcontrast` are one.
-fn plain(s: &str) -> String {
+pub(crate) fn plain(s: &str) -> String {
     s.chars()
         .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
@@ -221,15 +221,46 @@ fn native_effect(class: &str, preset: &str, data: &[u8]) -> Option<Effect> {
     }))
 }
 
+/// BananaV's own generator `id` at `params`.
+fn own_generator(id: &str, params: BTreeMap<String, PluginParam>) -> Option<Effect> {
+    let known = bv_ofx::registry().known();
+    let info = known.iter().find(|i| i.identifier == id)?;
+    Some(Effect::plugin(PluginFx {
+        id: info.identifier.clone(),
+        version: info.version,
+        name: info.label.clone(),
+        params,
+    }))
+}
+
 /// The plug-in a `.veg`'s effect stands for: the same one installed, else
 /// BananaV's own of its name; its parameters by their names, with their
 /// keyframes.
 fn effect_in(e: &DocEffect, rate: FrameRate) -> Option<Effect> {
     if let Some(class) = &e.native {
+        if class.eq_ignore_ascii_case(crate::veg_generators::COLOR_GRADIENT_CLASS) {
+            return own_generator(
+                "org.bananav.ColorGradient",
+                crate::veg_generators::gradient_in(&e.native_data, &e.native_keys, rate)?,
+            );
+        }
+        if class.eq_ignore_ascii_case(crate::veg_generators::CREDIT_ROLL_CLASS) {
+            return own_generator(
+                "org.bananav.CreditRoll",
+                crate::veg_generators::credit_in(&e.native_data)?,
+            );
+        }
         return native_effect(class, &e.preset, &e.native_data);
     }
     let known = bv_ofx::registry().known();
     let short = e.plugin.rsplit(':').next().unwrap_or(&e.plugin);
+    // Titles & Text: its rich text and settings as BananaV's.
+    if short.eq_ignore_ascii_case("titlesandtext") {
+        return own_generator(
+            "org.bananav.TitlesText",
+            crate::veg_generators::titles_in(e, rate),
+        );
+    }
     let names = [short, short.strip_suffix("Transition").unwrap_or(short)];
     let same = |i: &&std::sync::Arc<bv_ofx::PluginInfo>| {
         let last = i.identifier.rsplit('.').next().unwrap_or_default();
@@ -244,6 +275,8 @@ fn effect_in(e: &DocEffect, rate: FrameRate) -> Option<Effect> {
         .or_else(|| known.iter().find(same))?;
     let context = if e.transition {
         bv_ofx::Context::Transition
+    } else if e.generator {
+        bv_ofx::Context::Generator
     } else {
         bv_ofx::Context::Filter
     };
@@ -467,7 +500,10 @@ pub(crate) fn open(app: &mut BananaApp, path: &Path) {
         })
         .collect();
     let base = app.blank_project().settings;
-    let imported = veg::build(&doc, &found, &base, &effect_in);
+    let mut imported = veg::build(&doc, &found, &base, &effect_in);
+    // Its VST 3 plug-ins, found among those installed here.
+    let folders = app.settings.prefs.vst_folders.clone();
+    let not_installed = crate::vst::find_wanted(&mut imported.project, &folders);
     let events = imported.project.clips().count();
     app.open_imported(imported.project);
     app.settings.touch_recent(path);
@@ -521,6 +557,15 @@ pub(crate) fn open(app: &mut BananaApp, path: &Path) {
                 "{} audio effect was left out.",
                 "{} audio effects were left out.",
                 imported.audio_fx_left
+            ),
+        ),
+        (
+            not_installed,
+            trn!(
+                not_installed,
+                "{} VST 3 plug-in is not installed here: the sound goes through it untouched.",
+                "{} VST 3 plug-ins are not installed here: the sound goes through them untouched.",
+                not_installed
             ),
         ),
         (
@@ -591,6 +636,7 @@ pub(crate) fn export(app: &mut BananaApp) {
         path: path.to_string_lossy().into_owned(),
         documents: documents(),
         effect: &|e| effect_out(e, rate),
+        generator: &|fx| crate::veg_generators::generator_out(fx, rate),
     };
     let bytes = veg::write(app.project(), &options);
     match std::fs::write(&path, bytes) {
@@ -650,6 +696,262 @@ mod tests {
         }
         eprintln!("{came} of {} came in; not: {wrong:?}", names.len());
         assert!(wrong.is_empty());
+    }
+
+    /// Another program's pictures of its fades, transitions at events' ends
+    /// and starts, progress envelopes and crossfades (`BV_TR_SAMPLES`, the
+    /// folder whose `validacao/vegas` and `validacao/vegas2` hold each
+    /// round's `render.veg`, `casos.json` and frames): each project read
+    /// and drawn by BananaV frame by frame — its colors over black, its
+    /// alpha over nothing — against those frames, a level apart at most.
+    #[test]
+    #[ignore = "needs VEGAS's renders"]
+    fn transitions_draw_as_the_measured_frames() {
+        let dir = PathBuf::from(std::env::var("BV_TR_SAMPLES").expect("BV_TR_SAMPLES"));
+        bv_engine::plugins::register_own();
+        let mut worst_all = 0u8;
+        for round in ["vegas", "vegas2"] {
+            let folder = dir.join("validacao").join(round);
+            let bytes = std::fs::read(folder.join("render.veg")).expect("render.veg");
+            let doc = veg::read(&bytes).expect("reads");
+            let found = vec![None; doc.media.len()];
+            let made = veg::build(&doc, &found, &Default::default(), &effect_in);
+            assert_eq!(made.effects_left, 0, "{round}: effects left out");
+            assert_eq!(made.skipped_events, 0, "{round}: events left out");
+            let cases: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(folder.join("casos.json")).expect("casos.json"),
+            )
+            .expect("cases");
+            let per_case = cases["segundos_por_caso"].as_f64().unwrap_or(3.0);
+            let fps = cases["fps"].as_f64().unwrap_or(30.0);
+            let names: Vec<String> = cases["casos"]
+                .as_array()
+                .expect("cases")
+                .iter()
+                .map(|c| c["nome"].as_str().unwrap_or("?").to_string())
+                .collect();
+            let mut engine = bv_engine::Engine::new(std::sync::Arc::new(|| {}));
+            if std::env::var("BV_TR_GPU").is_err() {
+                engine.set_gpu(bv_engine::GpuChoice::Off);
+            }
+            engine.set_project(&made.project);
+            let rate = made.project.settings.frame_rate;
+            let mut worst = vec![(0u8, 0usize); names.len()];
+            let mut n = 0usize;
+            loop {
+                let png = folder.join("quadros").join(format!("quadros_{n:06}.png"));
+                let Ok(png) = std::fs::read(&png) else {
+                    break;
+                };
+                let theirs = bv_png::decode(&png).expect("png").to_rgba8();
+                let t = rate.frame_start(n as i64);
+                let (_, _, over_black) = engine.snapshot(t, [0.0, 0.0, 0.0, 1.0]).expect("drawn");
+                let (_, _, alone) = engine.snapshot(t, [0.0; 4]).expect("drawn");
+                let mut most = 0u8;
+                for (i, px) in theirs.as_chunks::<4>().0.iter().enumerate() {
+                    for c in 0..3 {
+                        most = most.max(px[c].abs_diff(over_black[i * 4 + c]));
+                    }
+                    most = most.max(px[3].abs_diff(alone[i * 4 + 3]));
+                }
+                let case = ((n as f64 / fps) / per_case) as usize;
+                if let Some(w) = worst.get_mut(case)
+                    && most > w.0
+                {
+                    *w = (most, n);
+                }
+                n += 1;
+            }
+            assert!(n > 0, "{round}: no frames");
+            for (name, (most, at)) in names.iter().zip(&worst) {
+                eprintln!("{round} {name}: {most} (frame {at})");
+                worst_all = worst_all.max(*most);
+            }
+        }
+        assert!(worst_all <= 1, "{worst_all} levels apart");
+    }
+
+    /// Another program's pictures of its media generators, a case a frame
+    /// (`BV_MG_RENDERS`, the folder of its `render.veg`, `casos.json` and
+    /// `quadros_cpu`): the project read and drawn by BananaV frame by frame
+    /// — its colors over black, its alpha over nothing —, the generators
+    /// whose pictures BananaV works out as that program's renders show
+    /// matching them to the level.
+    #[test]
+    #[ignore = "needs VEGAS's renders"]
+    fn generators_draw_as_the_measured_frames() {
+        let dir = PathBuf::from(std::env::var("BV_MG_RENDERS").expect("BV_MG_RENDERS"));
+        bv_engine::plugins::register_own();
+        let bytes = std::fs::read(dir.join("render.veg")).expect("render.veg");
+        let doc = veg::read(&bytes).expect("reads");
+        let found = vec![None; doc.media.len()];
+        let made = veg::build(&doc, &found, &Default::default(), &effect_in);
+        let cases: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("casos.json")).expect("casos.json"))
+                .expect("cases");
+        let frames = cases["quadros"].as_array().expect("frames");
+        let mut engine = bv_engine::Engine::new(std::sync::Arc::new(|| {}));
+        if std::env::var("BV_MG_GPU").is_err() {
+            engine.set_gpu(bv_engine::GpuChoice::Off);
+        }
+        engine.set_project(&made.project);
+        let rate = made.project.settings.frame_rate;
+        let pictures = std::env::var("BV_MG_FOLDER").unwrap_or_else(|_| "quadros_cpu".into());
+        let only = std::env::var("BV_MG_ONLY").ok();
+        // Each generator's frames: how many, how many alike, the worst.
+        let mut tally: BTreeMap<String, (usize, usize, u8, usize)> = BTreeMap::new();
+        for (n, case) in frames.iter().enumerate() {
+            let kind = case["gerador"].as_str().unwrap_or("?").to_string();
+            // (A case's API error is about its setting up: the frame is
+            // what the project holds, as it is.)
+            if only.as_ref().is_some_and(|o| !kind.contains(o.as_str())) {
+                continue;
+            }
+            let png = dir.join(&pictures).join(format!("quadros_{n:06}.png"));
+            let Ok(png) = std::fs::read(&png) else {
+                continue;
+            };
+            let theirs = bv_png::decode(&png).expect("png").to_rgba8();
+            let t = rate.frame_start(n as i64);
+            let (w, h, over_black) = engine.snapshot(t, [0.0, 0.0, 0.0, 1.0]).expect("drawn");
+            let (_, _, alone) = engine.snapshot(t, [0.0; 4]).expect("drawn");
+            // BV_MG_DUMP: a folder for BananaV's pictures, to look at.
+            if let Ok(out) = std::env::var("BV_MG_DUMP") {
+                let png = bv_png::encode_rgba8(w, h, &over_black, 1);
+                std::fs::write(PathBuf::from(out).join(format!("bv_{n:06}.png")), png)
+                    .expect("dump");
+            }
+            let (mut most, mut off) = (0u8, 0usize);
+            for (i, px) in theirs.as_chunks::<4>().0.iter().enumerate() {
+                let mut d = 0u8;
+                for c in 0..3 {
+                    d = d.max(px[c].abs_diff(over_black[i * 4 + c]));
+                }
+                d = d.max(px[3].abs_diff(alone[i * 4 + 3]));
+                most = most.max(d);
+                off += usize::from(d > 0);
+            }
+            if most > 0 {
+                eprintln!(
+                    "{n}: {kind} {} {}: {most} levels, {off} pixels",
+                    case["preset"].as_str().unwrap_or("-"),
+                    case["variacao"].as_str().unwrap_or("")
+                );
+            }
+            let t = tally.entry(kind).or_default();
+            t.0 += 1;
+            t.1 += usize::from(most == 0);
+            if most > t.2 {
+                (t.2, t.3) = (most, n);
+            }
+        }
+        for (kind, (count, alike, most, at)) in &tally {
+            eprintln!("{kind}: {alike} of {count} alike, worst {most} (frame {at})");
+        }
+        // Worked out as that program's renders show: to the level.
+        for kind in [
+            "Solid Color",
+            "Checkerboard",
+            "Test Pattern",
+            "Noise Texture",
+            "Gradiente de cor",
+        ] {
+            if let Some((count, alike, most, at)) = tally.get(kind) {
+                assert_eq!(count, alike, "{kind}: {most} levels apart at frame {at}");
+            }
+        }
+    }
+
+    /// Another program's generated media (`BV_MG_SAMPLES`, the folder of
+    /// its sample projects) read, written back by BananaV and read again:
+    /// the same generators with the same settings, their length, size,
+    /// pixels' shape, fields, alpha and rotation; the OpenFX ones' settings
+    /// written as that program writes them, byte for byte.
+    #[test]
+    #[ignore = "needs VEGAS's sample projects"]
+    fn generated_media_go_back_as_they_came() {
+        let dir = PathBuf::from(std::env::var("BV_MG_SAMPLES").expect("BV_MG_SAMPLES"));
+        bv_engine::plugins::register_own();
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .expect("folder")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".veg"))
+            .collect();
+        names.sort();
+        let (mut media, mut same_bytes, mut ofx) = (0, 0, 0);
+        for name in &names {
+            let bytes = std::fs::read(dir.join(name)).expect("sample");
+            let doc = veg::read(&bytes).expect("reads");
+            let found = vec![None; doc.media.len()];
+            let made = veg::build(&doc, &found, &Default::default(), &effect_in);
+            let rate = made.project.settings.frame_rate;
+            let options = veg::WriteOptions {
+                path: "C:\\x\\back.veg".into(),
+                documents: String::new(),
+                effect: &|e| effect_out(e, rate),
+                generator: &|fx| crate::veg_generators::generator_out(fx, rate),
+            };
+            let written = veg::write(&made.project, &options);
+            let again = veg::read(&written).expect("reads back");
+            let back = veg::build(
+                &again,
+                &vec![None; again.media.len()],
+                &Default::default(),
+                &effect_in,
+            );
+            let generated = |p: &bv_timeline::Project| -> Vec<(PluginFx, Option<bv_timeline::VideoStreamInfo>, Tick)> {
+                p.media
+                    .iter()
+                    .filter_map(|m| match &m.source {
+                        bv_timeline::MediaSource::Generated(bv_timeline::Generator::Plugin(fx)) => {
+                            Some(((**fx).clone(), m.video, m.duration))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let (a, b) = (generated(&made.project), generated(&back.project));
+            assert_eq!(a.len(), b.len(), "{name}: media");
+            for ((fa, va, da), (fb, vb, db)) in a.iter().zip(&b) {
+                media += 1;
+                assert_eq!(fa.id, fb.id, "{name}");
+                assert_eq!((va, da), (vb, db), "{name} {}", fa.id);
+                for (k, pa) in &fa.params {
+                    let pb = fb
+                        .params
+                        .get(k)
+                        .unwrap_or_else(|| panic!("{name} {}: {k}", fa.id));
+                    match (&pa.value, &pb.value) {
+                        (PluginValue::Num(x), PluginValue::Num(y)) => {
+                            assert_eq!(x.len(), y.len(), "{name} {k}");
+                            for (u, v) in x.iter().zip(y) {
+                                assert!((u - v).abs() < 1e-6, "{name} {} {k}: {x:?} {y:?}", fa.id);
+                            }
+                        }
+                        (x, y) => assert_eq!(x, y, "{name} {} {k}", fa.id),
+                    }
+                    assert_eq!(pa.keys.len(), pb.keys.len(), "{name} {} {k}: keys", fa.id);
+                }
+            }
+            // The OpenFX generators' settings as that program wrote them.
+            let params = |d: &veg::Document| -> Vec<Vec<(String, veg::ParamValue)>> {
+                d.media
+                    .iter()
+                    .filter_map(|m| m.generator.as_ref()?.effects.first().cloned())
+                    .filter(|e| {
+                        e.native.is_none() && e.keys.is_empty() && !e.plugin.contains("titles")
+                    })
+                    .map(|e| e.params)
+                    .collect()
+            };
+            for (theirs, ours) in params(&doc).iter().zip(params(&again).iter()) {
+                ofx += 1;
+                same_bytes += usize::from(theirs == ours);
+                assert_eq!(theirs, ours, "{name}");
+            }
+        }
+        eprintln!("{media} generated media back; {same_bytes} of {ofx} OpenFX settings alike");
+        assert!(media >= 160, "{media}");
     }
 
     #[test]

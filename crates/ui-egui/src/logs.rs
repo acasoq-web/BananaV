@@ -103,6 +103,35 @@ pub(crate) fn audio(line: &str) {
     let _ = write();
 }
 
+/// `Crash.log`: what ended a start early or crashed BananaV (see
+/// `safe_start`), always written.
+pub(crate) fn crash_log() -> Option<PathBuf> {
+    Some(folder()?.join("Crash.log"))
+}
+
+/// Notes `text` down in `Crash.log` (lines after the first indented).
+pub(crate) fn crash(text: &str) {
+    let Some(path) = crash_log() else {
+        return;
+    };
+    let mut lines = text.lines();
+    let mut out = format!("{}  {}\r\n", now(), lines.next().unwrap_or(""));
+    for l in lines {
+        out.push_str(&format!("    {l}\r\n"));
+    }
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?
+            .write_all(out.as_bytes())
+    };
+    let _ = write();
+}
+
 /// Writes `lines` down in `kind`'s log at its level: the first one in
 /// Basic, all of them in Detailed (the others indented under it).
 pub(crate) fn log(kind: LogKind, lines: &[String]) {

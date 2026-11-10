@@ -1,10 +1,14 @@
-//! The graphics cards that decode and encode video on Linux. Each card has
+//! The graphics cards that decode and encode video. On Linux each card has
 //! a render node (`/dev/dri/renderD128`…); FFmpeg drives it through VA-API
 //! (AMD and Intel cards, and NVIDIA ones with a VA-API driver) or, on
-//! NVIDIA cards, NVIDIA's own decoder (NVDEC, through CUDA).
+//! NVIDIA cards, NVIDIA's own decoder (NVDEC, through CUDA). On macOS the
+//! Mac's media engine is the one "card", driven through VideoToolbox (on
+//! Apple's chips their media engine; on Intel Macs the graphics' own).
 
 use std::ffi::CString;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -17,10 +21,10 @@ use crate::{HardwareDecoding, Vendor};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Card {
     /// "NVIDIA GeForce RTX 3070": the model, as the system's PCI database
-    /// names it.
+    /// names it ("Apple M2 Pro" on a Mac).
     pub(crate) name: String,
     pub(crate) vendor: Vendor,
-    /// Its render node.
+    /// Its render node (Linux).
     pub(crate) node: PathBuf,
     /// Its own memory in bytes, for the order (NVIDIA's driver does not say
     /// it: such cards count as the largest).
@@ -34,6 +38,49 @@ pub(crate) fn cards() -> &'static [Card] {
     CARDS.get_or_init(list)
 }
 
+/// The Mac's media engine, named after its chip ("Apple M2 Pro"; an Intel
+/// Mac's is its graphics', named by what drives it).
+#[cfg(target_os = "macos")]
+fn list() -> Vec<Card> {
+    vec![Card {
+        name: mac_chip().unwrap_or_else(|| "VideoToolbox".to_string()),
+        vendor: Vendor::Apple,
+        node: PathBuf::new(),
+        memory: 0,
+    }]
+}
+
+/// Apple's chip ("Apple M2 Pro"), from the processor's name the system
+/// gives; `None` on an Intel Mac.
+#[cfg(target_os = "macos")]
+fn mac_chip() -> Option<String> {
+    let name = c"machdep.cpu.brand_string";
+    let mut buf = [0u8; 128];
+    let mut len = buf.len();
+    // SAFETY: a read of a text the system keeps, into a buffer of the length
+    // given (which the call sets to the text's, its end's 0 included).
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    let text = std::ffi::CStr::from_bytes_until_nul(&buf[..len.min(buf.len())])
+        .ok()?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_string();
+    text.starts_with("Apple").then_some(text)
+}
+
+#[cfg(target_os = "linux")]
 fn list() -> Vec<Card> {
     let Ok(dir) = std::fs::read_dir("/dev/dri") else {
         return Vec::new();
@@ -87,8 +134,10 @@ fn list() -> Vec<Card> {
 }
 
 /// The system's database of PCI devices (`pci.ids`), for the cards' names.
+#[cfg(target_os = "linux")]
 struct PciNames(String);
 
+#[cfg(target_os = "linux")]
 impl PciNames {
     fn load() -> PciNames {
         let places = [
@@ -152,7 +201,7 @@ impl PciNames {
 /// A card opened for FFmpeg's codecs.
 pub(crate) struct Device {
     pub(crate) buffer: BufferRef,
-    /// The layout of its pictures (VA-API or CUDA surfaces).
+    /// The layout of its pictures (VA-API, CUDA or VideoToolbox surfaces).
     pub(crate) pix_fmt: ff::AVPixelFormat,
     /// Its place in [`cards`].
     pub(crate) card: usize,
@@ -172,6 +221,8 @@ impl std::fmt::Debug for Device {
 pub(crate) enum Api {
     Vaapi,
     Cuda,
+    /// The Mac's (no device to name: the system's own).
+    VideoToolbox,
 }
 
 fn create(api: Api, card: usize) -> Option<Device> {
@@ -180,25 +231,43 @@ fn create(api: Api, card: usize) -> Option<Device> {
         Api::Vaapi => (
             ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
             ff::AVPixelFormat::AV_PIX_FMT_VAAPI,
-            c.node.to_str()?.to_string(),
+            Some(c.node.to_str()?.to_string()),
         ),
         // CUDA numbers NVIDIA's cards among themselves.
         Api::Cuda => (
             ff::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
             ff::AVPixelFormat::AV_PIX_FMT_CUDA,
-            cards()[..card]
-                .iter()
-                .filter(|k| k.vendor == Vendor::Nvidia)
-                .count()
-                .to_string(),
+            Some(
+                cards()[..card]
+                    .iter()
+                    .filter(|k| k.vendor == Vendor::Nvidia)
+                    .count()
+                    .to_string(),
+            ),
+        ),
+        Api::VideoToolbox => (
+            ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            ff::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX,
+            None,
         ),
     };
-    let name = CString::new(name).ok()?;
+    let name = match name {
+        Some(n) => Some(CString::new(n).ok()?),
+        None => None,
+    };
     super::init();
     let mut ctx = ptr::null_mut();
-    // SAFETY: FFmpeg fills `ctx` (left null on failure).
-    let r =
-        unsafe { ff::av_hwdevice_ctx_create(&mut ctx, kind, name.as_ptr(), ptr::null_mut(), 0) };
+    // SAFETY: FFmpeg fills `ctx` (left null on failure); the device's name
+    // is a text or nothing.
+    let r = unsafe {
+        ff::av_hwdevice_ctx_create(
+            &mut ctx,
+            kind,
+            name.as_ref().map_or(ptr::null(), |n| n.as_ptr()),
+            ptr::null_mut(),
+            0,
+        )
+    };
     (r >= 0 && !ctx.is_null()).then(|| Device {
         buffer: BufferRef(ctx),
         pix_fmt,
@@ -221,8 +290,11 @@ pub(crate) fn open(api: Api, card: usize) -> Option<Arc<Device>> {
 }
 
 /// Card `card` for decoding: NVIDIA's decoder on NVIDIA cards (VA-API when
-/// CUDA is missing), VA-API on the others.
+/// CUDA is missing), VA-API on the others; VideoToolbox on a Mac.
 fn decoding(card: usize) -> Option<Arc<Device>> {
+    if cards().get(card)?.vendor == Vendor::Apple {
+        return open(Api::VideoToolbox, card);
+    }
     if cards().get(card)?.vendor == Vendor::Nvidia
         && let Some(d) = open(Api::Cuda, card)
     {
@@ -254,6 +326,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn cards_are_named_from_the_pci_database() {
         let db = PciNames(
             "# comment\n10de  NVIDIA Corporation\n\t2484  GA104 [GeForce RTX 3070]\n\t\t1043 87c0  ASUS\n\t1f82  TU117 [GeForce GTX 1650]\n1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t73ff  Navi 23 [Radeon RX 6600/6600 XT/6600M]\n8086  Intel Corporation\n\t46a6  Alder Lake-P GT2\n"

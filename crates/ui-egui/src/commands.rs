@@ -334,9 +334,12 @@ pub enum Cmd {
     CustomizeKeyboard,
     CustomizeToolbar,
     CustomizeTimelineToolbar,
+    /// BananaV's own: the envelopes' line, reach and points.
+    EnvelopeAppearance,
     // Help
     HelpContents,
     KeyboardShortcuts,
+    CheckUpdates,
     About,
 }
 
@@ -595,8 +598,10 @@ pub(crate) fn all() -> Vec<Cmd> {
         CustomizeKeyboard,
         CustomizeToolbar,
         CustomizeTimelineToolbar,
+        EnvelopeAppearance,
         HelpContents,
         KeyboardShortcuts,
+        CheckUpdates,
         About,
     ]);
     v.extend(EnvelopeKind::AUDIO.map(AudioEnvelope));
@@ -990,6 +995,8 @@ impl Cmd {
             CustomizeTimelineToolbar => tr("Customize Timeline Toolbar…"),
             HelpContents => tr("Contents and Index"),
             KeyboardShortcuts => tr("Keyboard Shortcuts"),
+            CheckUpdates => tr("Check for Software Updates…"),
+            EnvelopeAppearance => tr("Envelope Appearance…"),
             About => tr("About"),
         };
         s.to_string()
@@ -1902,6 +1909,8 @@ impl Cmd {
             }
             HelpContents => app.menu_dialogs.more.help = Some(0),
             KeyboardShortcuts => app.menu_dialogs.more.help = Some(1),
+            CheckUpdates => app.check_updates(true),
+            EnvelopeAppearance => app.open_envelope_look(),
             About => app.dialogs.about = true,
         }
     }
@@ -1976,6 +1985,20 @@ mod tests {
         };
         let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
         out.textures_delta.clear();
+    }
+
+    /// Frames until the sound plays: playback waits for the preview's
+    /// first frame (`BananaApp::preroll`), a few frames here.
+    fn until_playing(ctx: &egui::Context, app: &mut BananaApp) {
+        let start = std::time::Instant::now();
+        while !app.engine.is_playing() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "playback started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            frame(ctx, app, Vec::new());
+        }
     }
 
     fn press(ctx: &egui::Context, app: &mut BananaApp, modifiers: Modifiers, key: Key) {
@@ -2981,6 +3004,7 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         press(&ctx, &mut app, NONE, Key::Space);
         assert!(app.is_playing());
+        until_playing(&ctx, &mut app);
         std::thread::sleep(std::time::Duration::from_millis(200));
         frame(&ctx, &mut app, Vec::new());
         let play = app.playhead.expect("playing");
@@ -2996,6 +3020,7 @@ mod tests {
         let paused = app.cursor;
         press(&ctx, &mut app, NONE, Key::F12);
         assert!(app.is_playing());
+        until_playing(&ctx, &mut app);
         std::thread::sleep(std::time::Duration::from_millis(200));
         frame(&ctx, &mut app, Vec::new());
         let play = app.playhead.expect("playing");
@@ -3017,6 +3042,7 @@ mod tests {
         let start = app.cursor;
         press(&ctx, &mut app, NONE, Key::Enter);
         assert!(app.is_playing());
+        until_playing(&ctx, &mut app);
         std::thread::sleep(std::time::Duration::from_millis(200));
         frame(&ctx, &mut app, Vec::new());
         assert!(app.playhead.expect("playing") > start);
@@ -3026,6 +3052,7 @@ mod tests {
         app.settings.prefs.space_play_stop = true;
         press(&ctx, &mut app, NONE, Key::Enter);
         assert!(app.is_playing());
+        until_playing(&ctx, &mut app);
         std::thread::sleep(std::time::Duration::from_millis(200));
         frame(&ctx, &mut app, Vec::new());
         press(&ctx, &mut app, NONE, Key::Enter);
@@ -3045,6 +3072,7 @@ mod tests {
         let end = app.project().duration();
         app.cursor = end - Tick::from_seconds_f64(0.1);
         app.start_playback(app.cursor);
+        until_playing(&ctx, &mut app);
         std::thread::sleep(std::time::Duration::from_millis(400));
         frame(&ctx, &mut app, Vec::new());
         assert!(app.is_playing(), "still playing past the end");
@@ -3061,6 +3089,7 @@ mod tests {
         app.load_demo(); // edit cursor at 4,5 s
         frame(&ctx, &mut app, Vec::new());
         press(&ctx, &mut app, NONE, Key::Space);
+        until_playing(&ctx, &mut app);
         let cursor = app.cursor;
         // Grabbed: playback waits, the needle and the preview follow it.
         app.hold_playback();
@@ -3069,9 +3098,11 @@ mod tests {
         frame(&ctx, &mut app, Vec::new());
         assert_eq!(app.display_time(), Tick::from_seconds(1));
         assert_eq!(app.cursor, cursor, "the edit cursor stays");
-        // Let go: playback goes on from there.
+        // Let go: playback goes on from there, once the preview has the
+        // frame there.
         app.release_playback();
-        assert!(app.engine.is_playing());
+        assert!(app.is_playing());
+        until_playing(&ctx, &mut app);
         frame(&ctx, &mut app, Vec::new());
         let at = app.playhead.expect("playing");
         assert!(

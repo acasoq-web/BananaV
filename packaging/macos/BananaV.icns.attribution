@@ -1,0 +1,12 @@
+asset:        BananaV.icns
+title:        BananaV's application icon for macOS, sixteen to 1024 pixels
+author:       @acasoq-web, BananaV's owner
+source:       original work
+license:      GPL-3.0-or-later
+license-file: LICENSE
+added:        2026-11-09 by @acasoq-web
+notes:        packaging/icons/bananav-icon.svg rendered at each size as macOS
+              lays out application icons (the rounded square at 824 of 1024
+              pixels, centered, the rest transparent). Used by BananaV.app
+              (packaging/macos/make_app.py, Info.plist's CFBundleIconFile).
+              The name and the logo as marks: TRADEMARKS.md (draft).

@@ -3,7 +3,10 @@
 //! picture itself, metadata and markers.
 //! Run with `cargo test -p bv-engine --test exportar -- --ignored --nocapture`.
 
-#![cfg(any(windows, all(target_os = "linux", not(bv_no_ffmpeg))))]
+#![cfg(any(
+    windows,
+    all(any(target_os = "linux", target_os = "macos"), not(bv_no_ffmpeg))
+))]
 #![allow(clippy::print_stdout)]
 
 use std::path::{Path, PathBuf};

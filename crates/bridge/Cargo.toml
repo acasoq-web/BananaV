@@ -1,0 +1,14 @@
+[package]
+name = "bv-bridge"
+description = "What BananaV's 32-bit bridge and the plug-in hosts that use it share: the frames they exchange, the bridge's process with deadlines, the bridge's loop and its editor window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 0
+
+[lints]
+workspace = true

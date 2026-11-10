@@ -503,7 +503,7 @@ fn place_card(
     );
     let lit = resp.hovered();
     if lit {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        crate::cursors::system(ui.ctx(), egui::CursorIcon::PointingHand);
     }
     painter.rect_filled(
         card,
@@ -632,48 +632,91 @@ fn language_page(ui: &mut egui::Ui, app: &mut BananaApp, content: Rect) {
             );
             ui.add_space(10.0);
             let current = crate::i18n::language();
-            for &lang in Language::ALL {
-                let (r, resp) = ui.allocate_exact_size(vec2(320.0, 48.0), Sense::click());
-                let on = lang == current;
-                let fill = if on {
-                    theme::selection()
-                } else if resp.hovered() {
-                    theme::hover()
-                } else {
-                    theme::panel_dark()
-                };
-                ui.painter().rect_filled(r, 4.0, fill);
-                ui.painter().text(
-                    pos2(r.left() + 16.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    lang.native_name(),
-                    FontId::proportional(16.0),
-                    if on { Color32::WHITE } else { theme::text() },
-                );
-                if on {
-                    // A check mark at its right end.
-                    let c = pos2(r.right() - 22.0, r.center().y);
-                    ui.painter().add(egui::Shape::line(
-                        vec![c + vec2(-6.0, 0.0), c + vec2(-2.0, 4.0), c + vec2(6.0, -5.0)],
-                        Stroke::new(2.0, Color32::WHITE),
-                    ));
-                }
-                resp.widget_info(|| {
-                    egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, lang.native_name())
+            // Two columns, scrolled within the page (twenty languages are
+            // taller than it).
+            egui::ScrollArea::vertical()
+                .id_salt("welcome-languages")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for pair in Language::ALL.chunks(2) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            for &lang in pair {
+                                language_tile(ui, app, lang, lang == current);
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
                 });
-                if resp.clicked() && !on {
-                    app.set_language(lang);
-                    let _ = app.settings.save();
-                }
-                ui.add_space(6.0);
-            }
         },
     );
 }
 
+/// One language on the Language page, by its own name (partial ones say
+/// so under it): picked at once when clicked.
+fn language_tile(ui: &mut egui::Ui, app: &mut BananaApp, lang: Language, on: bool) {
+    let (r, resp) = ui.allocate_exact_size(vec2(300.0, 46.0), Sense::click());
+    let fill = if on {
+        theme::selection()
+    } else if resp.hovered() {
+        theme::hover()
+    } else {
+        theme::panel_dark()
+    };
+    ui.painter().rect_filled(r, 4.0, fill);
+    let color = if on { Color32::WHITE } else { theme::text() };
+    if lang.partial() {
+        ui.painter().text(
+            pos2(r.left() + 16.0, r.top() + 15.0),
+            Align2::LEFT_CENTER,
+            lang.native_name(),
+            FontId::proportional(15.0),
+            color,
+        );
+        ui.painter().text(
+            pos2(r.left() + 16.0, r.bottom() - 12.0),
+            Align2::LEFT_CENTER,
+            tr("(partial translation)"),
+            FontId::proportional(11.0),
+            if on {
+                Color32::WHITE
+            } else {
+                theme::text_dim()
+            },
+        );
+    } else {
+        ui.painter().text(
+            pos2(r.left() + 16.0, r.center().y),
+            Align2::LEFT_CENTER,
+            lang.native_name(),
+            FontId::proportional(16.0),
+            color,
+        );
+    }
+    if on {
+        // A check mark at its right end.
+        let c = pos2(r.right() - 22.0, r.center().y);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                c + vec2(-6.0, 0.0),
+                c + vec2(-2.0, 4.0),
+                c + vec2(6.0, -5.0),
+            ],
+            Stroke::new(2.0, Color32::WHITE),
+        ));
+    }
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, lang.native_name())
+    });
+    if resp.clicked() && !on {
+        app.set_language(lang);
+        let _ = app.settings.save();
+    }
+}
+
 /// A link (underlined, as VEGAS's), the file's path in its tip.
 fn link(ui: &mut egui::Ui, text: &str, path: &std::path::Path) -> egui::Response {
-    ui.add(
+    let resp = ui.add(
         egui::Label::new(
             RichText::new(text)
                 .underline()
@@ -681,9 +724,11 @@ fn link(ui: &mut egui::Ui, text: &str, path: &std::path::Path) -> egui::Response
                 .color(theme::text_strong()),
         )
         .sense(Sense::click()),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
-    .on_hover_text(path.display().to_string())
+    );
+    if resp.hovered() {
+        crate::cursors::system(ui.ctx(), egui::CursorIcon::PointingHand);
+    }
+    resp.on_hover_text(path.display().to_string())
 }
 
 /// A button of the side bar, the shapes or Getting Started's tabs: its

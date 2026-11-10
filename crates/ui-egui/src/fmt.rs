@@ -215,10 +215,16 @@ pub fn num_grouped(v: f64, decimals: usize) -> String {
 }
 
 /// Reads a number as [`num_grouped`] writes it (or as [`parse`] reads
-/// one): with both a point and a comma, the last one parts the decimals
+/// one): spaces group thousands (as Russian, French and Polish write
+/// them); with both a point and a comma, the last one parts the decimals
 /// and the other groups the thousands.
 pub fn parse_grouped(s: &str) -> Option<f64> {
-    let t = s.trim();
+    let spaced: String = s
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\u{a0}' | '\u{202f}'))
+        .collect();
+    let t = spaced.as_str();
     match (t.rfind('.'), t.rfind(',')) {
         (Some(p), Some(c)) => {
             let thousands = if p > c { ',' } else { '.' };
@@ -242,6 +248,16 @@ pub fn drag_grouped<'a, N: crate::egui::emath::Numeric>(
 mod tests {
     use super::*;
     use crate::i18n::Language;
+
+    #[test]
+    fn spaced_thousands_read_back() {
+        assert_eq!(parse_grouped("1\u{a0}920,5"), Some(1920.5));
+        assert_eq!(parse_grouped("48 000"), Some(48000.0));
+        assert_eq!(
+            grouped_in(Language::Russian, 1_234_567),
+            "1\u{a0}234\u{a0}567"
+        );
+    }
 
     #[test]
     fn thousands_follow_the_language() {

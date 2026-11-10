@@ -26,6 +26,7 @@ use crate::i18n::tr;
 use crate::icons::Icon;
 use crate::menus;
 use crate::ofx::{FxPlace, KeyEdit};
+use crate::ofx_curves::Grab;
 use crate::theme;
 
 const RULER: f32 = 22.0;
@@ -149,6 +150,19 @@ struct KeyDrag {
     /// Curves: the parameter and number whose value follows the pointer,
     /// and how the graph's heights are values.
     value: Option<(String, usize, Rect, (f64, f64))>,
+}
+
+/// The controller's pointer: what is dragged — keyframes along the time
+/// (in Curves the one taken goes up and down with its value too), a
+/// handle both ways —, else a keyframe or a handle under it (`over`).
+fn key_grab(drag: Option<&Drag>, over: bool) -> Option<Grab> {
+    match drag {
+        Some(Drag::Keys(d)) if d.value.is_some() => Some(Grab::Free),
+        Some(Drag::Keys(_)) => Some(Grab::Across),
+        Some(Drag::Handle(_)) => Some(Grab::Free),
+        Some(Drag::Cursor | Drag::Band { .. }) => None,
+        None => over.then_some(Grab::Over),
+    }
 }
 
 /// "Set to…": a keyframe's value being typed.
@@ -1001,6 +1015,8 @@ pub fn controller(
         }
     }
 
+    // A keyframe or a handle under the pointer (its pointer, `key_grab`).
+    let mut over = false;
     // A Bézier keyframe's handles (Curves): lines out to dots, dragged to
     // shape the curve on each side of it.
     for (n, h) in handle_marks.iter().enumerate() {
@@ -1028,6 +1044,7 @@ pub fn controller(
                 }));
             }
             hot = resp.hovered() || resp.dragged();
+            over |= resp.hovered();
         }
         let fill = if hot {
             h.color
@@ -1063,6 +1080,7 @@ pub fn controller(
         });
         let picked = !m.keys.is_empty() && m.keys.iter().all(|k| view.picked.contains(k));
         paint_mark(&graph_p, m, picked, resp.hovered());
+        over |= resp.hovered();
         if resp.clicked() {
             if adding {
                 if picked {
@@ -1210,6 +1228,9 @@ pub fn controller(
         }
         (Some(Drag::Cursor), Some(p)) if down => out.seek = Some(t_of(p.x)),
         _ => view.drag = None,
+    }
+    if let Some(g) = key_grab(view.drag.as_ref(), over) {
+        g.show(ui.ctx());
     }
     // The box, over all the rows.
     if let Some((a, b)) = band {
@@ -1888,5 +1909,47 @@ mod tests {
         );
         view.open = false;
         assert_eq!(shown(&view), [row_of("Crop", 0, 0)]);
+    }
+
+    /// The hand over a keyframe or a handle; dragged, keyframes along the
+    /// time show the system's ↔ (in Curves, where the one taken follows
+    /// the pointer up and down too, its four arrows, as a handle's); the
+    /// cursor and the picking box none.
+    #[test]
+    fn the_pointer_says_how_a_keyframe_or_a_handle_moves() {
+        let keys = |value| {
+            Drag::Keys(KeyDrag {
+                at: Tick::ZERO,
+                grip: egui::Vec2::ZERO,
+                picked: Vec::new(),
+                base: Vec::new(),
+                copy: false,
+                space: false,
+                value,
+            })
+        };
+        assert_eq!(key_grab(None, true), Some(Grab::Over));
+        assert_eq!(key_grab(None, false), None);
+        assert_eq!(key_grab(Some(&keys(None)), false), Some(Grab::Across));
+        let graph = Some(("x".to_string(), 0, Rect::ZERO, (0.0, 1.0)));
+        assert_eq!(key_grab(Some(&keys(graph)), true), Some(Grab::Free));
+        let handle = Drag::Handle(HandleDrag {
+            name: "x".into(),
+            at: Tick::ZERO,
+            part: 0,
+            after: true,
+            base: PluginParam {
+                value: PluginValue::Num(vec![0.0]),
+                keys: Vec::new(),
+            },
+            range: (0.0, 1.0),
+        });
+        assert_eq!(key_grab(Some(&handle), false), Some(Grab::Free));
+        assert_eq!(key_grab(Some(&Drag::Cursor), true), None);
+        let band = Drag::Band {
+            from: Tick::ZERO,
+            add: false,
+        };
+        assert_eq!(key_grab(Some(&band), true), None);
     }
 }

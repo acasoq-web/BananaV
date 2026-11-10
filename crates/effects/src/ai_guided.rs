@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn opencv_reflects_and_resizes() {
+    fn margins_reflect_and_copies_resize() {
         assert_eq!(
             [-1, -2, 0, 3, 4, 5].map(|i| reflect(i, 4)),
             [0, 1, 0, 3, 3, 2]

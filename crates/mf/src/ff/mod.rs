@@ -1,8 +1,9 @@
-//! FFmpeg (Linux): what Media Foundation does on Windows. libavformat
-//! reads the files, libavcodec decodes them — on the processor, or on the
-//! graphics card through VA-API or NVIDIA's decoder — and encodes (x264,
-//! x265, SVT-AV1, NVENC, VA-API…), libswscale converts the pictures in
-//! layouts BananaV has no copy of its own for.
+//! FFmpeg (Linux and macOS): what Media Foundation does on Windows.
+//! libavformat reads the files, libavcodec decodes them — on the processor,
+//! or on the graphics card through VA-API, NVIDIA's decoder or the Mac's
+//! VideoToolbox — and encodes (x264, x265, SVT-AV1, NVENC, VA-API,
+//! VideoToolbox…), libswscale converts the pictures in layouts BananaV has
+//! no copy of its own for.
 //!
 //! The API is that of the Windows modules (`imp`, `encode`, `encoders`)
 //! and so are the rules: times count from each stream's first frame, a

@@ -697,11 +697,13 @@ pub(crate) fn plan(
     }
 }
 
-/// Gradient Wipe's factory presets: BananaV's shapes.
+/// Gradient Wipe's factory presets: its defaults first ("Default", as
+/// VEGAS names it there), then BananaV's shapes.
 pub(crate) fn presets() -> Vec<Preset> {
     let num = |v: f64| PresetValue::Num(vec![v]);
     let p = |name: &'static str, values: Vec<(&'static str, PresetValue)>| Preset { name, values };
     vec![
+        p("Default", vec![]),
         p("Linear", vec![]),
         p("Radial", vec![("shape", num(2.0))]),
         p(

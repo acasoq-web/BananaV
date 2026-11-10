@@ -13,9 +13,10 @@ use bv_timeline::{
 };
 
 use crate::app::BananaApp;
+use crate::cursors::{self, Cursor};
 use crate::egui::{
-    self, Align, Align2, Color32, CursorIcon, FontId, Layout, Mesh, Painter, PointerButton, Pos2,
-    Rect, RichText, Sense, Shape, Stroke, StrokeKind, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    self, Align, Align2, Color32, FontId, Layout, Mesh, Painter, PointerButton, Pos2, Rect,
+    RichText, Sense, Shape, Stroke, StrokeKind, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use crate::fx_packages::Package;
 use crate::icons::{self, Icon};
@@ -81,9 +82,10 @@ pub enum FxTarget {
     /// The chain Insert › Audio Assignable FX makes once its effects are
     /// picked.
     NewChain,
-    /// The transition an event comes in with: its plug-in, alone in the
-    /// chain, as VEGAS's Video Event FX shows a transition.
-    Transition(ClipId),
+    /// The transition an event comes in with (`true`: the one it goes out
+    /// with): its plug-in, alone in the chain, as VEGAS's Video Event FX
+    /// shows a transition.
+    Transition(ClipId, bool),
 }
 
 impl FxTarget {
@@ -104,7 +106,7 @@ impl FxTarget {
             FxTarget::Clip(id) => p.clip_track(id).is_some_and(|t| t.kind == TrackKind::Audio),
             FxTarget::Media(_, audio) => audio,
             FxTarget::Track(id) => p.track(id).is_some_and(|t| t.kind == TrackKind::Audio),
-            FxTarget::VideoOutput | FxTarget::Transition(_) => false,
+            FxTarget::VideoOutput | FxTarget::Transition(..) => false,
             FxTarget::Bus(_)
             | FxTarget::Chain(_)
             | FxTarget::InputBus(_)
@@ -132,10 +134,10 @@ impl FxTarget {
             FxTarget::Master => Some(p.master_fx.clone()),
             FxTarget::NewChain => Some(Vec::new()),
             // Only while it has a plug-in (taken out, the window closes).
-            FxTarget::Transition(id) => p.clip(id).and_then(|c| {
-                let fx = c.transition_fx.as_deref()?;
-                let mut e = Effect::plugin(fx.clone());
-                e.enabled = !c.transition_bypass;
+            FxTarget::Transition(id, out) => p.clip(id).and_then(|c| {
+                let (fx, off) = c.transition_plugin(out);
+                let mut e = Effect::plugin(fx?.clone());
+                e.enabled = !off;
                 Some(vec![e])
             }),
         }
@@ -195,15 +197,12 @@ impl FxTarget {
             FxTarget::NewChain => {
                 p.add_fx_chain(chain);
             }
-            FxTarget::Transition(id) => {
+            FxTarget::Transition(id, out) => {
                 if let Some(c) = p.clip_mut(id) {
                     let first = chain.into_iter().find(|e| e.plugin.is_some());
-                    c.transition_bypass = first.as_ref().is_some_and(|e| !e.enabled);
-                    c.transition_fx = first.and_then(|e| e.plugin);
-                    // Taken out: a plain crossfade, as VEGAS's.
-                    if c.transition_fx.is_none() {
-                        c.transition = bv_timeline::Transition::default();
-                    }
+                    let off = first.as_ref().is_some_and(|e| !e.enabled);
+                    // Taken out: a plain crossfade (or fade), as VEGAS's.
+                    c.set_transition_plugin(out, first.and_then(|e| e.plugin.map(|b| *b)), off);
                 }
             }
         }
@@ -255,7 +254,7 @@ impl FxTarget {
         let audio = self.audio(p);
         tr(match self {
             FxTarget::Clip(_) if audio => "Audio Event FX",
-            FxTarget::Clip(_) | FxTarget::Transition(_) => "Video Event FX",
+            FxTarget::Clip(_) | FxTarget::Transition(..) => "Video Event FX",
             FxTarget::Media(..) if audio => "Audio Media FX",
             FxTarget::Media(..) => "Video Media FX",
             FxTarget::Track(_) if audio => "Audio Track FX",
@@ -287,9 +286,9 @@ impl FxTarget {
             FxTarget::InputBus(id) => crate::i18n::input_bus_name(p, id),
             FxTarget::Master => tr("Master").into(),
             FxTarget::NewChain => trf!("FX {}", p.fx_chains.len() + 1),
-            FxTarget::Transition(id) => p
+            FxTarget::Transition(id, out) => p
                 .clip(id)
-                .and_then(|c| c.transition_fx.as_deref())
+                .and_then(|c| c.transition_plugin(out).0)
                 .map_or_else(|| tr("Transition").into(), |fx| tr(&fx.name).to_string()),
         }
     }
@@ -354,6 +353,20 @@ enum Drag {
     },
 }
 
+impl Drag {
+    /// The pointer while it goes on: the one its press showed (the box
+    /// mirrored `flips`), the view dragged the closed hand.
+    fn cursor(&self, flips: (bool, bool)) -> Cursor {
+        match *self {
+            Drag::Move { .. } => Cursor::MoveFrame,
+            Drag::Resize { vp, sx, sy } => box_handle_cursor(sx, sy, vp.angle_deg, flips),
+            Drag::Rotate { .. } => Cursor::Rotate,
+            Drag::Pivot { .. } => Cursor::MoveCenter,
+            Drag::View { .. } => Cursor::HandClosed,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Hit {
     Handle(f32, f32),
@@ -387,6 +400,9 @@ struct PanEditor {
     zoom: f32,
     offset: Vec2,
     drag: Option<Drag>,
+    /// The box (the F) picked by a click or a drag on it: the arrow keys
+    /// move it, until a click off it.
+    picked: bool,
     /// Seções abertas: Posição, Rotação, Interpolação, Origem, Espaço.
     sections: [bool; 5],
     /// Posição na linha de quadros-chave, a partir do início do clipe.
@@ -406,10 +422,37 @@ struct PanEditor {
     source: Option<ShownMedia>,
 }
 
+/// How far the arrow keys pressed move the Pan/Crop's box, in its media's
+/// pixels: one a press, ten with Shift, along the axes `axis` leaves free.
+/// The keys are taken (the timeline's cursor stays).
+fn arrow_nudge(i: &mut egui::InputState, axis: Axis) -> (f32, f32) {
+    let (mut dx, mut dy) = (0.0f32, 0.0f32);
+    for (key, x, y) in [
+        (egui::Key::ArrowLeft, -1.0, 0.0),
+        (egui::Key::ArrowRight, 1.0, 0.0),
+        (egui::Key::ArrowUp, 0.0, -1.0),
+        (egui::Key::ArrowDown, 0.0, 1.0),
+    ] {
+        // Shift's first: the plain arrow's would take them too.
+        for (mods, step) in [(egui::Modifiers::SHIFT, 10.0), (egui::Modifiers::NONE, 1.0)] {
+            let n = i.count_and_consume_key(mods, key) as f32;
+            dx += x * step * n;
+            dy += y * step * n;
+        }
+    }
+    match axis {
+        Axis::X => (dx, 0.0),
+        Axis::Y => (0.0, dy),
+        Axis::Free => (dx, dy),
+    }
+}
+
 /// The media's picture the Pan/Crop workspace shows: the engine's picture
 /// it came from, its event, and the texture.
 struct ShownMedia {
-    key: usize,
+    /// The picture's pixels, held so that no other picture is made where
+    /// they are while they show.
+    pixels: std::sync::Arc<Vec<u8>>,
     clip: ClipId,
     texture: egui::TextureHandle,
 }
@@ -434,6 +477,7 @@ impl Default for PanEditor {
             zoom: 1.0,
             offset: Vec2::ZERO,
             drag: None,
+            picked: false,
             sections: [true; 5],
             pos: Tick::ZERO,
             sync: true,
@@ -510,6 +554,8 @@ enum PresetValue {
     Plugin(crate::presets::PluginValues),
     /// A VST 3 effect's values and states.
     Vst(crate::presets::VstPreset),
+    /// A VST 3 plug-in's program (a preset it holds), by its place.
+    VstProgram(usize),
 }
 
 /// Whose presets the preset row shows.
@@ -562,6 +608,9 @@ pub struct FxWindow {
     chain_offset: f32,
     chain_to: Option<f32>,
     chain_seen: Option<(Node, usize)>,
+    /// The page showed a VST plug-in's own editor inside the window (last
+    /// frame): the window takes its size.
+    vst_embedded: bool,
 }
 
 impl FxWindow {
@@ -572,6 +621,7 @@ impl FxWindow {
             chain_offset: 0.0,
             chain_to: None,
             chain_seen: None,
+            vst_embedded: false,
             target,
             node,
             preset: None,
@@ -676,8 +726,9 @@ impl FxWindow {
         // as these change (Options › Preferences › General: "Enable
         // Automatic FX Window Resizing"); a plug-in's page, the size it
         // takes, as VEGAS's: it grows when its keyframe controller opens.
+        let embedded = self.vst_embedded;
         let plugin_page = matches!(self.node, Node::Effect(i)
-            if chain.get(i).is_some_and(|e| e.plugin.is_some()));
+            if chain.get(i).is_some_and(|e| e.plugin.is_some() || embedded && e.vst.is_some()));
         let natural = self
             .natural
             .filter(|_| plugin_page)
@@ -740,7 +791,7 @@ impl FxWindow {
                 let name = self.target.name(&project);
                 let header = match (self.node, self.target) {
                     (Node::PanCrop, _) => trf!("Event Pan/Crop: {}", name),
-                    (_, FxTarget::Transition(_)) => trf!("Transition: {}", name),
+                    (_, FxTarget::Transition(..)) => trf!("Transition: {}", name),
                     (Node::Effect(_), _) => format!("{title}: {name}"),
                 };
                 // The name, and the Columns buttons on the right (a
@@ -833,7 +884,10 @@ impl FxWindow {
             .map(|node| match *node {
                 None if composite => tr("Composite").to_string(),
                 None => tr("Pan/Crop").to_string(),
-                Some(i) => crate::ofx::fx_name(&chain[i]),
+                Some(i) => match chain[i].vst.as_deref() {
+                    Some(v) => vst_node_name(&crate::ofx::fx_name(&chain[i]), v),
+                    None => crate::ofx::fx_name(&chain[i]),
+                },
             })
             .collect();
         // Each button's left and right along the chain, from its input's
@@ -1051,7 +1105,7 @@ impl FxWindow {
                     edit = Some((c, at, node));
                 }
                 // A transition's: another from the Transitions window.
-                let transition = matches!(self.target, FxTarget::Transition(_));
+                let transition = matches!(self.target, FxTarget::Transition(..));
                 if icon_button(
                     ui,
                     Icon::Save,
@@ -1159,6 +1213,11 @@ impl FxWindow {
             }
             _ => false,
         };
+        // A VST 3 plug-in's programs, as its page knows them.
+        let (programs, program) = match (&owner, self.node) {
+            (PresetOwner::Vst(_), Node::Effect(i)) => app.vst.programs(self.target, i),
+            _ => (Vec::new(), None),
+        };
         let shown = match &self.preset {
             Some((name, v)) if *v == current || same_box(v) => name.clone(),
             _ if is_default => tr("(Default)").to_string(),
@@ -1170,11 +1229,14 @@ impl FxWindow {
                     .chain(presets.user_plugin(id).iter().cloned())
                     .find(|(_, p)| p == v)
                     .map_or_else(|| tr("(Custom)").to_string(), |(n, _)| n),
+                // A preset of the user's, else the plug-in's program.
                 (PresetOwner::Vst(k), PresetValue::Vst(v)) => presets
                     .user_vst(k)
                     .iter()
                     .find(|(_, p)| p == v)
-                    .map_or_else(|| tr("(Custom)").to_string(), |(n, _)| n.clone()),
+                    .map(|(n, _)| n.clone())
+                    .or_else(|| program.and_then(|n| programs.get(n).cloned()))
+                    .unwrap_or_else(|| tr("(Custom)").to_string()),
                 _ => tr("(Custom)").to_string(),
             },
         };
@@ -1194,6 +1256,7 @@ impl FxWindow {
         };
         let is_user = user_names.contains(&shown);
         let mut pick: Option<(String, PresetValue)> = None;
+        let mut vst_file: Option<bv_timeline::VstFx> = None;
         let row = ui.horizontal(|ui| {
             ui.label(tr("Preset:"));
             // Tall enough for a dozen presets, as VEGAS's list.
@@ -1249,7 +1312,12 @@ impl FxWindow {
                             .into_iter()
                             .map(|(n, v)| (n, PresetValue::Plugin(v)))
                             .collect(),
-                        PresetOwner::Vst(_) => Vec::new(),
+                        // The plug-in's programs.
+                        PresetOwner::Vst(_) => programs
+                            .iter()
+                            .enumerate()
+                            .map(|(n, name)| (name.clone(), PresetValue::VstProgram(n)))
+                            .collect(),
                     };
                     let builtin_count = items.len();
                     match &owner {
@@ -1287,6 +1355,53 @@ impl FxWindow {
                         }
                     }
                 });
+            // A VST plug-in's preset and bank files, as VEGAS's bar has
+            // them for one (its programs in the list).
+            if let (PresetOwner::Vst(_), Node::Effect(i)) = (&owner, self.node)
+                && let Some(v) = chain.get(i).and_then(|e| e.vst.as_deref())
+            {
+                use crate::vst_ui::VstFile;
+                let banks = app.vst.keeps_banks(self.target, i);
+                let files = [
+                    (Icon::Open, VstFile::OpenPreset, tr("Open VST Preset"), true),
+                    (
+                        Icon::Save,
+                        VstFile::SavePreset,
+                        tr("Save VST Preset As"),
+                        true,
+                    ),
+                    (
+                        Icon::OpenBank,
+                        VstFile::OpenBank,
+                        tr("Open VST Bank"),
+                        banks,
+                    ),
+                    (
+                        Icon::SaveBank,
+                        VstFile::SaveBank,
+                        tr("Save VST Bank As"),
+                        banks,
+                    ),
+                ];
+                for (icon, what, tip, on) in files {
+                    let r = icon_button(ui, icon, on, tip);
+                    let r = if on {
+                        r
+                    } else {
+                        r.on_disabled_hover_text(tr("A VST 3 plug-in keeps no banks."))
+                    };
+                    if r.clicked() {
+                        let (new, note) = app.vst.file(self.target, i, v, what);
+                        if let Some(new) = new {
+                            vst_file = Some(new);
+                        }
+                        if let Some(note) = note {
+                            app.notify(note);
+                        }
+                    }
+                }
+                return;
+            }
             let save = icon_button(
                 ui,
                 Icon::Save,
@@ -1358,6 +1473,13 @@ impl FxWindow {
             self.apply_preset(app, project, chain, &value);
             self.preset = Some((name, value));
         }
+        // A VST preset or bank file opened into the plug-in: the effect
+        // takes its settings.
+        if let Some(v) = vst_file {
+            let value = PresetValue::Vst(crate::presets::VstPreset::of(&v));
+            self.apply_preset(app, project, chain, &value);
+            self.preset = None;
+        }
         row.response.rect.width()
     }
 
@@ -1404,6 +1526,17 @@ impl FxWindow {
                 let mut c = chain.to_vec();
                 if let Some(fx) = c.get_mut(i).and_then(|e| e.plugin.as_mut()) {
                     fx.params = v.clone();
+                    let t = self.target;
+                    app.modify(|p| t.set_chain(p, c));
+                }
+            }
+            // A VST 3 plug-in's program: chosen on its page's instance,
+            // whose state the effect takes (the mixer's follows it).
+            (Node::Effect(i), PresetValue::VstProgram(n)) => {
+                let mut c = chain.to_vec();
+                if let Some(fx) = c.get_mut(i).and_then(|e| e.vst.as_deref_mut())
+                    && app.vst.choose_program(self.target, i, *n, fx)
+                {
                     let t = self.target;
                     app.modify(|p| t.set_chain(p, c));
                 }
@@ -1475,7 +1608,7 @@ impl FxWindow {
                 // A transition's plug-in works in OpenFX's Transition
                 // context, over the transition's time.
                 let owner = match target {
-                    FxTarget::Transition(id) => crate::ofx::EditorOwner::Transition(id),
+                    FxTarget::Transition(id, out) => crate::ofx::EditorOwner::Transition(id, out),
                     _ => crate::ofx::EditorOwner::Fx(target),
                 };
                 let key = crate::ofx::EditorKey {
@@ -1570,7 +1703,29 @@ impl FxWindow {
             }
             None => {
                 let rate = app.project().settings.sample_rate.0 as f32;
-                egui::ScrollArea::vertical()
+                // A VST plug-in with an editor of its own: the editor alone,
+                // inside this window, as VEGAS shows it (the rows where it
+                // has none, or Preferences ask for the generic editor).
+                let generic = app.settings.prefs.vst_generic_editor;
+                let title = self.target.title(app.project());
+                let room = if e.vst.is_some() && !generic && bv_platform::EMBEDDED_EDITORS {
+                    crate::vst_ui::embedded(
+                        ui,
+                        &mut app.vst,
+                        f64::from(rate),
+                        target,
+                        i,
+                        &mut e,
+                        &title,
+                    )
+                } else {
+                    None
+                };
+                self.vst_embedded = room.is_some();
+                if let Some(room) = room {
+                    size = Some(room);
+                } else {
+                    egui::ScrollArea::vertical()
                     .id_salt("fx-parametros")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1651,6 +1806,7 @@ impl FxWindow {
                             ),
                         );
                     });
+                }
             }
         }
         // Automated values changed: their envelopes' points at the cursor;
@@ -1829,8 +1985,9 @@ impl FxWindow {
                 tr("Show Properties"),
             );
             let p = &mut self.pan;
-            let zoom_tip =
-                tr("Zoom Edit Tool (click: zoom in · Shift+click: zoom out · drag: pan the view)");
+            let zoom_tip = tr(
+                "Zoom Edit Tool (click: zoom in · right-click or Shift+click: zoom out · drag: pan the view)",
+            );
             if p.row == KeyRow::Mask {
                 // The Mask row's: VEGAS's tools for masks, then the zoom
                 // and snapping.
@@ -2128,18 +2285,28 @@ impl FxWindow {
             let f = if shift { 1.0 / 1.5 } else { 1.5 };
             self.pan.zoom_at(rect, k0, src, p, f);
         }
+        // Its right button zooms out by half as it goes down, as VEGAS's
+        // (the magnifier with − meanwhile).
+        if self.pan.tool == Tool::Zoom
+            && resp.hovered()
+            && ui.input(|i| i.pointer.button_pressed(PointerButton::Secondary))
+            && let Some(p) = pointer
+        {
+            self.pan.zoom_at(rect, k0, src, p, 0.5);
+        }
 
         // Arrastos.
         if resp.drag_started()
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
+            let view = Drag::View {
+                offset: self.pan.offset,
+                from: o,
+            };
             self.pan.drag = if resp.drag_started_by(PointerButton::Middle)
                 || (self.pan.tool == Tool::Zoom && resp.drag_started_by(PointerButton::Primary))
             {
-                Some(Drag::View {
-                    offset: self.pan.offset,
-                    from: o,
-                })
+                Some(view)
             } else if !masks && resp.drag_started_by(PointerButton::Primary) {
                 match hit(&sp, &vp, o, true) {
                     Hit::Handle(sx, sy) => Some(Drag::Resize { vp, sx, sy }),
@@ -2151,7 +2318,9 @@ impl FxWindow {
                         from: round_pivot(o),
                     }),
                     Hit::Inside => Some(Drag::Move { vp, from: o }),
-                    Hit::Outside => None,
+                    // Far from the box the view is dragged, as VEGAS's open
+                    // hand there says.
+                    Hit::Outside => Some(view),
                 }
             } else {
                 None
@@ -2228,37 +2397,32 @@ impl FxWindow {
             self.pan.drag = None;
         }
 
-        // The pointer as what is under it does; turning, the turning one.
-        if (!masks || self.pan.tool == Tool::Zoom)
-            && self.pan.drag.is_none()
-            && let Some(p) = resp.hover_pos()
+        // A click or a drag on the box picks it, one off it lets it go; the
+        // arrow keys then move it a pixel of the media (Shift: ten), as
+        // VEGAS's, along the axis the movement's mode leaves free.
+        if masks || self.pan.tool == Tool::Zoom {
+            self.pan.picked = false;
+        } else if (resp.clicked() || resp.drag_started_by(PointerButton::Primary))
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
-            let icon = if self.pan.tool == Tool::Zoom {
-                CursorIcon::ZoomIn
-            } else {
-                match hit(&sp, &vp, p, true) {
-                    Hit::Handle(sx, sy) => resize_cursor(sx, sy, vp.angle_deg),
-                    Hit::Rotate => CursorIcon::None,
-                    Hit::Inside => CursorIcon::Move,
-                    Hit::Outside => CursorIcon::Default,
-                }
-            };
-            if icon == CursorIcon::None {
-                rotate_cursor(ui.ctx(), p);
-            } else {
-                ui.ctx().set_cursor_icon(icon);
+            self.pan.picked = !matches!(hit(&sp, &pc.vp, o, true), Hit::Outside)
+                || (sp.screen(pivot) - o).length() <= 7.0;
+        }
+        if self.pan.picked && self.pan.drag.is_none() && !ui.ctx().egui_wants_keyboard_input() {
+            let (dx, dy) = ui.input_mut(|i| arrow_nudge(i, self.pan.axis));
+            if dx != 0.0 || dy != 0.0 {
+                result = Some(pc.key.moved([f64::from(dx), f64::from(dy)]));
             }
         }
-        if matches!(self.pan.drag, Some(Drag::Rotate { .. }))
-            && let Some(p) = ui.input(|i| i.pointer.latest_pos())
-        {
-            rotate_cursor(ui.ctx(), p);
-        }
 
-        // Menu do botão direito.
+        // Menu do botão direito (the zoom tool's right button zooms out).
         let mut action = None;
         let adjustment = pc.info.is_some_and(MediaInfo::is_adjustment);
-        let menu = if masks { None } else { Some(&resp) };
+        let menu = if masks || self.pan.tool == Tool::Zoom {
+            None
+        } else {
+            Some(&resp)
+        };
         menu.map(|resp| {
             resp.context_menu(|ui| {
                 let mut item = |ui: &mut egui::Ui, label: &str, a: MenuAction| {
@@ -2338,8 +2502,12 @@ impl FxWindow {
         app.source_watched = true;
         if let Some(s) = picture.filter(|s| !s.rgba.is_empty()) {
             // Its pixels' (a still's are the same at every time).
-            let key = std::sync::Arc::as_ptr(&s.rgba) as usize;
-            if self.pan.source.as_ref().is_none_or(|m| m.key != key) {
+            if self
+                .pan
+                .source
+                .as_ref()
+                .is_none_or(|m| !std::sync::Arc::ptr_eq(&m.pixels, &s.rgba))
+            {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [s.width as usize, s.height as usize],
                     &s.rgba,
@@ -2348,11 +2516,11 @@ impl FxWindow {
                 match &mut self.pan.source {
                     Some(m) => {
                         m.texture.set(image, options);
-                        (m.key, m.clip) = (key, pc.clip.id);
+                        (m.pixels, m.clip) = (s.rgba.clone(), pc.clip.id);
                     }
                     slot => {
                         *slot = Some(ShownMedia {
-                            key,
+                            pixels: s.rgba.clone(),
                             clip: pc.clip.id,
                             texture: ui.ctx().load_texture("pancrop-media", image, options),
                         });
@@ -2399,6 +2567,9 @@ impl FxWindow {
                 painter.rect_filled(r, 0.0, shade);
             }
         }
+        let shown = result.as_ref().unwrap_or(&pc.key);
+        let flips = (shown.width < 0.0, shown.height < 0.0);
+        let turns = (shown.pivot[0] as f32, shown.pivot[1] as f32);
         if masks {
             let n = f64::from(self.pan.grid.max(1.0));
             let grid = self
@@ -2417,10 +2588,23 @@ impl FxWindow {
                 normal,
             );
         } else {
-            let shown = result.as_ref().unwrap_or(&pc.key);
-            let flips = (shown.width < 0.0, shown.height < 0.0);
-            let turns = (shown.pivot[0] as f32, shown.pivot[1] as f32);
             paint_f_box(&painter, &sp, &vp, flips, turns, true);
+        }
+
+        // The pointer, as VEGAS's (`pan_cursor`): the Mask row's tools pick
+        // their own, but for the view dragged and the zoom tool.
+        let viewing = matches!(self.pan.drag, Some(Drag::View { .. }));
+        if !masks || viewing || self.pan.tool == Tool::Zoom {
+            let hover = resp.hover_pos().map(|p| {
+                let on_pivot = (sp.screen(turns) - p).length() <= 7.0;
+                (hit(&sp, &vp, p, true), on_pivot)
+            });
+            let zoom_out = shift
+                || (resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.secondary_down()));
+            let drag = self.pan.drag.as_ref();
+            if let Some(c) = pan_cursor(self.pan.tool, drag, hover, zoom_out, vp.angle_deg, flips) {
+                cursors::set(ui.ctx(), c);
+            }
         }
         self.pan.view = Some((sp, vp));
         result
@@ -2562,8 +2746,9 @@ impl Pick {
     }
 }
 
-/// The chooser's folder of VST 3 effects.
+/// The chooser's folders of VST 3 effects and of VST 2 ones.
 const VST_FOLDER: &str = "VST3";
+const VST2_FOLDER: &str = "VST";
 
 /// How many points a side the chain's LUT has (Save LUT), as Color
 /// Grading's Export LUT.
@@ -2576,6 +2761,65 @@ pub struct Chooser {
     folder: Option<String>,
     picked: Option<Pick>,
     chain_sel: Option<usize>,
+    /// The search field's text: the plug-ins of every folder whose names
+    /// have it.
+    search: String,
+    /// The letters typed over the list (see [`type_ahead`]) and when the
+    /// last one was.
+    typed: String,
+    typed_at: f64,
+    /// The plug-in picked by typing: the list scrolls to it.
+    scroll_pick: bool,
+}
+
+/// How long after a letter typed over the list the next one adds to it
+/// (as in a file manager); later, a new search begins.
+const TYPE_AHEAD_PAUSE: f64 = 1.0;
+
+/// A plug-in of the chooser's list as shown: what it adds, its name, its
+/// badge's color and the text under the pointer.
+struct ListItem {
+    pick: Pick,
+    name: String,
+    badge: Color32,
+    hover: Option<String>,
+}
+
+/// `s` for searching: lowercase, its accented letters as plain ones
+/// ("Correção" finds "correcao").
+fn search_fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            c => c,
+        })
+        .collect()
+}
+
+/// The plug-in typing `typed` over the list picks, as a file manager's
+/// list does: the same letter again and again goes to the next name
+/// beginning with it after `current`, round to the first; more letters,
+/// to the first name from `current` on that begins with them all.
+fn type_ahead(names: &[String], current: Option<usize>, typed: &str) -> Option<usize> {
+    let typed = search_fold(typed);
+    let first = typed.chars().next()?;
+    let n = names.len();
+    let starts = |i: usize, prefix: &str| search_fold(&names[i]).starts_with(prefix);
+    if typed.chars().all(|c| c == first) {
+        let one = first.to_string();
+        let from = current.map_or(0, |c| c + 1);
+        (0..n).map(|k| (from + k) % n).find(|&i| starts(i, &one))
+    } else {
+        let from = current.unwrap_or(0);
+        (0..n).map(|k| (from + k) % n).find(|&i| starts(i, &typed))
+    }
 }
 
 impl Chooser {
@@ -2586,7 +2830,16 @@ impl Chooser {
             folder: None,
             picked: None,
             chain_sel: None,
+            search: String::new(),
+            typed: String::new(),
+            typed_at: f64::NEG_INFINITY,
+            scroll_pick: false,
         }
+    }
+
+    /// Its search set to `text` (screen tests).
+    pub(crate) fn search_for_review(&mut self, text: &str) {
+        self.search = text.to_string();
     }
 
     /// Adds what `pick` is to the chain's end (a package's whole chain).
@@ -2666,10 +2919,13 @@ impl Chooser {
                 folders.push(g);
             }
         }
-        // VST 3 plug-ins work on sound.
+        // VST plug-ins work on sound.
         let vst = if audio { vst } else { &[] };
-        if !vst.is_empty() {
+        if vst.iter().any(|p| p.vst3) {
             folders.push(VST_FOLDER.to_string());
+        }
+        if vst.iter().any(|p| !p.vst3) {
+            folders.push(VST2_FOLDER.to_string());
         }
         let packages_folder = tr("Filter Packages").to_string();
         folders.push(packages_folder.clone());
@@ -2850,13 +3106,18 @@ impl Chooser {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
-                if folder_row(ui, tr("All"), 0.0, self.folder.is_none()).clicked() {
+                // A search looks in every folder.
+                let searching = !self.search.trim().is_empty();
+                let all = self.folder.is_none() || searching;
+                if folder_row(ui, tr("All"), 0.0, all).clicked() {
                     self.folder = None;
+                    self.search.clear();
                 }
                 for f in folders {
-                    let on = self.folder.as_ref() == Some(f);
+                    let on = !searching && self.folder.as_ref() == Some(f);
                     if folder_row(ui, f, 18.0, on).clicked() {
                         self.folder = Some(f.clone());
+                        self.search.clear();
                     }
                 }
             });
@@ -2872,75 +3133,72 @@ impl Chooser {
         packages: &[Package],
         packages_folder: &str,
     ) {
+        // The search field: names in every folder.
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text(tr("Search plug-ins"))
+                .desired_width(f32::INFINITY),
+        );
+        if field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search.clear();
+        }
+        ui.add_space(4.0);
+        let items = self.items(all, ofx, vst, packages, packages_folder);
+        // Letters typed over the list pick the plug-in they begin.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let now = ui.input(|i| i.time);
+            let typed: String = ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            if !typed.trim().is_empty() {
+                if now - self.typed_at > TYPE_AHEAD_PAUSE {
+                    self.typed.clear();
+                }
+                self.typed.push_str(&typed);
+                self.typed_at = now;
+                let names: Vec<String> = items.iter().map(|it| it.name.clone()).collect();
+                let current = items
+                    .iter()
+                    .position(|it| self.picked.as_ref() == Some(&it.pick));
+                if let Some(i) = type_ahead(&names, current, &self.typed) {
+                    self.picked = Some(items[i].pick.clone());
+                    self.scroll_pick = true;
+                }
+            }
+        }
         let mut add = None;
+        let scroll = std::mem::take(&mut self.scroll_pick);
         egui::ScrollArea::vertical()
             .id_salt("seletor-lista")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
-                    let folder = self.folder.clone();
-                    for &k in all
-                        .iter()
-                        .filter(|k| folder.as_deref().is_none_or(|f| tr(k.category()) == f))
-                    {
-                        let pick = Pick::Kind(k);
-                        let selected = self.picked.as_ref() == Some(&pick);
-                        let r =
-                            plugin_item(ui, tr(k.name()), category_color(k.category()), selected);
+                    if items.is_empty() {
+                        ui.label(
+                            RichText::new(tr("No plug-in has that name")).color(theme::text_dim()),
+                        );
+                    }
+                    for it in &items {
+                        let selected = self.picked.as_ref() == Some(&it.pick);
+                        let mut r = plugin_item(ui, &it.name, it.badge, selected);
+                        if let Some(h) = &it.hover {
+                            r = r.on_hover_text(h);
+                        }
+                        if selected && scroll {
+                            r.scroll_to_me(Some(Align::Center));
+                        }
                         if r.clicked() {
-                            self.picked = Some(pick.clone());
+                            self.picked = Some(it.pick.clone());
                         }
                         if r.double_clicked() {
-                            add = Some(pick);
-                        }
-                    }
-                    for p in ofx.iter().filter(|p| {
-                        folder
-                            .as_deref()
-                            .is_none_or(|f| crate::ofx::group_of(p) == f)
-                    }) {
-                        let pick = Pick::Ofx(p.identifier.clone());
-                        let selected = self.picked.as_ref() == Some(&pick);
-                        let name = crate::ofx::plugin_name(p);
-                        let r = plugin_item(ui, &name, category_color("OFX"), selected)
-                            .on_hover_text(&p.identifier);
-                        if r.clicked() {
-                            self.picked = Some(pick.clone());
-                        }
-                        if r.double_clicked() {
-                            add = Some(pick);
-                        }
-                    }
-                    if folder.as_deref().is_none_or(|f| f == VST_FOLDER) {
-                        for p in vst {
-                            let pick = Pick::Vst(p.clone());
-                            let selected = self.picked.as_ref() == Some(&pick);
-                            let r = plugin_item(ui, &p.name, category_color("VST3"), selected)
-                                .on_hover_text(p.path.display().to_string());
-                            if r.clicked() {
-                                self.picked = Some(pick.clone());
-                            }
-                            if r.double_clicked() {
-                                add = Some(pick);
-                            }
-                        }
-                    }
-                    // The filter packages: in their folder only.
-                    if folder.as_deref() == Some(packages_folder) {
-                        for p in packages {
-                            let pick = Pick::Package(p.name.clone());
-                            let selected = self.picked.as_ref() == Some(&pick);
-                            let names: Vec<String> =
-                                p.chain.iter().map(crate::ofx::fx_name).collect();
-                            let r = plugin_item(ui, &p.name, category_color("Package"), selected)
-                                .on_hover_text(names.join(" → "));
-                            if r.clicked() {
-                                self.picked = Some(pick.clone());
-                            }
-                            if r.double_clicked() {
-                                add = Some(pick);
-                            }
+                            add = Some(it.pick.clone());
                         }
                     }
                 });
@@ -2948,6 +3206,86 @@ impl Chooser {
         if let Some(k) = add {
             self.add(&k, packages);
         }
+    }
+
+    /// The list's plug-ins, in its order: those of the chosen folder (all
+    /// of them but the filter packages, with none), or those of every
+    /// folder whose names have what is searched for.
+    fn items(
+        &self,
+        all: &[EffectKind],
+        ofx: &[std::sync::Arc<bv_ofx::PluginInfo>],
+        vst: &[crate::vst::VstPlugin],
+        packages: &[Package],
+        packages_folder: &str,
+    ) -> Vec<ListItem> {
+        let query = search_fold(self.search.trim());
+        let searching = !query.is_empty();
+        let folder = self.folder.as_deref().filter(|_| !searching);
+        let mut items = Vec::new();
+        for &k in all
+            .iter()
+            .filter(|k| folder.is_none_or(|f| tr(k.category()) == f))
+        {
+            items.push(ListItem {
+                pick: Pick::Kind(k),
+                name: tr(k.name()).to_string(),
+                badge: category_color(k.category()),
+                hover: None,
+            });
+        }
+        for p in ofx
+            .iter()
+            .filter(|p| folder.is_none_or(|f| crate::ofx::group_of(p) == f))
+        {
+            items.push(ListItem {
+                pick: Pick::Ofx(p.identifier.clone()),
+                name: crate::ofx::plugin_name(p),
+                badge: category_color("OFX"),
+                hover: Some(p.identifier.clone()),
+            });
+        }
+        for p in vst {
+            let own = if p.vst3 { VST_FOLDER } else { VST2_FOLDER };
+            if folder.is_some_and(|f| f != own) {
+                continue;
+            }
+            let about: Vec<&str> = [p.vendor.as_str(), p.category.as_str(), p.version.as_str()]
+                .into_iter()
+                .filter(|t| !t.is_empty())
+                .collect();
+            let hover = if about.is_empty() {
+                p.path.display().to_string()
+            } else {
+                format!("{}\n{}", about.join(" · "), p.path.display())
+            };
+            items.push(ListItem {
+                pick: Pick::Vst(p.clone()),
+                name: if p.bits32 {
+                    trf!("{} (32-bit)", p.name)
+                } else {
+                    p.name.clone()
+                },
+                badge: category_color(own),
+                hover: Some(hover),
+            });
+        }
+        // The filter packages: in their folder, or found by a search.
+        if folder == Some(packages_folder) || searching {
+            for p in packages {
+                let names: Vec<String> = p.chain.iter().map(crate::ofx::fx_name).collect();
+                items.push(ListItem {
+                    pick: Pick::Package(p.name.clone()),
+                    name: p.name.clone(),
+                    badge: category_color("Package"),
+                    hover: Some(names.join(" → ")),
+                });
+            }
+        }
+        if searching {
+            items.retain(|it| search_fold(&it.name).contains(&query));
+        }
+        items
     }
 }
 
@@ -3729,7 +4067,7 @@ fn category_color(cat: &str) -> Color32 {
         "Compositing" => Color32::from_rgb(0x3E, 0xA8, 0x5C),
         "Equalization" => Color32::from_rgb(0x2E, 0xA8, 0xA0),
         "Dynamics" => Color32::from_rgb(0xC8, 0x4E, 0x4E),
-        "VST3" => Color32::from_rgb(0xB8, 0x9A, 0x2E),
+        "VST3" | "VST" => Color32::from_rgb(0xB8, 0x9A, 0x2E),
         "Package" => Color32::from_rgb(0x5E, 0x8C, 0x48),
         _ => Color32::from_rgb(0x7A, 0x6C, 0xD0),
     }
@@ -3806,8 +4144,41 @@ pub(crate) fn paint_key(p: &Painter, c: Pos2, curve: KeyCurve, fill: Color32) {
     }
 }
 
+/// A VST plug-in's chain button, as VEGAS names it: its name, its kind
+/// and its processor's width ("Modern Equalizer(VST3, 64 Bit)").
+fn vst_node_name(name: &str, v: &bv_timeline::VstFx) -> String {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    // Each file's width, read once (its header).
+    static BITS: Mutex<Option<HashMap<std::path::PathBuf, u32>>> = Mutex::new(None);
+    let bits = {
+        let mut known = BITS.lock().unwrap_or_else(|e| e.into_inner());
+        *known
+            .get_or_insert_with(HashMap::new)
+            .entry(v.path.clone())
+            .or_insert_with(|| {
+                let narrow = match v.format {
+                    bv_timeline::VstFormat::Vst3 => bv_vst3::is_32bit(&v.path),
+                    bv_timeline::VstFormat::Vst2 => {
+                        bv_vst2::machine(&v.path) == Some(bv_vst2::Machine::X86)
+                    }
+                };
+                if narrow || cfg!(target_pointer_width = "32") {
+                    32
+                } else {
+                    64
+                }
+            })
+    };
+    let kind = match v.format {
+        bv_timeline::VstFormat::Vst3 => "VST3",
+        bv_timeline::VstFormat::Vst2 => "VST",
+    };
+    format!("{name}({kind}, {bits} Bit)")
+}
+
 /// A Columns button: `n` bars, lit when on.
-fn columns_button(ui: &mut egui::Ui, n: u8, on: bool, enabled: bool) -> egui::Response {
+pub(crate) fn columns_button(ui: &mut egui::Ui, n: u8, on: bool, enabled: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(
         vec2(24.0, 20.0),
         if enabled {
@@ -3884,7 +4255,8 @@ fn splitter(ui: &mut egui::Ui, tray: f32, most: f32) -> Option<f32> {
         ui.allocate_exact_size(vec2(ui.available_width(), SPLITTER), egui::Sense::drag());
     let hot = resp.hovered() || resp.dragged();
     if hot {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        // A window's divider, as VEGAS's split bars.
+        cursors::set(ui.ctx(), Cursor::SplitterNs);
     }
     ui.painter().hline(
         bar.x_range(),
@@ -3947,55 +4319,94 @@ pub(crate) fn hit(sp: &Space, vp: &Viewport, p: Pos2, rotation: bool) -> Hit {
     }
 }
 
-/// The cursor for turning, as VEGAS shows one (the system has none): the
-/// pointer hidden and a two-headed turning arrow drawn round its point,
-/// over everything, white edged in black so it shows on any picture.
-pub(crate) fn rotate_cursor(ctx: &egui::Context, p: Pos2) {
-    ctx.set_cursor_icon(CursorIcon::None);
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Tooltip,
-        egui::Id::new("rotate cursor"),
-    ));
-    let r = 8.0f32;
-    // From the left, over the top, to the right (y goes down).
-    let (from, to) = (160f32.to_radians(), 380f32.to_radians());
-    let at = |a: f32| p + r * vec2(a.cos(), a.sin());
-    let arc: Vec<Pos2> = (0..=24)
-        .map(|i| at(from + (to - from) * i as f32 / 24.0))
-        .collect();
-    // Each end's head, along the arc away from it.
-    let head = |a: f32, way: f32| {
-        let (e, out) = (at(a), vec2(a.cos(), a.sin()));
-        let along = way * vec2(-a.sin(), a.cos());
-        vec![
-            e + along * 4.0,
-            e - along * 1.5 + out * 3.5,
-            e - along * 1.5 - out * 3.5,
-        ]
+/// The pointer over a handle of a Pan/Crop or Track Motion box, as VEGAS
+/// chooses it: the handle's own — ↔ on the left and right sides, ↘ on the
+/// top-left and bottom-right corners, ↕ on the top and bottom sides, ↗ on
+/// the other two corners —, a step further round that list (↔ ↘ ↕ ↗) for
+/// each 45° the box is turned clockwise on the screen (rounded, the angle
+/// taken within a turn first), and a corner's two steps more when the box
+/// is mirrored (its width and height of different signs). `handle` is in
+/// the box's own coordinates, its mirrors included (−1 left or top, 1
+/// right or bottom, 0 a side's middle); `angle` in radians, clockwise on
+/// the screen.
+pub(crate) fn handle_cursor(handle: (f32, f32), angle: f64, mirrored: bool) -> Cursor {
+    const ROUND: [Cursor; 4] = [
+        Cursor::ResizeEw,
+        Cursor::ResizeNwse,
+        Cursor::ResizeNs,
+        Cursor::ResizeNesw,
+    ];
+    let (sx, sy) = handle;
+    let corner = sx != 0.0 && sy != 0.0;
+    let own: i64 = match (sx != 0.0, sy != 0.0) {
+        (true, false) => 0,
+        (false, _) => 2,
+        (true, true) if (sx > 0.0) == (sy > 0.0) => 1,
+        (true, true) => 3,
     };
-    let (black, white) = (Color32::BLACK, Color32::WHITE);
-    painter.add(Shape::line(arc.clone(), Stroke::new(3.2, black)));
-    for points in [head(to, 1.0), head(from, -1.0)] {
-        painter.add(Shape::convex_polygon(
-            points,
-            white,
-            Stroke::new(1.0, black),
-        ));
-    }
-    painter.add(Shape::line(arc, Stroke::new(1.4, white)));
-    painter.circle(p, 1.6, white, Stroke::new(1.0, black));
+    // From 0 to 8 steps (an angle that is not a number: none).
+    let steps =
+        (angle.rem_euclid(std::f64::consts::TAU) * 4.0 / std::f64::consts::PI).round() as i64;
+    let mirror = if corner && mirrored { 2 } else { 0 };
+    ROUND[(own + steps + mirror).rem_euclid(4) as usize]
 }
 
-pub(crate) fn resize_cursor(sx: f32, sy: f32, angle: f32) -> CursorIcon {
-    // Direção da alça na tela, em oitavos de volta.
-    let d = pancrop::rot((sx, sy), angle);
-    let a = d.1.atan2(d.0).to_degrees().rem_euclid(180.0);
-    match ((a + 22.5) / 45.0) as i32 % 4 {
-        0 => CursorIcon::ResizeHorizontal,
-        1 => CursorIcon::ResizeNwSe,
-        2 => CursorIcon::ResizeVertical,
-        _ => CursorIcon::ResizeNeSw,
+/// [`handle_cursor`] for the handle `sx`, `sy` of a box as the workspaces
+/// find it — on its outline as drawn, its mirrors aside —, the box turned
+/// `angle_deg` and mirrored `flips` (across, up and down). A mirror puts
+/// the box's own corners on the other side: VEGAS's two steps more for a
+/// mirrored box's corners bring the pointer back to the drawn corner's.
+pub(crate) fn box_handle_cursor(sx: f32, sy: f32, angle_deg: f32, flips: (bool, bool)) -> Cursor {
+    let own = (
+        if flips.0 { -sx } else { sx },
+        if flips.1 { -sy } else { sy },
+    );
+    handle_cursor(own, f64::from(angle_deg).to_radians(), flips.0 != flips.1)
+}
+
+/// The pointer over what [`hit`] found on a Pan/Crop or Track Motion box
+/// (`pivot`: on its turning center's small circle, where the handles come
+/// first), as VEGAS's: a handle's arrows ([`box_handle_cursor`]), the
+/// center's, the box moved inside it, turned round it; none far from it.
+pub(crate) fn box_cursor(
+    hit: Hit,
+    pivot: bool,
+    angle_deg: f32,
+    flips: (bool, bool),
+) -> Option<Cursor> {
+    match hit {
+        Hit::Handle(sx, sy) => Some(box_handle_cursor(sx, sy, angle_deg, flips)),
+        _ if pivot => Some(Cursor::MoveCenter),
+        Hit::Rotate => Some(Cursor::Rotate),
+        Hit::Inside => Some(Cursor::MoveFrame),
+        Hit::Outside => None,
     }
+}
+
+/// The Pan/Crop workspace's pointer, as VEGAS's: a drag's own while it
+/// goes on (the one its press showed; the view dragged, the closed hand);
+/// the zoom tool's magnifier, with − while its right button is down (or
+/// Shift, which zooms out too); else what is under it on the box
+/// ([`box_cursor`]; `hover`: what [`hit`] found and whether it is on the
+/// turning center), the open hand far from it, where the view drags from.
+/// None while the pointer is elsewhere.
+fn pan_cursor(
+    tool: Tool,
+    drag: Option<&Drag>,
+    hover: Option<(Hit, bool)>,
+    zoom_out: bool,
+    angle_deg: f32,
+    flips: (bool, bool),
+) -> Option<Cursor> {
+    if let Some(d) = drag {
+        return Some(d.cursor(flips));
+    }
+    let (hit, pivot) = hover?;
+    Some(match tool {
+        Tool::Zoom if zoom_out => Cursor::ZoomOut,
+        Tool::Zoom => Cursor::ZoomIn,
+        Tool::Normal => box_cursor(hit, pivot, angle_deg, flips).unwrap_or(Cursor::HandOpen),
+    })
 }
 
 /// Novo F ao arrastar a alça (`sx`, `sy` ∈ {−1, 0, 1}) até `local` (o
@@ -4292,6 +4703,58 @@ pub(crate) fn ants(painter: &Painter, points: &[Pos2]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn arrow_keys_move_the_pan_crop_box_a_pixel_or_ten() {
+        let press = |keys: &[(egui::Key, egui::Modifiers)]| {
+            let mut i = egui::InputState::default();
+            for &(key, modifiers) in keys {
+                i.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                });
+            }
+            i
+        };
+        let none = egui::Modifiers::NONE;
+        let mut i = press(&[
+            (egui::Key::ArrowRight, none),
+            (egui::Key::ArrowRight, none),
+            (egui::Key::ArrowUp, egui::Modifiers::SHIFT),
+        ]);
+        assert_eq!(arrow_nudge(&mut i, Axis::Free), (2.0, -10.0));
+        assert!(i.events.is_empty(), "the keys are taken");
+        let mut i = press(&[(egui::Key::ArrowLeft, none), (egui::Key::ArrowDown, none)]);
+        assert_eq!(arrow_nudge(&mut i, Axis::X), (-1.0, 0.0), "X only");
+        let mut i = press(&[(egui::Key::ArrowLeft, none), (egui::Key::ArrowDown, none)]);
+        assert_eq!(arrow_nudge(&mut i, Axis::Y), (0.0, 1.0), "Y only");
+        // Ctrl's arrows are the keyframes': left alone.
+        let mut i = press(&[(egui::Key::ArrowLeft, egui::Modifiers::COMMAND)]);
+        assert_eq!(arrow_nudge(&mut i, Axis::Free), (0.0, 0.0));
+        assert_eq!(i.events.len(), 1);
+    }
+
+    #[test]
+    fn letters_typed_over_the_chooser_pick_as_in_a_file_manager() {
+        let names: Vec<String> = ["Blur", "Border", "Brightness", "Color Curves", "Correção"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // One letter: the first name with it, then the next ones, round.
+        assert_eq!(type_ahead(&names, None, "b"), Some(0));
+        assert_eq!(type_ahead(&names, Some(0), "b"), Some(1));
+        assert_eq!(type_ahead(&names, Some(1), "bb"), Some(2));
+        assert_eq!(type_ahead(&names, Some(2), "bbb"), Some(0));
+        // Letters typed together: the name they begin, accents or not.
+        assert_eq!(type_ahead(&names, Some(0), "bri"), Some(2));
+        assert_eq!(type_ahead(&names, None, "CORRE"), Some(4));
+        assert_eq!(type_ahead(&names, None, "z"), None);
+        assert_eq!(type_ahead(&[], None, "a"), None);
+        assert_eq!(search_fold("Correção de Cor"), "correcao de cor");
+    }
+
     fn vp() -> Viewport {
         Viewport {
             cx: 500.0,
@@ -4316,7 +4779,7 @@ mod tests {
             .find(|(_, c)| c.transition_fx.is_some())
             .map(|(_, c)| c.id)
             .expect("the transition");
-        let target = FxTarget::Transition(clip);
+        let target = FxTarget::Transition(clip, false);
         let chain = target.chain(&p).expect("its chain");
         assert_eq!(chain.len(), 1);
         assert!(chain[0].enabled);
@@ -5129,5 +5592,245 @@ mod tests {
         assert_eq!(hit(&sp, &v, round, false), Hit::Outside);
         let ring = sp.screen((500.0 + 0.55 * 400f32.hypot(200.0), 500.0));
         assert_eq!(hit(&sp, &v, ring, true), Hit::Rotate);
+    }
+
+    /// The handles' arrows as VEGAS turns them with the box: unturned, as
+    /// measured (top left ↘, top right ↗, top ↕, right ↔); a step round
+    /// ↔ ↘ ↕ ↗ for each 45° clockwise on the screen — the box turned 45°
+    /// the other way, as measured, its top right shows ↕, its top ↘ and
+    /// its right ↗ —; half a turn as unturned.
+    #[test]
+    fn handle_pointers_turn_with_the_box_as_vegas_s() {
+        use Cursor::{ResizeEw as Ew, ResizeNesw as Nesw, ResizeNs as Ns, ResizeNwse as Nwse};
+        let (tl, t, tr, r) = ((-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0));
+        let (br, b, bl, l) = ((1.0, 1.0), (0.0, 1.0), (-1.0, 1.0), (-1.0, 0.0));
+        let at = |deg: f64, h: (f32, f32)| handle_cursor(h, deg.to_radians(), false);
+        let all = [tl, t, tr, r, br, b, bl, l];
+        let row = |deg: f64| all.map(|h| at(deg, h));
+        assert_eq!(row(0.0), [Nwse, Ns, Nesw, Ew, Nwse, Ns, Nesw, Ew]);
+        // 45° clockwise: the top-left corner shows ↕.
+        assert_eq!(row(45.0), [Ns, Nesw, Ew, Nwse, Ns, Nesw, Ew, Nwse]);
+        // 45° the other way: the measured three, and the top left ↔.
+        assert_eq!(
+            (at(-45.0, tr), at(-45.0, t), at(-45.0, r)),
+            (Ns, Nwse, Nesw)
+        );
+        assert_eq!(at(-45.0, tl), Ew);
+        assert_eq!(row(90.0), [Nesw, Ew, Nwse, Ns, Nesw, Ew, Nwse, Ns]);
+        assert_eq!(row(180.0), row(0.0));
+        assert_eq!(row(-90.0), row(270.0));
+        // Rounded to the nearest step, the angle taken within a turn.
+        assert_eq!(row(22.0), row(0.0));
+        assert_eq!(row(23.0), row(45.0));
+        assert_eq!(row(405.0), row(45.0));
+        assert_eq!(row(-315.0), row(45.0));
+        assert_eq!(at(f64::NAN, tl), Nwse);
+    }
+
+    /// A mirrored box (width and height of different signs): VEGAS turns
+    /// its corners two steps more, its sides not. Its corners, its own
+    /// (mirrored) way, are drawn on the other side: the pointer over each
+    /// drawn corner is the one that corner shows unmirrored.
+    #[test]
+    fn a_mirrored_box_s_corners_turn_two_steps_more() {
+        use Cursor::{ResizeEw as Ew, ResizeNesw as Nesw, ResizeNs as Ns, ResizeNwse as Nwse};
+        let mirrored = |h: (f32, f32), deg: f64| handle_cursor(h, deg.to_radians(), true);
+        assert_eq!(mirrored((-1.0, -1.0), 0.0), Nesw);
+        assert_eq!(mirrored((1.0, -1.0), 0.0), Nwse);
+        assert_eq!(mirrored((0.0, -1.0), 0.0), Ns);
+        assert_eq!(mirrored((1.0, 0.0), 0.0), Ew);
+        assert_eq!(mirrored((-1.0, -1.0), 45.0), Ew);
+        for flips in [(false, false), (true, false), (false, true), (true, true)] {
+            for deg in [0.0, 30.0, 45.0, 90.0, -45.0, 180.0] {
+                for (sx, sy) in HANDLES {
+                    assert_eq!(
+                        box_handle_cursor(sx, sy, deg, flips),
+                        box_handle_cursor(sx, sy, deg, (false, false)),
+                        "{flips:?} {deg} ({sx}, {sy})"
+                    );
+                }
+            }
+        }
+        assert_eq!(box_handle_cursor(-1.0, -1.0, 0.0, (true, false)), Nwse);
+    }
+
+    /// The workspace's pointer: over the box, its zones' (the turning
+    /// center over the inside, the handles over the center); far from it
+    /// the open hand; a drag keeps its own (the view dragged, the closed
+    /// hand); the zoom tool's magnifier, − with its right button or Shift.
+    #[test]
+    fn the_pan_crop_workspace_s_pointer_follows_the_spot_the_drag_and_the_tool() {
+        let plain = (false, false);
+        let over = |hit: Hit, pivot: bool| {
+            pan_cursor(Tool::Normal, None, Some((hit, pivot)), false, 0.0, plain)
+        };
+        assert_eq!(over(Hit::Handle(1.0, 1.0), true), Some(Cursor::ResizeNwse));
+        assert_eq!(over(Hit::Inside, true), Some(Cursor::MoveCenter));
+        assert_eq!(over(Hit::Inside, false), Some(Cursor::MoveFrame));
+        assert_eq!(over(Hit::Rotate, false), Some(Cursor::Rotate));
+        assert_eq!(over(Hit::Outside, false), Some(Cursor::HandOpen));
+        assert_eq!(
+            pan_cursor(Tool::Normal, None, None, false, 0.0, plain),
+            None
+        );
+        let turned = Viewport {
+            angle_deg: 45.0,
+            ..vp()
+        };
+        let resize = Drag::Resize {
+            vp: turned,
+            sx: -1.0,
+            sy: -1.0,
+        };
+        let view = Drag::View {
+            offset: Vec2::ZERO,
+            from: Pos2::ZERO,
+        };
+        for (d, c) in [
+            (resize, Cursor::ResizeNs),
+            (
+                Drag::Move {
+                    vp: vp(),
+                    from: Pos2::ZERO,
+                },
+                Cursor::MoveFrame,
+            ),
+            (
+                Drag::Rotate {
+                    vp: vp(),
+                    from: 0.0,
+                },
+                Cursor::Rotate,
+            ),
+            (
+                Drag::Pivot {
+                    at: (0.0, 0.0),
+                    from: Pos2::ZERO,
+                },
+                Cursor::MoveCenter,
+            ),
+            (view, Cursor::HandClosed),
+        ] {
+            // Wherever the pointer went meanwhile.
+            let far = Some((Hit::Outside, false));
+            assert_eq!(
+                pan_cursor(Tool::Normal, Some(&d), far, false, 0.0, plain),
+                Some(c)
+            );
+            assert_eq!(
+                pan_cursor(Tool::Normal, Some(&d), None, false, 0.0, plain),
+                Some(c)
+            );
+        }
+        let inside = Some((Hit::Inside, false));
+        assert_eq!(
+            pan_cursor(Tool::Zoom, None, inside, false, 0.0, plain),
+            Some(Cursor::ZoomIn)
+        );
+        assert_eq!(
+            pan_cursor(Tool::Zoom, None, inside, true, 0.0, plain),
+            Some(Cursor::ZoomOut)
+        );
+        assert_eq!(
+            pan_cursor(Tool::Zoom, Some(&view), inside, true, 0.0, plain),
+            Some(Cursor::HandClosed)
+        );
+    }
+
+    /// The pointer a frame of `events` leaves: BananaV's own, if one.
+    fn pointer_after(
+        ctx: &egui::Context,
+        app: &mut BananaApp,
+        events: Vec<egui::Event>,
+    ) -> Option<Cursor> {
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 960.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+        out.textures_delta.clear();
+        let img = out.platform_output.cursor_image?;
+        Cursor::ALL
+            .into_iter()
+            .find(|&c| std::sync::Arc::ptr_eq(&cursors::image(c, img.size[0]).rgba, &img.rgba))
+    }
+
+    /// In the Pan/Crop window itself: a corner's arrow, the center's, the
+    /// inside's, round the box and far from it.
+    #[test]
+    fn the_pointer_over_the_pan_crop_box_is_its_zone_s() {
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.load_demo();
+        app.open_clip_window("pancrop");
+        for _ in 0..4 {
+            frame(&ctx, &mut app, Vec::new());
+        }
+        let (sp, vp) = app
+            .clip_windows
+            .fx_window()
+            .and_then(|w| w.pan.view)
+            .expect("the workspace drawn");
+        let mut at = |p: Pos2| {
+            pointer_after(&ctx, &mut app, vec![egui::Event::PointerMoved(p)]);
+            pointer_after(&ctx, &mut app, Vec::new())
+        };
+        let c = sp.screen((vp.cx, vp.cy));
+        let r = rotation_radius(&sp, &vp);
+        assert_eq!(
+            at(box_point(&sp, &vp, -1.0, -1.0)),
+            Some(Cursor::ResizeNwse)
+        );
+        assert_eq!(at(box_point(&sp, &vp, 1.0, -1.0)), Some(Cursor::ResizeNesw));
+        assert_eq!(at(box_point(&sp, &vp, 0.0, -1.0)), Some(Cursor::ResizeNs));
+        assert_eq!(at(box_point(&sp, &vp, 1.0, 0.0)), Some(Cursor::ResizeEw));
+        assert_eq!(at(c), Some(Cursor::MoveCenter));
+        assert_eq!(at(box_point(&sp, &vp, 0.5, 0.5)), Some(Cursor::MoveFrame));
+        let between = (box_point(&sp, &vp, 0.0, 1.0).y - c.y + r) / 2.0;
+        assert_eq!(at(c + vec2(0.0, between)), Some(Cursor::Rotate));
+        assert_eq!(at(c + vec2(r + 12.0, 0.0)), Some(Cursor::HandOpen));
+    }
+
+    /// In the window, on the Mask row: the tools' pens over an anchor and
+    /// a line of the review masks (none of BananaV's where a tool does
+    /// nothing), the rectangle tool's crosshair everywhere.
+    #[test]
+    fn the_mask_tools_show_their_pens_in_the_window() {
+        use crate::pancrop_mask::MaskTool;
+        use bv_timeline::mask::segment_point;
+        for (tool, on_anchor, on_line) in [
+            (MaskTool::DeleteAnchor, Some(Cursor::PenDelete), None),
+            (
+                MaskTool::SplitTangent,
+                Some(Cursor::PenSplitTangent),
+                Some(Cursor::PenAdd),
+            ),
+            (
+                MaskTool::AddAnchor,
+                Some(Cursor::PenTangent),
+                Some(Cursor::PenAdd),
+            ),
+            (MaskTool::Normal, Some(Cursor::Arrow), Some(Cursor::Arrow)),
+            (
+                MaskTool::Rectangle,
+                Some(Cursor::Crosshair),
+                Some(Cursor::Crosshair),
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = BananaApp::new(ctx.clone());
+            let (id, sp) = masked(&ctx, &mut app, tool);
+            let s = shapes(&app, id);
+            let anchor = sp.screen64((s[0][1].at[0], s[0][1].at[1]));
+            let mid = segment_point(&s[0], 1, 0.5);
+            let line = sp.screen64((mid[0], mid[1]));
+            let mut at = |p: Pos2| {
+                pointer_after(&ctx, &mut app, vec![egui::Event::PointerMoved(p)]);
+                pointer_after(&ctx, &mut app, Vec::new())
+            };
+            assert_eq!(at(anchor), on_anchor, "{tool:?} on an anchor");
+            assert_eq!(at(line), on_line, "{tool:?} on a line");
+        }
     }
 }

@@ -50,7 +50,13 @@ pub use bv_effects::color_grading::{
     APPLE_LOG_TO_LINEAR, APPLE_LOG_TO_REC709, Picker as ColorGradingPicker,
 };
 pub use bv_effects::stabilization;
-pub use bv_gpu::{Adapter as GpuAdapter, AdapterKind as GpuKind};
+pub use bv_gpu::{Adapter as GpuAdapter, AdapterKind as GpuKind, Interfaces as GpuInterfaces};
+
+/// Opens the card compositing video only through `interfaces` from now on
+/// (after a start that failed on one: Vulkan only, or none at all).
+pub fn set_gpu_interfaces(interfaces: GpuInterfaces) {
+    bv_gpu::set_interfaces(interfaces);
+}
 pub use bv_media::{AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, MediaError, VIDEO_EXTENSIONS};
 pub use bv_mixer::Downmix;
 pub use bv_mixer::beats::{Beat, kept as beats_kept, threshold as beat_threshold};
@@ -267,7 +273,7 @@ impl Engine {
 
     /// What the preview's frames are drawn with: the look and, for
     /// Split-Screen View, the project with its video effects bypassed.
-    fn drawing(&self) -> preview::Drawing {
+    fn drawing(&self, room: (u32, u32)) -> preview::Drawing {
         let look = self.preview_look;
         let bypassed = look.bypass.map(|_| {
             let mut b = self.bypassed.lock().expect("bypassed project");
@@ -280,7 +286,11 @@ impl Engine {
                 }
             }
         });
-        preview::Drawing { look, bypassed }
+        preview::Drawing {
+            look,
+            bypassed,
+            room,
+        }
     }
 
     /// The generation the preview's frames are told apart by: the
@@ -309,6 +319,12 @@ impl Engine {
     /// What the graphics card compositing video is doing.
     pub fn gpu_status(&self) -> GpuStatus {
         self.accel.status()
+    }
+
+    /// Whether the graphics card compositing video is still opening or
+    /// compiling its kernels (work that has made some drivers fail).
+    pub fn gpu_starting(&self) -> bool {
+        self.accel.starting()
     }
 
     /// Whether video is decoded on the graphics card (Windows' decoders
@@ -481,6 +497,12 @@ impl Engine {
     /// The Master Bus's Dim Output: playback 20 dB down (renders never).
     pub fn set_dim(on: bool) {
         playback::set_dim(on);
+    }
+
+    /// How many decibels Dim Output cuts (Options › Internal: "Dim
+    /// Attenuation").
+    pub fn set_dim_db(db: f32) {
+        playback::set_dim_db(db);
     }
 
     /// The Loudness Meters' readings: since playback last started or the
@@ -746,6 +768,11 @@ impl Engine {
         t: Tick,
         height: u32,
     ) -> Option<Arc<Thumbnail>> {
+        // While playback or a render runs, new thumbnails wait: their
+        // decoding takes the cores the preview and the render need (the
+        // nearest ones made before show meanwhile).
+        let rendering = self.render.as_ref().is_some_and(|r| !r.progress().finished);
+        thumbs::hold_thumbnails(self.is_playing() || rendering);
         self.thumbs.thumbnail(info, t, height)
     }
 
@@ -1262,6 +1289,16 @@ impl Engine {
 
     /// Pede o quadro de `t` para o monitor, cabendo em `max_w` × `max_h`.
     pub fn request_preview(&self, t: Tick, max_w: u32, max_h: u32) {
+        self.request_preview_in(t, max_w, max_h, (0, 0));
+    }
+
+    /// [`request_preview`](Self::request_preview) for a screen showing the
+    /// frame in a room of `room` pixels: drawn at its size all the same
+    /// (Preview Quality's Full, Half or Quarter; its effects as at that
+    /// size), it comes back reduced to the room on the graphics card
+    /// (`bv_gpu::room_size`), so that a 4K frame shown in a third of it
+    /// brings back and uploads a ninth of the bytes.
+    pub fn request_preview_in(&self, t: Tick, max_w: u32, max_h: u32, room: (u32, u32)) {
         let s = &self.project.settings;
         let (w, h) = preview_size(s, max_w, max_h);
         let t = s.frame_rate.snap_floor(t);
@@ -1281,7 +1318,7 @@ impl Engine {
             t,
             (w, h),
             ahead,
-            self.drawing(),
+            self.drawing(room),
         );
     }
 
@@ -1298,9 +1335,10 @@ impl Engine {
     }
 
     /// Tools › Build Dynamic RAM Preview: draws every frame of `range` at
-    /// the preview's size (`max_w` × `max_h` at most) into that memory, so
-    /// that it plays at full rate.
-    pub fn build_ram_preview(&self, range: TimeRange, max_w: u32, max_h: u32) {
+    /// the preview's size (`max_w` × `max_h` at most; for a `room` as
+    /// [`request_preview_in`](Self::request_preview_in)) into that memory,
+    /// so that it plays at full rate.
+    pub fn build_ram_preview(&self, range: TimeRange, max_w: u32, max_h: u32, room: (u32, u32)) {
         let s = &self.project.settings;
         let (w, h) = preview_size(s, max_w, max_h);
         let rate = s.frame_rate;
@@ -1312,7 +1350,7 @@ impl Engine {
             self.preview_generation(),
             times,
             (w, h),
-            self.drawing(),
+            self.drawing(room),
         );
     }
 

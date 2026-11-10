@@ -5,7 +5,8 @@
 //! handling). Its binary is then switched off until BananaV starts again
 //! (what crashed may have left it broken: its other calls answer
 //! `kOfxStatFailed`), and the crash is kept for the interface to tell
-//! ([`take_crashes`]). Elsewhere the calls go straight in.
+//! ([`take_crashes`]). On macOS the same, through `bv_apple::guard`'s
+//! signal handlers. Elsewhere the calls go straight in.
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
@@ -50,7 +51,7 @@ pub(crate) fn running() -> Option<Arc<Binary>> {
     RUNNING.with_borrow(|r| r.last().cloned())
 }
 
-#[cfg(bv_ofx_guard)]
+#[cfg(all(bv_ofx_guard, windows))]
 unsafe extern "C" {
     fn bv_ofx_guarded_entry(
         f: OfxPluginEntryPoint,
@@ -69,6 +70,56 @@ unsafe extern "C" {
         address: *mut *mut c_void,
     ) -> std::ffi::c_ulong;
 }
+
+/// macOS: the guard's calls as Windows' `guard.c` has them, through
+/// `bv_apple::guard` (the bodies hold nothing to drop).
+#[cfg(all(bv_ofx_guard, target_os = "macos"))]
+mod mac {
+    use std::ffi::{c_uint, c_ulong, c_void};
+
+    use bv_ofx_sys::*;
+
+    fn code(outcome: Result<(), (u32, *mut c_void)>, address: *mut *mut c_void) -> c_ulong {
+        match outcome {
+            Ok(()) => 0,
+            Err((signal, at)) => {
+                // SAFETY: the caller's place for the address.
+                unsafe { *address = at };
+                c_ulong::from(signal)
+            }
+        }
+    }
+
+    pub(super) unsafe fn bv_ofx_guarded_entry(
+        f: OfxPluginEntryPoint,
+        action: *const std::ffi::c_char,
+        handle: *const c_void,
+        in_args: OfxPropertySetHandle,
+        out_args: OfxPropertySetHandle,
+        status: *mut OfxStatus,
+        address: *mut *mut c_void,
+    ) -> c_ulong {
+        // SAFETY: as the guard's caller promises.
+        let outcome =
+            unsafe { bv_apple::guard::run(&mut || *status = f(action, handle, in_args, out_args)) };
+        code(outcome, address)
+    }
+
+    pub(super) unsafe fn bv_ofx_guarded_thread(
+        f: OfxThreadFunctionV1,
+        index: c_uint,
+        max: c_uint,
+        arg: *mut c_void,
+        address: *mut *mut c_void,
+    ) -> c_ulong {
+        // SAFETY: as the guard's caller promises.
+        let outcome = unsafe { bv_apple::guard::run(&mut || f(index, max, arg)) };
+        code(outcome, address)
+    }
+}
+
+#[cfg(all(bv_ofx_guard, target_os = "macos"))]
+use mac::{bv_ofx_guarded_entry, bv_ofx_guarded_thread};
 
 /// Runs `binary`'s entry point `f` for `action`: its status, or
 /// `kOfxStatFailed` when the binary is switched off or crashes now.
@@ -217,7 +268,12 @@ fn place(address: *mut c_void) -> String {
     format!("{file}+{:#x}", address as usize - module as usize)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn place(address: *mut c_void) -> String {
+    bv_apple::guard::place(address as usize)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn place(address: *mut c_void) -> String {
     format!("{address:p}")
 }

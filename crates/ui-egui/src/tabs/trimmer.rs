@@ -1246,12 +1246,9 @@ fn media_area(
         };
         let sel = active(st, show, still);
         // An end of the selection grabbed: it alone moves.
-        let end_at = origin.zip(sel).and_then(|(o, r)| {
-            [(false, span.x(r.start)), (true, span.x(r.end()))]
-                .into_iter()
-                .find(|(_, x)| (o.x - x).abs() <= 4.0)
-                .map(|(end, _)| end)
-        });
+        let end_at = origin
+            .zip(sel)
+            .and_then(|(o, r)| selection_end_at(o.x, (span.x(r.start), span.x(r.end()))));
         match (origin.filter(|_| across), end_at) {
             (Some(_), Some(end)) => st.point_drag = Some(end),
             (Some(o), None) => st.selecting = Some(time_at(o.x)),
@@ -1289,6 +1286,19 @@ fn media_area(
         st.selecting = None;
         st.point_drag = None;
     }
+    // An end of the selection under the pointer, or dragged: ↔, as VEGAS's
+    // time selection's edges.
+    let on_end = st.point_drag.is_some()
+        || (st.selecting.is_none()
+            && resp
+                .hover_pos()
+                .zip(active(st, show, still))
+                .is_some_and(|(p, r)| {
+                    selection_end_at(p.x, (span.x(r.start), span.x(r.end()))).is_some()
+                }));
+    if on_end {
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::ResizeEw);
+    }
     if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
@@ -1321,6 +1331,15 @@ fn media_area(
         }
     });
     ops
+}
+
+/// The end of the selection whose start and end are at `ends` (across)
+/// within reach of `x`: whether it is its end (else its start).
+fn selection_end_at(x: f32, ends: (f32, f32)) -> Option<bool> {
+    [(false, ends.0), (true, ends.1)]
+        .into_iter()
+        .find(|(_, e)| (x - e).abs() <= 4.0)
+        .map(|(end, _)| end)
 }
 
 /// The loop bar: the loop region (its handles dragged, the region moved, a
@@ -1438,6 +1457,11 @@ fn loop_strip(
             st.marker_drag = None;
             st.loop_drag = None;
         }
+    }
+    // The bar of markers and the loop region, as VEGAS's: the arrow with
+    // ↔ over it and while something on it is dragged.
+    if resp.hovered() || resp.dragged() {
+        crate::cursors::set(ui.ctx(), crate::cursors::Cursor::ArrowLeftRight);
     }
     if resp.clicked()
         && let Some(p) = pointer
@@ -4027,5 +4051,16 @@ mod tests {
             channel_pairs(6),
             ["Channels 1/2", "Channels 3/4", "Channels 5/6"]
         );
+    }
+
+    /// The selection's ends within 4 points of the pointer: where its
+    /// arrows show and a drag moves that end alone.
+    #[test]
+    fn the_selection_s_ends_are_taken_near_them() {
+        let ends = (100.0, 180.0);
+        assert_eq!(selection_end_at(97.0, ends), Some(false));
+        assert_eq!(selection_end_at(184.0, ends), Some(true));
+        assert_eq!(selection_end_at(140.0, ends), None);
+        assert_eq!(selection_end_at(95.0, ends), None);
     }
 }

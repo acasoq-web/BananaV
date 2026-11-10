@@ -640,12 +640,16 @@ pub(crate) fn card(
     Some((wgsl, f))
 }
 
-/// The factory presets: the collection's transitions, as VEGAS lists
-/// them.
+/// The factory presets: the transition at its defaults ("(Default)",
+/// first as in VEGAS's list), then the collection's transitions, as VEGAS
+/// lists them.
 pub(crate) fn presets() -> Vec<Preset> {
-    presets::PRESETS
-        .iter()
-        .map(|p| {
+    let defaults = Preset {
+        name: "(Default)",
+        values: Vec::new(),
+    };
+    std::iter::once(defaults)
+        .chain(presets::PRESETS.iter().map(|p| {
             let mut values = vec![("GLSLString", PresetValue::Text(p.code.to_string()))];
             for &(name, value) in p.values {
                 let v = if name.ends_with("Name") {
@@ -668,7 +672,7 @@ pub(crate) fn presets() -> Vec<Preset> {
                 name: p.name,
                 values,
             }
-        })
+        }))
         .collect()
 }
 

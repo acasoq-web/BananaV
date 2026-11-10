@@ -8,6 +8,11 @@
 //! - the studio effects: a program of normalized values, big-endian
 //!   ([`STUDIO`]);
 //! - the Modern Equalizer: its state, as text ([`modern_eq`]).
+//!
+//! Any other VST 3 plug-in comes as BananaV's VST 3 effect with its states
+//! ([`vst3`]), any other VST 2 plug-in as BananaV's VST 2 effect with its
+//! program ([`vst2`]): its class's family and its kind byte tell one; the
+//! settings are the plug-in's own, as it wrote them.
 
 use super::riff::Guid;
 use crate::fx::{Effect, EffectKind};
@@ -1096,6 +1101,109 @@ fn modern_eq(settings: &[u8]) -> Effect {
         e.enabled = false;
     }
     e
+}
+
+/// The last six bytes of the classes the other editor makes for VST
+/// plug-ins.
+const VST_FAMILY: [u8; 6] = [0x00, 0x07, 0xE9, 0x5D, 0x36, 0xFA];
+/// Their kind byte: 2 for a VST 2 plug-in, 3 for a VST 3 one.
+const VST3_BIT: u8 = 0x01;
+
+/// The bytes of the `N.letters` between `<tag>` and `</tag>` in `text`.
+fn tagged_state(text: &str, tag: &str) -> Option<Vec<u8>> {
+    let open = format!("<{tag}>");
+    let from = text.find(&open)? + open.len();
+    let rest = &text[from..];
+    let rest = &rest[..rest.find(&format!("</{tag}>"))?];
+    let dot = rest.find('.')?;
+    let size: usize = rest[..dot].trim().parse().ok()?;
+    Some(state_bytes(size, &rest.as_bytes()[dot + 1..]))
+}
+
+/// A VST 3 plug-in of a chain: BananaV's VST 3 effect with its states —
+/// the component's and the controller's, kept as text of 6-bit letters
+/// in the settings (`VC2!`, the text's size, the text) — its
+/// plug-in to be found among those installed by what its class says
+/// ([`crate::VstWanted`]). `None` for a class of no VST 3 plug-in.
+pub(super) fn vst3(class: Guid, name: &str, settings: &[u8]) -> Option<Effect> {
+    let g = class.0;
+    if g[10..16] != VST_FAMILY || g[8] & VST3_BIT == 0 {
+        return None;
+    }
+    let wanted = wanted(class);
+    // `VC2!`, the text's size, the text: first (the chain's record keeps
+    // the program before them), or after the program.
+    let mark = [0, 4]
+        .into_iter()
+        .find(|&at| settings.get(at..at + 4) == Some(b"VC2!".as_slice()));
+    let text = mark
+        .and_then(|at| {
+            let size = u32::from_le_bytes(settings.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+            let from = at + 8;
+            let body = settings.get(from..from.checked_add(size)?.min(settings.len()))?;
+            Some(String::from_utf8_lossy(body).into_owned())
+        })
+        .unwrap_or_default();
+    Some(Effect::vst(crate::fx::VstFx {
+        name: shown_name(name),
+        state: tagged_state(&text, "IComponent").unwrap_or_default(),
+        controller_state: tagged_state(&text, "IEditController").unwrap_or_default(),
+        wanted: Some(wanted),
+        ..crate::fx::VstFx::default()
+    }))
+}
+
+/// A plug-in's name as listed there: before the kind's note
+/// ("Name\t(VST3, 64 Bit)").
+fn shown_name(name: &str) -> String {
+    let shown = name.split('\t').next().unwrap_or(name).trim();
+    shown
+        .strip_suffix(")")
+        .and_then(|s| s.rsplit_once(" (VST"))
+        .map_or(shown, |(n, _)| n.trim())
+        .to_string()
+}
+
+/// What the class says of a VST plug-in: the number it makes, the checks
+/// of the plug-in's file's name and of its name.
+fn wanted(class: Guid) -> crate::VstWanted {
+    let g = class.0;
+    crate::VstWanted {
+        number: u32::from_le_bytes([g[0], g[1], g[2], g[3]]),
+        file: u16::from_le_bytes([g[4], g[5]]),
+        name: u16::from_le_bytes([g[6], g[7]]),
+    }
+}
+
+/// A VST 2 plug-in of a chain that BananaV has no effect of its own for:
+/// BananaV's VST 2 effect with its program — the preset file the settings
+/// keep ("CcnK"…) —, its plug-in to be found among those installed by its
+/// own number ([`crate::VstWanted`]). `None` for a class of no VST 2
+/// plug-in.
+pub(super) fn vst2(class: Guid, name: &str, settings: &[u8]) -> Option<Effect> {
+    let g = class.0;
+    if g[10..16] != VST_FAMILY || g[8] & VST3_BIT != 0 {
+        return None;
+    }
+    // The preset file: first, or after the program.
+    let state = [0, 4]
+        .into_iter()
+        .find(|&at| settings.get(at..at + 4) == Some(b"CcnK".as_slice()))
+        .and_then(|at| {
+            let size = i32::from_be_bytes(settings.get(at + 4..at + 8)?.try_into().ok()?);
+            let end = at
+                .checked_add(8)?
+                .checked_add(usize::try_from(size).ok()?)?;
+            Some(settings.get(at..end.min(settings.len()))?.to_vec())
+        })
+        .unwrap_or_default();
+    Some(Effect::vst(crate::fx::VstFx {
+        format: crate::fx::VstFormat::Vst2,
+        name: shown_name(name),
+        state,
+        wanted: Some(wanted(class)),
+        ..crate::fx::VstFx::default()
+    }))
 }
 
 /// BananaV's effect for an audio plug-in of a chain, its settings (from

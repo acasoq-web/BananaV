@@ -1256,7 +1256,8 @@ impl BananaApp {
         }
         self.stop();
         let (w, h) = self.preview.size();
-        self.engine.build_ram_preview(range, w, h);
+        self.engine
+            .build_ram_preview(range, w, h, self.preview.room());
         self.building_ram_preview = true;
     }
 

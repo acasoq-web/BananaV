@@ -1,7 +1,8 @@
 //! What a program library (a plug-in) says about itself without running
 //! it: the processor it is for and the functions it exports, read from its
-//! headers (PE on Windows, ELF on Linux), and the texts of its version
-//! resource (who made it, what it is; Windows libraries carry one).
+//! headers (PE on Windows, ELF on Linux, Mach-O on macOS — `bv_apple::
+//! macho`), and the texts of its version resource (who made it, what it
+//! is; Windows libraries carry one, a macOS bundle its Info.plist).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -19,7 +20,7 @@ pub struct Library {
 }
 
 /// The headers of the library at `path`; `None` when it is not one (not a
-/// PE or ELF file, or unreadable).
+/// PE, ELF or Mach-O file, or unreadable).
 pub fn read_library(path: &Path) -> Option<Library> {
     let mut magic = [0u8; 4];
     std::fs::File::open(path)
@@ -28,6 +29,9 @@ pub fn read_library(path: &Path) -> Option<Library> {
         .ok()?;
     if &magic == b"\x7fELF" {
         return read_elf(path);
+    }
+    if let Some(slices) = bv_apple::macho::file_slices(path) {
+        return read_macho(path, &slices);
     }
     let mut f = std::fs::File::open(path).ok()?;
     // `len` bytes from `pos`; with `exact` off, as many as there are.
@@ -119,6 +123,20 @@ pub fn read_library(path: &Path) -> Option<Library> {
 /// An ELF shared library's headers: its processor and the functions its
 /// dynamic symbol table defines (64-bit little-endian files; Linux
 /// plug-ins).
+/// A Mach-O library (a universal one holds an image per processor): native
+/// when it has this processor's image on macOS; its exports, that image's
+/// (else its first's).
+fn read_macho(path: &Path, slices: &[bv_apple::macho::Slice]) -> Option<Library> {
+    let mine = bv_apple::macho::native(slices).filter(|_| cfg!(target_os = "macos"));
+    let slice = mine.or(slices.first())?;
+    let mut f = std::fs::File::open(path).ok()?;
+    Some(Library {
+        native: mine.is_some(),
+        bits64: slice.bits64,
+        exports: bv_apple::macho::exports(&mut f, slice).unwrap_or_default(),
+    })
+}
+
 fn read_elf(path: &Path) -> Option<Library> {
     let data = std::fs::read(path).ok()?;
     let u16_at = |i: usize| Some(u16::from_le_bytes(data.get(i..i + 2)?.try_into().ok()?));
@@ -199,9 +217,39 @@ pub struct VersionTexts {
 }
 
 /// The texts of the version resource of the file at `path` (Windows
-/// programs and libraries carry one); `None` without one.
+/// programs and libraries carry one; on macOS the Info.plist of the bundle
+/// `path` is, or is in); `None` without one.
 pub fn version_texts(path: &Path) -> Option<VersionTexts> {
     imp::version_texts(path)
+}
+
+/// Who made something, from its copyright line ("Copyright © 2023 Acme
+/// Audio. All rights reserved." gives "Acme Audio").
+pub fn company_of_copyright(line: &str) -> Option<String> {
+    let mut s = line.trim();
+    for cut in ["All rights reserved", "All Rights Reserved"] {
+        if let Some(i) = s.find(cut) {
+            s = &s[..i];
+        }
+    }
+    let words: Vec<&str> = s
+        .split_whitespace()
+        .filter(|w| {
+            let bare = w.trim_matches(|c: char| ",.;:()".contains(c));
+            let year = bare
+                .split(['-', '\u{2013}'])
+                .all(|p| p.len() == 4 && p.chars().all(|c| c.is_ascii_digit()));
+            !(bare.is_empty()
+                || year
+                || bare.eq_ignore_ascii_case("copyright")
+                || bare == "\u{a9}"
+                || bare.eq_ignore_ascii_case("(c)")
+                || bare.eq_ignore_ascii_case("c"))
+        })
+        .collect();
+    let name = words.join(" ");
+    let name = name.trim_matches(|c: char| c == ',' || c == '.' || c.is_whitespace());
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 #[cfg(windows)]
@@ -294,10 +342,56 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the bundle's Info.plist (the bundle `path` is, or the one it is
+/// in: `Name.vst3/Contents/MacOS/Name`).
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::path::Path;
+
+    pub fn version_texts(path: &Path) -> Option<super::VersionTexts> {
+        let bundle = path
+            .ancestors()
+            .find(|p| p.is_dir() && p.join("Contents").join("Info.plist").is_file())?;
+        let b = bv_apple::Bundle::open(bundle)?;
+        let name = b
+            .info("CFBundleDisplayName")
+            .or_else(|| b.info("CFBundleName"));
+        Some(super::VersionTexts {
+            company: b
+                .info("NSHumanReadableCopyright")
+                .and_then(|c| super::company_of_copyright(&c)),
+            description: b.info("CFBundleGetInfoString").or_else(|| name.clone()),
+            product: name,
+            version: b
+                .info("CFBundleShortVersionString")
+                .or_else(|| b.info("CFBundleVersion")),
+        })
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     pub fn version_texts(_path: &std::path::Path) -> Option<super::VersionTexts> {
         None
+    }
+}
+
+#[cfg(test)]
+mod copyright_tests {
+    use super::company_of_copyright;
+
+    #[test]
+    fn a_copyright_line_names_its_company() {
+        assert_eq!(
+            company_of_copyright("Copyright \u{a9} 2023 Acme Audio. All rights reserved.")
+                .as_deref(),
+            Some("Acme Audio")
+        );
+        assert_eq!(
+            company_of_copyright("(c) 2019-2024, Sound Toys GmbH").as_deref(),
+            Some("Sound Toys GmbH")
+        );
+        assert_eq!(company_of_copyright("Copyright 2020").as_deref(), None);
     }
 }
 

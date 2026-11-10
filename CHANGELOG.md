@@ -4,6 +4,361 @@ What changed in each public build of BananaV. The
 [Releases page](https://github.com/acasoq-web/BananaV/releases) has the
 downloads, and each release's notes say how to install it.
 
+## 0.3.0 — 2026-11-10
+
+For Windows and Linux (x64 and ARM64) and, experimental, macOS (one app
+for Apple's chips and Intel).
+
+### Highlights
+
+- **macOS, experimental.** One app for Apple's chips (M1 and later) and
+  Intel Macs, macOS 11 and later, with video on the Mac's media engine,
+  the interface on Metal and plug-ins from the Mac's folders. It is built
+  and started on GitHub's Macs but not yet tried by us on our own: please
+  tell us what works and what does not.
+- **Smooth playback, 4K included.** A 4K 59.94 project at Best (Full)
+  plays every frame, the interface taking a third of the time it took;
+  heavy 4K parts no longer stall when they start, and picture and sound
+  start together after a jump.
+- **VST 2 and VST 3 plug-ins**, their editors inside the FX window,
+  32-bit ones in a bridge of their own, each tried in a process of its own
+  so that one that crashes never takes BananaV with it.
+- **Starts that used to end early** (a graphics driver failing on
+  DirectX 12) now switch to Vulkan or OpenGL by themselves.
+- **Transform on the preview**: drag the picture to move, resize and turn
+  it, with a Transform window beside the Explorer holding every control
+  of the event.
+- **Windows dock where you drop them**, as in other editors, or float in
+  windows of their own on another monitor.
+- **Updates from within BananaV**, and **18 more interface languages**,
+  partly translated.
+
+### macOS (experimental)
+
+- Experimental: the app is built and its start checked on GitHub's Macs,
+  but we have not tried it on Macs of our own yet. Things may be missing or
+  wrong; tell us on Discord or in GitHub's issues.
+- BananaV runs on macOS 11 and later, one app for Apple's chips (M1 and
+  later) and Intel Macs: a disk image to drag into Applications.
+- Video is decoded and encoded on the Mac's media engine (H.264 and HEVC,
+  "Apple VideoToolbox" in the Render window), the interface drawn with
+  Metal, sound through Core Audio.
+- The Command key does what Ctrl does on the other systems (Cmd+S saves,
+  Cmd+click picks more), a Control-click is a right click, and the menus
+  and tooltips say Cmd and Option. Quit (Cmd+Q, the Dock's) asks about
+  unsaved changes first; projects open from Finder.
+- VST 3, VST 2 and OpenFX plug-ins from the Mac's plug-in folders, their
+  editors inside the FX window; a plug-in that crashes is switched off
+  without taking BananaV with it. Intel-only plug-ins run with BananaV
+  opened through Rosetta.
+- The eyedropper uses the system's color sampler; the render's progress
+  shows on the Dock's icon.
+
+### Playback
+
+- Smooth playback again, 4K included: the preview kept up at 40 frames a
+  second where it played 60 before (a 4K trailer at Best (Full)) — the
+  interface redid work at every frame (the LUT looks' tables written out,
+  each preview frame converted pixel by pixel) and video thumbnails
+  decoded during playback. Now a 4K 59.94 project at Best (Full) plays
+  every frame, the interface taking a third of the time it took. Frames
+  come back at the size the window shows them (drawn at full size, their
+  effects unchanged; reduced on the graphics card), their memory used
+  again, thumbnails wait while playing or rendering, and a second drawing
+  thread is only tried where it helps: no more stalls of a second when a
+  heavy part of a 4K long-GOP recording starts playing.
+- Picture and sound start together: when the preview still decodes the
+  first frame (a 4K recording with keyframes seconds apart takes a moment
+  after a jump), the sound waits for it instead of playing over a frozen
+  picture. Jumps forward within the same group of pictures go on decoding
+  instead of starting again at the keyframe before (MP4 and MOV).
+
+### VST plug-ins
+
+- VST 2 plug-ins work too, through BananaV's own compatibility (written
+  without Steinberg's VST 2 kit): they are tried in a process of their own
+  as VST 3 ones are, offered in the Plug-In Chooser's VST folder, run in the
+  mixer with automation, the timeline's place and tempo, their programs in
+  the FX window's preset list, `.fxp` and `.fxb` preset files, and their own
+  windows.
+- A VST plug-in's own editor shows inside the FX window (Windows):
+  under the chain and the preset bar, the window as big as
+  the editor; a 32-bit plug-in's too, from its bridge. The preset bar has
+  the plug-in's programs and Open VST Preset, Save VST Preset As, Open VST
+  Bank and Save VST Bank As; the chain's button says its kind and width
+  ("(VST3, 64 Bit)").
+- 32-bit plug-ins, VST 2 and VST 3, run in BananaV's 32-bit bridge, a
+  process of their own (Preferences › VST Effects: "Enable support for
+  32-bit VST plug-ins", on by default): a crash or a hang there ends the
+  bridge only, the sound goes through and BananaV says so. Their windows
+  open from the bridge. 64-bit plug-ins run in BananaV itself, as before.
+- Projects of the other editor bring their other VST 2 effects with their
+  programs, found among the plug-ins installed here by their own number.
+- Each VST 3 plug-in is tried in a BananaV process of its own when it is
+  found — loaded, set up and given a block of silence — so one that
+  crashes or hangs costs that process, never BananaV; several are tried
+  at once, and what they said is kept until their files change, the known
+  ones listed at once. Plug-ins that failed are listed in Preferences ›
+  VST Effects with why, and never offered.
+- Preferences › VST Effects: the effects' boxes work (an effect left out
+  is no longer offered, wherever it is installed), the list says how the
+  search goes and how many failed, and Refresh looks at every plug-in
+  again. Effects with the same name are told apart by their file's name.
+- A plug-in that crashes while BananaV runs is turned off until BananaV
+  restarts, BananaV says so, and the sound goes through it untouched.
+- The FX window's preset list has the plug-in's own programs, then the
+  presets saved in BananaV; Save VST Preset… and Open VST Preset… keep a
+  plug-in's settings in the standard preset file (`.vstpreset`), in the
+  standard folder other programs look in.
+- Plug-ins see where the timeline plays, its tempo and its meter
+  (tempo-synced delays and LFOs follow the project), and FX automation
+  reaches them sample by sample instead of once a block.
+- A plug-in is kept when playback jumps elsewhere (its sound cleared): no
+  wait while it starts again. One that has been silent in and out for
+  longer than its tail sleeps until sound comes again, sparing the
+  processor.
+- Projects of the other editor bring their VST 3 effects with their
+  settings: each is found among the plug-ins installed here (by the
+  number its class makes and its name's and file's checks); those not
+  installed are counted when the project opens, their sound going
+  through untouched.
+
+### Starting
+
+- A start that closes before BananaV settles (a graphics driver failing
+  on DirectX 12) makes the next one draw through Vulkan, then OpenGL; the
+  one that works is kept. On Windows BananaV starts again by itself on the
+  next one. `Crash.log` in the logs folder says what happened.
+
+### Transform
+
+- Transform mode (the button by Preview Quality): the event at the cursor
+  gets a box on the picture — drag inside to move it, a corner or a side
+  to resize it (Alt: about its middle), just outside a corner to turn it.
+  It writes the event's Pan/Crop (the keyframe at the cursor when it has
+  keyframes).
+- The Transform window opens beside the Explorer, Project Media and the
+  other browsers, with every control of the event: Motion (position,
+  scale — uniform or not —, rotation, crop, flips, anchor point, the
+  Pan/Crop box, keyframe curve and smoothness, the source settings),
+  Opacity with the fades, Time (playback rate, undersample, loop, hold
+  last frame, reverse) and its audio's volume, channels and pitch; a
+  stopwatch animates the framing, arrows and a diamond go to, add and
+  remove keyframes, and the keyframes sit on a strip of the event's time
+  where they drag. Reset buttons on every row.
+
+### Workspace
+
+- Interface brightness (Options › Preferences › Display): the interface
+  type's greys lighter or darker, up to 40 %, shown as the slider moves.
+- Windows dock as in Premiere and Resolve: dragging a tab lights up the
+  room it would take (the middle of a window: a tab beside it; a side: a
+  window of its own there). A tab's menu has Float in Its Own Window: a
+  window of the system's own that goes to another monitor, with Dock to
+  put it back; BananaV opens with them as they were.
+
+### Updates
+
+- BananaV looks for a newer version as it starts and asks: Update, Cancel
+  or Don't Show Again (Options › Preferences › General turns the check
+  back on). Help › Check for Software Updates… looks at any time. On
+  Windows, Update downloads the installer, checks it against GitHub's
+  checksum and runs it as BananaV closes; elsewhere it opens the download
+  page.
+
+### Languages and letters
+
+- Ten more partly translated languages: Turkish, Traditional Chinese,
+  Spanish (Latin America), Thai, Ukrainian, Italian, Czech, Hungarian,
+  Portuguese (Portugal) and Swedish, as the eight before them; Thai and
+  Traditional Chinese letters come from the computer's fonts.
+- Eight more interface languages, partly translated: Simplified Chinese,
+  Russian, Spanish (Spain), German, Japanese, French, Polish and Korean.
+  The menus, the main windows, the timeline and the Render window are
+  translated; the rest shows in English. Preferences and the welcome
+  screen mark them "partial translation".
+- Chinese, Japanese, Korean and other scripts no longer show as boxes:
+  the interface (captions, names, text boxes) draws them with the
+  computer's fonts, and Titles & Text draws a letter its font lacks from
+  a font that has it (Japanese text with Japanese shapes, Korean with
+  Korean ones).
+
+### Media generators
+
+- Checkerboard, Color Gradient, Noise Texture, Solid Color and Test
+  Pattern were rebuilt: in 8-bit projects their pictures match, pixel for
+  pixel, reference renders of the same settings (125 frames), and they
+  draw on the graphics card from the same tables (Noise Texture and Color
+  Gradient a level apart at most here and there).
+- Color Gradient has three shapes (linear, elliptical, rectangular) and up
+  to nine color points on its angle's axis, with eighteen presets; Test
+  Pattern its nine patterns as whole bytes; Noise Texture its seven styles
+  and twenty presets.
+- Credit Roll has sixteen ways in and out, four ways to group a timed
+  sequence's lines, a connector between a dual line's sides and each
+  side's snapping, and eight presets; sizes count points for a frame 480
+  lines tall and the room above and below lines is a part of the frame's
+  height (older projects are converted). Its lines fall where reference
+  renders put them.
+- Titles & Text can crop its background to the text (a box with rounded
+  corners).
+- Titles & Text's panel has the text box's bar above it (typeface, size,
+  bold, italic and justification) and an Animation list; its presets are
+  the plain title, Title01 to Title25, twenty-five animated ones (Bounce,
+  Earthquake, Fly In, Slide Up, Twist In…), Placeholder and Subtitles.
+  The animated presets play under the pointer in the Media Generators
+  window.
+- Titles & Text's fifty animations play over the generated media's
+  length: the text, its lines, words or letters fly, drop, bounce, pop,
+  turn, scroll along a path, fade, blur and glow in and out, one after
+  another.
+- Titles & Text counts its settings in parts of the frame, the same at
+  any frame size: sizes in points of a 200th of the frame's height (a new
+  title is white 48-point Verdana, "Sample Text"), tracking in twentieths
+  of its height, the outline a stroke along the letters' edges (half of it
+  outside them) and the shadow's offset and blur in tenths of the frame's
+  width, down and to the right at first. Older projects' titles keep
+  their look: their values are converted when they open.
+- Titles & Text's lines are as far apart as their fonts ask (their line
+  gap counted), letters land half a pixel nearer where reference renders
+  show them, and letters of a see-through color cut the background out,
+  showing what is below. Text running past the frame's right edge no
+  longer leaves a streak on the next row of pixels.
+- Color Gradient's panel has a Control Points box: the gradient over the
+  frame with its center and numbered points to click and drag, a bar that
+  adds, deletes, picks and reorders points, and the picked point's own
+  settings below it.
+- Credit Roll's panel keeps the credits above two tabs, Properties and
+  Styles; Styles shows one line style at a time (Header, Single Item or
+  Dual Item), picked by name.
+- Media an older built-in generator made (solid colors, color bars,
+  checkerboards, gradients) open as today's Solid Color, Test Pattern,
+  Checkerboard and Color Gradient: their panels, presets and place in a
+  `.veg`. The demo project and Custom Color… make them too.
+- Text set in Arial, and in other families with narrow faces, no longer
+  comes out in the narrow face; lines of text are laid out on their fonts'
+  cell heights.
+- Plug-in generators draw in the values the project composites on: in
+  8-bit projects a 50 % gray Solid Color shows 128.
+- Reduce Interlace Flicker blurs only in interlaced projects.
+
+### Effects
+
+- The Plug-In Chooser has a search field, and letters typed over its list
+  pick the plug-in they begin, as in a file manager.
+- In the Pan/Crop window, the arrow keys move the box once it is clicked
+  (a pixel of the media, ten with Shift).
+- Transitions follow the measured model: with a transition the fade's
+  curve counts for nothing (the progress is the time through the fade, or
+  the transition progress envelope's value), and at an event's end the
+  event goes out as the transition's first picture.
+- A crossfade without a transition sums the two events, the coming one by
+  its fade-in curve and the going one by that fade-in's reciprocal curve,
+  on the processor and on the graphics card.
+- One transition progress envelope covers both ends of an event.
+- OpenFX plug-ins can put several controls on one line (OpenFX's
+  no-new-line layout hint) and show their pages as tabs (BananaV's
+  `BananaVParamPropTab` extension).
+
+### Timeline
+
+- The loop region is clearer: its bar in a grey of the interface's own
+  (lighter under the pointer), the region a lighter strip between yellow
+  handles and, while the time selection shows, yellow lines with a dark
+  edge down to the timeline's bottom, the tracks lighter within it and the
+  room under them blue. Clicking elsewhere on the timeline lets go of the
+  time selection — the blue area and the lines go — while the loop region
+  stays in its bar for Loop Playback. A double-click on the bar takes the
+  loop region away (with none, it selects the whole project), at the
+  system's double-click speed; so does a right-click on it.
+- Options › Envelope Appearance… (also in an envelope's shortcut menu):
+  the envelopes' line width, how near a click takes a line or a point,
+  the points' size and shape (diamonds or squares), with a live sample to
+  try them on.
+- Two double-clicks in quick succession on an envelope add two points (the
+  second was lost); double-clicks follow the system's speed everywhere.
+- Events dragged below the tracks each go to a new track: the picked ones
+  with the one under the pointer, one new track for each track they were
+  on, in one undo.
+- Media let go below the tracks goes on new tracks, even when there are
+  tracks it could go on.
+- A transition let go on the second half of a video event goes out with
+  it, over its fade-out (or becomes the crossfade of the event right after
+  it). Its label, and those over fade-ins with a transition, has the
+  Transition Properties button, as crossfades' labels do.
+- The red box of an event out of sync moves below the transitions'
+  labels instead of hiding under them.
+- Thumbnails no longer show another video's picture after they are made
+  again (files changed on disk, proxies).
+- About and the window's title give the version ("Untitled — BananaV
+  0.3.0").
+
+### Envelopes and internal preferences
+
+- Shift and a drag on a track envelope's line paint it: each place the
+  pointer goes puts a point and takes away the ones it passes over (going
+  back paints over them too); the stroke starts where it was pressed with
+  the value the envelope had there. Let go, it is thinned to its ends, its
+  peaks and valleys and the plateaus that matter, joined by smooth curves
+  (Preferences › External Control & Automation: "Smooth and thin
+  automation data after recording or drawing"). With Ctrl or Alt held too,
+  Shift puts a point to drag instead. Over an envelope the pointer stays
+  the arrow until it is pressed.
+- Envelopes' values follow the lane's height a pixel in from its top and
+  bottom.
+- A video track's Level slider: Ctrl (or the right button) moves it in
+  fine steps of a tenth of a percent, the pointer kept on the knob; the
+  wheel moves it a percent a notch (a tenth with Ctrl); Shift no longer
+  changes it. Its undo is named Track Overlay Level Change.
+- Options opened with Shift held has Internal… at its end: every
+  preference of BananaV in one list (Name, Value, Default), changed by
+  typing; the search box keeps the internal ones (Enable Envelope
+  Painting, Thinning gap threshold, Dim Attenuation, Minimum Video Render
+  Threads, Number of Control Plug-ins allowed). Values that do not read or
+  fall outside their range are left as they were.
+- New internal preferences: Dim Output's cut, the range of Video's
+  rendering threads (now up to 48 by default), and how many control
+  surfaces can be added.
+
+### Pointers
+
+- BananaV draws its own mouse pointers, about ninety, sharp at any screen
+  scale and shown by the system as its own (in dialogs too): trimming an
+  event's start or end, stretching its time, slip-trimming, slipping and
+  sliding it, sliding a crossfade, trimming the adjacent event, splitting
+  and trimming, fades, an event's level line and snap offset, envelopes'
+  lines and points (and painting them), scrubbing, the Envelope, Selection
+  and Zoom tools, the timeline's dividers, scroll bars, markers and
+  regions, Pan/Crop's and Track Motion's handles (turning with the frame),
+  masks' pens, color droppers, the wheel's scrolling and more.
+- The pointer over an event tells what pressing there does with the keys
+  held, and the press does it: Ctrl on an edge stretches the event's time,
+  Alt slips (on an edge, slip-trims), Ctrl+Alt slides (on an edge, trims
+  the adjacent event; on a crossfade, slides it), Ctrl+Alt+Shift splits
+  and trims — in every edit mode, the keys now working in the Slip, Slide,
+  Stretch and Split Trim modes too. Without keys, each mode does its own
+  on every part of an event: Slip's edges slip-trim, Slide's trim the
+  adjacent event, Stretch's middle moves the event, Split Trim's splits and
+  trims while dragged. Tooltips name what dragging does (Time Stretch, Slip
+  Trim, Trim Adjacent, Split Trim, Slide Crossfade).
+- The time selection's edges can be dragged over the tracks; a scrub
+  (Ctrl+drag, by the edit cursor too) leaves a mark where it began; the
+  wheel's scrolling marks where it began and points where the view runs.
+- In the Pan/Crop window the Zoom tool's right button zooms out by half,
+  and with the normal tool a drag far from the box moves the view.
+- What is dragged over a window that takes nothing shows it can't be let
+  go there.
+
+### `.veg` projects
+
+- Generated media come in and go out: all seven generators with their
+  settings and keyframes, their length, frame size, pixel aspect, fields,
+  alpha and rotation (Color Gradient's and Credit Roll's own records, and
+  Titles & Text's rich text, too). A generated media with a length of its
+  own times its animation by it.
+- Transitions at events' ends, the fades' reciprocal curves and the
+  transition progress envelopes of both ends come in and go out.
+
 ## 0.2.0 — 2026-11-04
 
 For Windows and Linux (x64 and ARM64), and the first with an installer for

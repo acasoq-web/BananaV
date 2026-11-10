@@ -7,9 +7,8 @@
 //! the alpha's slider, and an eyedropper that takes a color from anywhere
 //! on the screen.
 
-use crate::egui::{
-    self, Color32, CursorIcon, Mesh, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2,
-};
+use crate::cursors::{self, Cursor};
+use crate::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use crate::theme;
 
 /// How a color's three numbers are counted.
@@ -59,7 +58,7 @@ impl Model {
     fn decimals(self) -> [(usize, usize); 3] {
         match self {
             Model::Hsv | Model::Hsl => [(0, 0), (2, 1), (2, 1)],
-            Model::Rgb => [(3, 1); 3],
+            Model::Rgb => [(2, 1); 3],
             Model::Lab => [(2, 1); 3],
         }
     }
@@ -344,6 +343,12 @@ pub fn picker(
             if eyedropper_button(ui, view.picking.is_some()).clicked() {
                 if view.picking.take().is_some() {
                     bv_platform::release_mouse();
+                } else if bv_platform::SYSTEM_COLOR_SAMPLER {
+                    // The system's sampler (macOS): its magnifier takes the
+                    // click and the color.
+                    if bv_platform::start_color_sampler() {
+                        view.picking = Some(false);
+                    }
                 } else {
                     // Clicks anywhere come to this window until the pick.
                     if let Some(title) = ui.ctx().input(|i| i.viewport().title.clone()) {
@@ -519,7 +524,19 @@ fn alpha_bar_ui(
 /// there, when the click came.
 fn pick(ui: &mut Ui, view: &mut ColorView, id: egui::Id) -> Option<[f64; 3]> {
     let was_down = view.picking?;
-    ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    if bv_platform::SYSTEM_COLOR_SAMPLER {
+        let Some(picked) = bv_platform::take_sampled_color() else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+            return None;
+        };
+        view.picking = None;
+        let rgb = picked?.map(|v| v as f64 / 255.0);
+        view.numbers = None;
+        return Some(rgb);
+    }
+    // VEGAS's color picker's dropper.
+    cursors::set(ui.ctx(), Cursor::Dropper);
     let _ = id;
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         view.picking = None;

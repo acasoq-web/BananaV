@@ -1,22 +1,23 @@
 //! VEGAS's media generators as OpenFX generators written as tables of
-//! settings (as VEGAS's Help describes them, on [`crate::kit`]):
-//! Checkerboard, Color Gradient, Noise Texture and Test Pattern. Each
-//! works out every pixel from its place in the frame (0–1 across, 0–1
-//! down) and its settings ([`Kind::painter`]); colors are video's values,
-//! as Titles & Text's. Where VEGAS's control is a list of its own (Color
-//! Gradient's control points), a few fixed settings stand in for it;
-//! Noise Texture's styles and Test Pattern's patterns are BananaV's own.
+//! settings ([`crate::kit`], their parameters named as VEGAS's, so a
+//! `.veg`'s meet them): Checkerboard, Color Gradient, Noise Texture, Solid
+//! Color and Test Pattern. Each works its picture out as VEGAS's pictures
+//! have it — in an 8-bit project its bytes as VEGAS's 8-bit renders show
+//! them ([`checkerboard`], [`color_gradient`], [`noise_texture`],
+//! [`test_pattern`]) —, a pixel or a row at a time ([`Kind::painter`],
+//! [`Kind::row_painter`]), and the card draws it from the same tables
+//! ([`Kind::card_plan`]).
 #![allow(unsafe_code)]
 
-use std::f64::consts::PI;
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 use bv_ofx_sys::names::*;
 use bv_ofx_sys::*;
 
-use crate::kit::{Grid, Spec, Vals, define_all};
+use crate::kit::{Grid, Spec, Vals, define_all, define_generator};
 use crate::ofx::{Fx, Props, for_rows, is, suites};
 use crate::{Preset, PresetValue};
+use crate::{checkerboard, color_gradient, gradient_page, noise_texture, test_pattern};
 
 /// One of the generators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +32,7 @@ pub(crate) enum Kind {
 const CHECKERBOARD: &[Spec] = &[
     Spec::Group(c"tileDimensions", c"Tile dimensions"),
     Spec::Number(
-        c"tileWidth",
+        c"tileDimensionsWidth",
         c"Width",
         0.1,
         0.001,
@@ -39,7 +40,7 @@ const CHECKERBOARD: &[Spec] = &[
         c"A tile's width, a part of the frame's width.",
     ),
     Spec::Number(
-        c"tileHeight",
+        c"tileDimensionsHeight",
         c"Height",
         0.1,
         0.001,
@@ -47,7 +48,7 @@ const CHECKERBOARD: &[Spec] = &[
         c"A tile's height, a part of the frame's height (unless Square).",
     ),
     Spec::Toggle(
-        c"square",
+        c"tileDimensionsSquare",
         c"Square",
         true,
         c"The tiles square: the height follows the width.",
@@ -55,7 +56,7 @@ const CHECKERBOARD: &[Spec] = &[
     Spec::GroupEnd,
     Spec::Group(c"edgeBlending", c"Edge blending"),
     Spec::Number(
-        c"blendHorizontal",
+        c"edgeBlendingHorizontal",
         c"Horizontal",
         0.0,
         0.0,
@@ -63,7 +64,7 @@ const CHECKERBOARD: &[Spec] = &[
         c"The tiles' left and right edges blended: 1 across the whole tile.",
     ),
     Spec::Number(
-        c"blendVertical",
+        c"edgeBlendingVertical",
         c"Vertical",
         0.0,
         0.0,
@@ -71,7 +72,7 @@ const CHECKERBOARD: &[Spec] = &[
         c"The tiles' top and bottom edges blended (unless Proportional).",
     ),
     Spec::Toggle(
-        c"proportional",
+        c"edgeBlendingProportional",
         c"Proportional",
         true,
         c"The vertical blending follows the horizontal.",
@@ -91,7 +92,7 @@ const CHECKERBOARD: &[Spec] = &[
     ),
     Spec::Group(c"gridOffset", c"Grid offset"),
     Spec::Number(
-        c"offsetX",
+        c"gridOffsetX",
         c"X",
         0.0,
         0.0,
@@ -99,7 +100,7 @@ const CHECKERBOARD: &[Spec] = &[
         c"The grid moved across: 1 is the frame's width.",
     ),
     Spec::Number(
-        c"offsetY",
+        c"gridOffsetY",
         c"Y",
         0.0,
         0.0,
@@ -110,11 +111,17 @@ const CHECKERBOARD: &[Spec] = &[
 ];
 const COLOR_GRADIENT: &[Spec] = &[
     Spec::Choice(
-        c"type",
-        c"Type",
-        &[c"Linear", c"Elliptical", c"Rectangular", c"Angular"],
+        c"gradientType",
+        c"Gradient Type",
+        &[c"Linear", c"Elliptical", c"Rectangular"],
         0,
         c"The gradient's shape.",
+    ),
+    Spec::Angle(
+        c"aspectRatioAngle",
+        c"Aspect Ratio Angle",
+        0.0,
+        c"The angle of the line the control points lie on.",
     ),
     Spec::Point(
         c"center",
@@ -122,80 +129,144 @@ const COLOR_GRADIENT: &[Spec] = &[
         [0.5, 0.5],
         c"The gradient's center: 0, 0 is the lower left corner.",
     ),
-    Spec::Angle(
-        c"angle",
-        c"Angle",
-        0.0,
-        c"The angle of the line the control points lie on.",
-    ),
     Spec::Int(
-        c"points",
+        c"controlPoints",
         c"Control Points",
         2,
-        2,
-        4,
+        1,
+        9,
         c"How many control points the gradient has.",
     ),
     Spec::Number(
         c"distance1",
-        c"Point 1 Distance",
-        -0.8,
+        c"Distance",
+        -0.5,
         -1.0,
         1.0,
-        c"How far the point is from the center (1: half the frame's width).",
+        c"How far the point is from the center along that line: 1 is the frame's size.",
     ),
     Spec::Color(
         c"color1",
-        c"Point 1 Color",
-        [0.13, 0.2, 0.55, 1.0],
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
         c"The point's color.",
     ),
     Spec::Number(
         c"distance2",
-        c"Point 2 Distance",
-        0.8,
+        c"Distance",
+        0.5,
         -1.0,
         1.0,
-        c"How far the point is from the center (1: half the frame's width).",
+        c"How far the point is from the center along that line: 1 is the frame's size.",
     ),
     Spec::Color(
         c"color2",
-        c"Point 2 Color",
-        [0.96, 0.62, 0.25, 1.0],
+        c"Color",
+        [0.0, 0.0, 0.0, 1.0],
         c"The point's color.",
     ),
     Spec::Number(
         c"distance3",
-        c"Point 3 Distance",
+        c"Distance",
         0.0,
         -1.0,
         1.0,
-        c"How far the point is from the center (1: half the frame's width).",
+        c"How far the point is from the center along that line: 1 is the frame's size.",
     ),
     Spec::Color(
         c"color3",
-        c"Point 3 Color",
-        [0.85, 0.3, 0.4, 1.0],
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
         c"The point's color.",
     ),
     Spec::Number(
         c"distance4",
-        c"Point 4 Distance",
-        0.4,
+        c"Distance",
+        0.0,
         -1.0,
         1.0,
-        c"How far the point is from the center (1: half the frame's width).",
+        c"How far the point is from the center along that line: 1 is the frame's size.",
     ),
     Spec::Color(
         c"color4",
-        c"Point 4 Color",
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
+        c"The point's color.",
+    ),
+    Spec::Number(
+        c"distance5",
+        c"Distance",
+        0.0,
+        -1.0,
+        1.0,
+        c"How far the point is from the center along that line: 1 is the frame's size.",
+    ),
+    Spec::Color(
+        c"color5",
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
+        c"The point's color.",
+    ),
+    Spec::Number(
+        c"distance6",
+        c"Distance",
+        0.0,
+        -1.0,
+        1.0,
+        c"How far the point is from the center along that line: 1 is the frame's size.",
+    ),
+    Spec::Color(
+        c"color6",
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
+        c"The point's color.",
+    ),
+    Spec::Number(
+        c"distance7",
+        c"Distance",
+        0.0,
+        -1.0,
+        1.0,
+        c"How far the point is from the center along that line: 1 is the frame's size.",
+    ),
+    Spec::Color(
+        c"color7",
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
+        c"The point's color.",
+    ),
+    Spec::Number(
+        c"distance8",
+        c"Distance",
+        0.0,
+        -1.0,
+        1.0,
+        c"How far the point is from the center along that line: 1 is the frame's size.",
+    ),
+    Spec::Color(
+        c"color8",
+        c"Color",
+        [1.0, 1.0, 1.0, 1.0],
+        c"The point's color.",
+    ),
+    Spec::Number(
+        c"distance9",
+        c"Distance",
+        0.0,
+        -1.0,
+        1.0,
+        c"How far the point is from the center along that line: 1 is the frame's size.",
+    ),
+    Spec::Color(
+        c"color9",
+        c"Color",
         [1.0, 1.0, 1.0, 1.0],
         c"The point's color.",
     ),
 ];
 const NOISE_TEXTURE: &[Spec] = &[
     Spec::Choice(
-        c"style",
+        c"noiseStyle",
         c"Noise style",
         &[
             c"Fractal - smooth",
@@ -210,7 +281,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"How the noise is shaped: clouds, smoke, veins of marble, lines, contours or rings.",
     ),
     Spec::Number(
-        c"layers",
+        c"numberOfLayers",
         c"Number of layers",
         1.0,
         1.0,
@@ -218,7 +289,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"How many layers of finer noise, each twice as fine; a part of one fades it in.",
     ),
     Spec::Toggle(
-        c"swapColors",
+        c"swapcolors",
         c"Swap colors",
         false,
         c"Color 1 and Color 2 change places.",
@@ -271,7 +342,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"The pattern moved up and down.",
     ),
     Spec::Number(
-        c"progress",
+        c"offsetprogressinDegrees",
         c"Progress (in degrees)",
         0.0,
         0.0,
@@ -281,7 +352,7 @@ const NOISE_TEXTURE: &[Spec] = &[
     Spec::GroupEnd,
     Spec::Group(c"noiseParameters", c"Noise parameters"),
     Spec::Number(
-        c"min",
+        c"noiseParametersMin",
         c"Min",
         0.0,
         0.0,
@@ -289,7 +360,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"The noise's value that takes Color 1.",
     ),
     Spec::Number(
-        c"max",
+        c"noiseParametersMax",
         c"Max",
         1.0,
         0.0,
@@ -297,7 +368,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"The noise's value that takes Color 2.",
     ),
     Spec::Number(
-        c"bias",
+        c"noiseParametersBias",
         c"Bias",
         0.0,
         -1.0,
@@ -305,7 +376,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"Added to the noise: below 0 toward Color 1, above toward Color 2.",
     ),
     Spec::Number(
-        c"amplitude",
+        c"noiseParametersAmplitude",
         c"Amplitude",
         1.0,
         0.0,
@@ -313,7 +384,7 @@ const NOISE_TEXTURE: &[Spec] = &[
         c"The noise multiplied: more contrast between the colors.",
     ),
     Spec::Number(
-        c"grain",
+        c"noiseParametersGrainAmplitudeFalloff",
         c"Grain (amplitude falloff)",
         0.5,
         0.0,
@@ -329,7 +400,7 @@ const SOLID_COLOR: &[Spec] = &[Spec::Color(
     c"The frame's color; its alpha how opaque it is.",
 )];
 const TEST_PATTERN: &[Spec] = &[Spec::Choice(
-    c"pattern",
+    c"testPatternType",
     c"Test pattern type",
     &[
         c"Color bars (NTSC)",
@@ -345,6 +416,24 @@ const TEST_PATTERN: &[Spec] = &[Spec::Choice(
     0,
     c"The pattern: color bars, a gradient, a gray ramp, or the black and white references.",
 )];
+
+/// How a generator's picture is drawn: in an 8-bit project's bytes (as
+/// VEGAS's 8-bit pictures have them) or in floats, and the shape of the
+/// generated media's pixels (width over height).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Look {
+    pub eight_bit: bool,
+    pub pixel_aspect: f64,
+}
+
+impl Look {
+    /// Floats, square pixels.
+    #[cfg(test)]
+    pub(crate) const FLOAT: Look = Look {
+        eight_bit: false,
+        pixel_aspect: 1.0,
+    };
+}
 
 impl Kind {
     pub(crate) const ALL: [Kind; 5] = [
@@ -402,53 +491,137 @@ impl Kind {
             .find(|k| k.id().to_str().ok() == Some(id))
     }
 
-    /// What colors each place of the frame (u across, v down, 0–1) at
-    /// settings `s`: premultiplied video values.
     /// What the card draws for this generator with settings `s` on the
-    /// picture `g` places; `None` where the processor still draws it.
-    pub(crate) fn card_plan(self, s: &Vals, g: &Grid) -> Option<crate::accel::Plan> {
+    /// picture `g` places, drawn as `look` says; `None` where the
+    /// processor still draws it.
+    pub(crate) fn card_plan(self, s: &Vals, g: &Grid, look: Look) -> Option<crate::accel::Plan> {
         use crate::accel::{GenerateKernel, Plan};
-        let size = [width_px(g) as f32, g.height_px() as f32];
         match self {
-            Kind::Checkerboard => Some(Plan::Generate {
-                kernel: GenerateKernel::Checkerboard,
-                f: Checker::of(s, g).numbers(),
-                j: [0; 4],
-            }),
+            Kind::Checkerboard => {
+                let (w, h) = picture_size(g);
+                let board = checkerboard::Board::new(
+                    &checker_settings(s),
+                    w,
+                    h,
+                    look.pixel_aspect,
+                    look.eight_bit,
+                );
+                Some(Plan::Generate {
+                    kernel: GenerateKernel::Checkerboard,
+                    f: Vec::new(),
+                    j: [u32::from(look.eight_bit), 0, 0, 0],
+                    table: board.table(),
+                })
+            }
             Kind::NoiseTexture => {
-                let (mut f, j) = Noise::of(s).numbers();
-                f.splice(0..0, size);
+                let (w, h) = picture_size(g);
+                let (f, j, table) =
+                    noise_texture::Noise::new(&noise_settings(s), w, h, look.eight_bit).plan();
                 Some(Plan::Generate {
                     kernel: GenerateKernel::NoiseTexture,
                     f,
                     j,
+                    table,
                 })
             }
             Kind::SolidColor => Some(Plan::Generate {
                 kernel: GenerateKernel::SolidColor,
-                f: pre(s.rgba(c"color")).to_vec(),
+                f: solid(s.rgba64(c"color"), look.eight_bit).to_vec(),
                 j: [0; 4],
+                table: Vec::new(),
             }),
-            Kind::TestPattern => Some(Plan::Generate {
-                kernel: GenerateKernel::TestPattern,
-                f: size.to_vec(),
-                j: [s.i(c"pattern").clamp(0, 8) as u32, 0, 0, 0],
-            }),
+            Kind::ColorGradient => {
+                let (w, h) = picture_size(g);
+                let (f, j, table) =
+                    color_gradient::Gradient::new(&gradient_settings(s), w, h, look.eight_bit)
+                        .plan();
+                Some(Plan::Generate {
+                    kernel: GenerateKernel::ColorGradient,
+                    f,
+                    j,
+                    table,
+                })
+            }
+            Kind::TestPattern => {
+                let (w, h) = picture_size(g);
+                Some(Plan::Generate {
+                    kernel: GenerateKernel::TestPattern,
+                    f: Vec::new(),
+                    j: [0; 4],
+                    table: test_pattern::Pattern::new(pattern_kind(s), w, h).table(),
+                })
+            }
+        }
+    }
+
+    /// The rows this generator works out whole (Noise Texture's and Color
+    /// Gradient's, whose pixels go on from one another): the picture's
+    /// size and a row's pixels by its place from the top.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn row_painter(
+        self,
+        s: &Vals,
+        g: &Grid,
+        look: Look,
+    ) -> Option<(usize, usize, Box<dyn Fn(usize) -> Vec<[f32; 4]> + Sync>)> {
+        match self {
+            Kind::NoiseTexture => {
+                let (w, h) = picture_size(g);
+                let noise = noise_texture::Noise::new(&noise_settings(s), w, h, look.eight_bit);
+                Some((w, h, Box::new(move |y| noise.row(y))))
+            }
+            Kind::ColorGradient => {
+                let (w, h) = picture_size(g);
+                let gradient =
+                    color_gradient::Gradient::new(&gradient_settings(s), w, h, look.eight_bit);
+                Some((w, h, Box::new(move |y| gradient.row(y))))
+            }
             _ => None,
         }
     }
 
-    pub(crate) fn painter(self, s: &Vals, g: &Grid) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
+    /// What colors each place of the frame (u across, v down, 0–1) at
+    /// settings `s` on the picture `g` places, drawn as `look` says:
+    /// premultiplied values of the project's (in an 8-bit one, bytes'
+    /// values as VEGAS's 8-bit pictures have them).
+    pub(crate) fn painter(
+        self,
+        s: &Vals,
+        g: &Grid,
+        look: Look,
+    ) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
         match self {
-            Kind::Checkerboard => checkerboard(s, g),
-            Kind::ColorGradient => color_gradient(s, g),
-            Kind::NoiseTexture => noise_texture(s),
+            Kind::Checkerboard => {
+                let (w, h) = picture_size(g);
+                let board = checkerboard::Board::new(
+                    &checker_settings(s),
+                    w,
+                    h,
+                    look.pixel_aspect,
+                    look.eight_bit,
+                );
+                Box::new(move |u, v| board.at(pixel_at(u, w), pixel_at(v, h)))
+            }
+            Kind::ColorGradient => {
+                let (w, h) = picture_size(g);
+                let gradient =
+                    color_gradient::Gradient::new(&gradient_settings(s), w, h, look.eight_bit);
+                Box::new(move |u, v| gradient.row(pixel_at(v, h))[pixel_at(u, w)])
+            }
+            Kind::NoiseTexture => {
+                let (w, h) = picture_size(g);
+                let noise = noise_texture::Noise::new(&noise_settings(s), w, h, look.eight_bit);
+                Box::new(move |u, v| noise.row(pixel_at(v, h))[pixel_at(u, w)])
+            }
             Kind::SolidColor => {
-                // VEGAS's: the color premultiplied, everywhere.
-                let c = pre(s.rgba(c"color"));
+                let c = solid(s.rgba64(c"color"), look.eight_bit);
                 Box::new(move |_, _| c)
             }
-            Kind::TestPattern => test_pattern(s, g),
+            Kind::TestPattern => {
+                let (w, h) = picture_size(g);
+                let pattern = test_pattern::Pattern::new(pattern_kind(s), w, h);
+                Box::new(move |u, v| pattern.at(pixel_at(u, w), pixel_at(v, h)))
+            }
         }
     }
 }
@@ -494,8 +667,15 @@ fn main(
         kOfxStatOK
     } else if is(action, kOfxImageEffectActionDescribeInContext) {
         fx.define_clip(kOfxImageEffectOutputClipName, &[kOfxImageComponentRGBA]);
-        // The groups too, as sections (Checkerboard's, Noise Texture's).
-        define_all(fx, kind.specs());
+        if kind == Kind::ColorGradient {
+            // Its type and angle, then VEGAS's Control Points page.
+            define_all(fx, &COLOR_GRADIENT[..2]);
+            gradient_page::define_page(fx, &COLOR_GRADIENT[2..]);
+        } else {
+            // The groups too, as sections (Checkerboard's, Noise Texture's),
+            // closed at first as VEGAS's.
+            define_generator(fx, kind.specs());
+        }
         kOfxStatOK
     } else if is(action, kOfxImageEffectActionRender) {
         render(kind, fx, args)
@@ -516,11 +696,43 @@ fn main(
         out.set_str(kOfxImageClipPropFieldOrder, kOfxImageFieldNone);
         out.set_str(kOfxImageEffectPropPreMultiplication, kOfxImagePreMultiplied);
         kOfxStatOK
-    } else if is(action, kOfxActionLoad)
-        || is(action, kOfxActionUnload)
-        || is(action, kOfxActionCreateInstance)
-        || is(action, kOfxActionDestroyInstance)
-    {
+    } else if is(action, kOfxActionInstanceChanged) {
+        if kind == Kind::Checkerboard {
+            let by_hand = args.is(kOfxPropType, kOfxTypeParameter)
+                && args.is(kOfxPropChangeReason, kOfxChangeUserEdited);
+            let changed = |n: &CStr| args.is(kOfxPropName, n);
+            let changed: Option<&dyn Fn(&CStr) -> bool> =
+                if by_hand { Some(&changed) } else { None };
+            checker_links(fx, args.dbl(kOfxPropTime, 0), changed);
+        }
+        if kind == Kind::ColorGradient {
+            let time = args.dbl(kOfxPropTime, 0);
+            // A button of the page's bar, or anything else.
+            let button = args.is(kOfxPropType, kOfxTypeParameter)
+                && gradient_page::BAR_NAMES
+                    .iter()
+                    .find(|n| args.is(kOfxPropName, n))
+                    .is_some_and(|n| gradient_page::pressed(fx, time, n));
+            if !button {
+                gradient_page::shown(fx, time);
+            }
+        }
+        kOfxStatOK
+    } else if is(action, kOfxActionCreateInstance) || is(action, kOfxActionBeginInstanceEdit) {
+        if kind == Kind::Checkerboard {
+            checker_links(fx, 0.0, None);
+        }
+        if kind == Kind::ColorGradient {
+            gradient_page::created(fx);
+            gradient_page::shown(fx, 0.0);
+        }
+        kOfxStatOK
+    } else if is(action, kOfxActionDestroyInstance) {
+        if kind == Kind::ColorGradient {
+            gradient_page::destroyed(fx);
+        }
+        kOfxStatOK
+    } else if is(action, kOfxActionLoad) || is(action, kOfxActionUnload) {
         kOfxStatOK
     } else {
         kOfxStatReplyDefault
@@ -568,22 +780,44 @@ fn render(kind: Kind, fx: Fx, args: Props) -> OfxStatus {
         par: if out.par > 0.0 { out.par } else { 1.0 },
     };
     let vals = Vals::of(kind.specs(), &|s| s.read(fx, time));
-    let paint = kind.painter(&vals, &grid);
+    let look = Look {
+        eight_bit: args.int(bv_ofx_sys::extensions::kBananaVImageEffectPropEightBit, 0) != 0,
+        pixel_aspect: args.dbl_or(
+            bv_ofx_sys::extensions::kBananaVImageEffectPropMediaPixelAspect,
+            1.0,
+        ),
+    };
     let straight = out.channels == 4 && out.unpremultiplied;
     let columns = x1.max(out.bounds[0])..x2.min(out.bounds[2]);
-    let fill = |y: c_int| {
-        let Some(row) = out.row(y) else { return };
-        for x in columns.clone() {
-            let (u, v) = grid.uv(x, y);
-            let mut c = paint(u, v);
-            if straight && c[3] > 0.0 {
-                c = [c[0] / c[3], c[1] / c[3], c[2] / c[3], c[3]];
-            }
-            // SAFETY: a row the output has, a column inside its bounds.
-            unsafe { crate::colors::put_pixel(&out, row, x, c) };
+    let put = |row: *mut u8, x: c_int, mut c: [f32; 4]| {
+        if straight && c[3] > 0.0 {
+            c = [c[0] / c[3], c[1] / c[3], c[2] / c[3], c[3]];
         }
+        // SAFETY: a row the output has, a column inside its bounds.
+        unsafe { crate::colors::put_pixel(&out, row, x, c) };
     };
-    for_rows(y1.max(out.bounds[1])..y2.min(out.bounds[3]), &fill);
+    let rows = y1.max(out.bounds[1])..y2.min(out.bounds[3]);
+    if let Some((w, h, paint_row)) = kind.row_painter(&vals, &grid, look) {
+        // A row of the picture at a time.
+        let fill = |y: c_int| {
+            let Some(row) = out.row(y) else { return };
+            let line = paint_row(pixel_at(grid.uv(x1, y).1, h));
+            for x in columns.clone() {
+                put(row, x, line[pixel_at(grid.uv(x, y).0, w)]);
+            }
+        };
+        for_rows(rows, &fill);
+    } else {
+        let paint = kind.painter(&vals, &grid, look);
+        let fill = |y: c_int| {
+            let Some(row) = out.row(y) else { return };
+            for x in columns.clone() {
+                let (u, v) = grid.uv(x, y);
+                put(row, x, paint(u, v));
+            }
+        };
+        for_rows(rows, &fill);
+    }
     drop(out);
     kOfxStatOK
 }
@@ -595,451 +829,129 @@ fn width_px(g: &Grid) -> f64 {
     (g.frame[0] * g.scale[0] / g.par).max(1.0)
 }
 
-/// A straight color premultiplied.
-fn pre(c: [f32; 4]) -> [f32; 4] {
-    [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]]
-}
-
-fn mix(a: [f32; 4], b: [f32; 4], k: f64) -> [f32; 4] {
-    let k = k as f32;
-    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * k)
-}
-
-/// VEGAS's Checkerboard, in the frame's pixels from its top left: tiles
-/// Width and Height of the frame (square on screen with Square), at
-/// least a pixel; each edge a straight blend from one color to the other
-/// over the Edge blending part of the tile on either side (half a pixel
-/// at least), the colors half and half on it; the grid moved by Grid
-/// offset.
-fn checkerboard(s: &Vals, g: &Grid) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
-    let c = Checker::of(s, g);
-    Box::new(move |u, v| c.paint(u, v))
-}
-
-/// Checkerboard's tiles on the picture `g` places: the frame's size in its
-/// pixels, the tiles' width and height, the blends' half widths, the
-/// grid's move and the two colors (premultiplied).
-#[derive(Clone, Copy)]
-pub(crate) struct Checker {
-    size: [f64; 2],
-    tile: [f64; 2],
-    blend: [f64; 2],
-    offset: [f64; 2],
-    colors: [[f32; 4]; 2],
-}
-
-impl Checker {
-    pub(crate) fn of(s: &Vals, g: &Grid) -> Checker {
-        let (w, h) = (width_px(g), g.height_px());
-        let par = g.par;
-        let mut tw = s.f(c"tileWidth").clamp(0.001, 1.0) * w;
-        let mut th = if s.b(c"square") {
-            tw * par
-        } else {
-            s.f(c"tileHeight").clamp(0.001, 1.0) * h
-        };
-        if tw < 1.0 / par {
-            th = th / par / tw;
-            tw = 1.0 / par;
-        }
-        if th < 1.0 {
-            tw /= th;
-            th = 1.0;
-        }
-        let bh = s.f(c"blendHorizontal").clamp(0.0, 1.0);
-        let bv = if s.b(c"proportional") {
-            bh
-        } else {
-            s.f(c"blendVertical").clamp(0.0, 1.0)
-        };
-        let (bx, by) = ((bh * tw * 0.5).max(0.5), (bv * th * 0.5).max(0.5));
-        let (c1, c2) = (pre(s.rgba(c"color1")), pre(s.rgba(c"color2")));
-        let (ox, oy) = (s.f(c"offsetX") * w, s.f(c"offsetY") * h);
-        Checker {
-            size: [w, h],
-            tile: [tw, th],
-            blend: [bx, by],
-            offset: [ox, oy],
-            colors: [c1, c2],
-        }
-    }
-
-    /// The color at the frame's u, v (v from the top).
-    fn paint(&self, u: f64, v: f64) -> [f32; 4] {
-        let ([w, h], [tw, th], [bx, by], [ox, oy]) =
-            (self.size, self.tile, self.blend, self.offset);
-        let [c1, c2] = self.colors;
-        let (x, y) = (u * w - ox, v * h - oy);
-        let (ix, iy) = ((x / tw).floor(), (y / th).floor());
-        let (own, other) = if (ix + iy).rem_euclid(2.0) >= 1.0 {
-            (c2, c1)
-        } else {
-            (c1, c2)
-        };
-        // How far into the other color: 1 at a blend's far end, 0.5 on
-        // the edge, 0 inside.
-        let reach = |t: f64, size: f64, b: f64| {
-            let from_low = t - (t / size).floor() * size;
-            let near = from_low.min(size - from_low);
-            ((b - near) * (0.5 / b)).clamp(0.0, 0.5)
-        };
-        let (kx, ky) = (reach(x, tw, bx), reach(y, th, by));
-        // Across the rows' blend the two colors mixed first, as VEGAS's.
-        let row_own = mix(own, other, ky);
-        let row_other = mix(other, own, ky);
-        mix(row_own, row_other, kx)
-    }
-
-    /// Its numbers for the card's `kit_checkerboard`.
-    pub(crate) fn numbers(&self) -> Vec<f32> {
-        let mut f: Vec<f32> = [
-            self.size[0],
-            self.size[1],
-            self.tile[0],
-            self.tile[1],
-            self.blend[0],
-            self.blend[1],
-            self.offset[0],
-            self.offset[1],
+/// VEGAS's Solid Color: the color premultiplied, everywhere — in an 8-bit
+/// project each byte cut as VEGAS's 8-bit pictures have it, (c·255)·a and
+/// a·255 in doubles.
+fn solid(c: [f64; 4], eight_bit: bool) -> [f32; 4] {
+    let a = c[3];
+    if eight_bit {
+        let byte = |v: f64| (v.floor().clamp(0.0, 255.0) / 255.0) as f32;
+        [
+            byte(c[0] * 255.0 * a),
+            byte(c[1] * 255.0 * a),
+            byte(c[2] * 255.0 * a),
+            byte(a * 255.0),
         ]
-        .map(|v| v as f32)
-        .to_vec();
-        f.extend(self.colors[0]);
-        f.extend(self.colors[1]);
-        f
+    } else {
+        [
+            (c[0] * a) as f32,
+            (c[1] * a) as f32,
+            (c[2] * a) as f32,
+            a as f32,
+        ]
     }
 }
 
-fn color_gradient(s: &Vals, g: &Grid) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
-    let aspect = g.aspect();
-    let ty = s.i(c"type");
-    let c = s.point(c"center");
-    let (sn, cs) = s.f(c"angle").to_radians().sin_cos();
-    let n = s.i(c"points").clamp(2, 4) as usize;
-    let names = [
-        (c"distance1", c"color1"),
-        (c"distance2", c"color2"),
-        (c"distance3", c"color3"),
-        (c"distance4", c"color4"),
-    ];
-    let mut points: Vec<(f64, [f32; 4])> = names[..n]
-        .iter()
-        .map(|&(d, col)| (s.f(d), s.rgba(col)))
-        .collect();
-    points.sort_by(|a, b| a.0.total_cmp(&b.0));
-    Box::new(move |u, v| {
-        // Across and up in the frame's heights, turned by the angle.
-        let (dx, dy) = ((u - c[0]) * aspect, c[1] - v);
-        let (px, py) = (dx * cs + dy * sn, -dx * sn + dy * cs);
-        let half = aspect / 2.0;
-        let t = match ty {
-            1 => (px / half).hypot(py / 0.5),
-            2 => (px / half).abs().max((py / 0.5).abs()),
-            3 => py.atan2(px) / PI,
-            _ => px / half,
-        };
-        let first = points[0];
-        let last = points[points.len() - 1];
-        let color = if t <= first.0 {
-            first.1
-        } else if t >= last.0 {
-            last.1
-        } else {
-            let i = points
-                .iter()
-                .position(|p| p.0 > t)
-                .unwrap_or(points.len() - 1);
-            let (a, b) = (points[i - 1], points[i]);
-            let k = (t - a.0) / (b.0 - a.0).max(1e-9);
-            mix(a.1, b.1, k)
-        };
-        pre(color)
-    })
+/// The picture's size in its pixels.
+fn picture_size(g: &Grid) -> (usize, usize) {
+    (
+        (width_px(g).round() as usize).max(1),
+        (g.height_px().round() as usize).max(1),
+    )
 }
 
-/// Noise Texture's styles: the kind — 0 fractal, 1 veins,
-/// 2 rings —, whether the layers add up their sizes (turbulent), and the
-/// veins' five numbers (the rings' repeats first).
-const NOISE_STYLES: [(u32, bool, [f64; 5]); 7] = [
-    (0, false, [0.0; 5]),
-    (0, true, [0.0; 5]),
-    (1, false, [0.9, 0.15, 0.4, 1.2, 0.1]),
-    (1, false, [0.05, 0.9, 1.3, 0.0, 0.0]),
-    (1, false, [0.6, 0.0, 0.2, 0.5, 0.1]),
-    (1, false, [1.0, 0.0, 1.5, 0.5, 0.05]),
-    (2, false, [4.0, 0.0, 0.0, 0.0, 0.0]),
-];
-
-/// Noise Texture's numbers, as VEGAS works them out: the style, each
-/// layer's weight (Grain to the layer's power, the last a part by Number of
-/// layers, those over 0.01), the noise's place (Frequency, Offset,
-/// Progress), the colors' line (Amplitude ⁄ (Max − Min), the offset by Bias
-/// and Min) and the two colors, premultiplied (Swap colors swaps them).
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Noise {
-    pub style: usize,
-    pub weights: Vec<f64>,
-    pub place: [f64; 5],
-    pub scale: f64,
-    pub offset: f64,
-    pub amplitude: f64,
-    pub colors: [[f32; 4]; 2],
+/// Of the `n` pixels across (or down), the one whose middle is at `t`
+/// (0–1).
+fn pixel_at(t: f64, n: usize) -> usize {
+    ((t * n as f64).floor().max(0.0) as usize).min(n.max(1) - 1)
 }
 
-impl Noise {
-    pub(crate) fn of(s: &Vals) -> Noise {
-        let layers = s.f(c"layers").clamp(1.0, 5.0);
-        let grain = s.f(c"grain").clamp(0.0, 1.0);
-        let whole = (layers - 0.499_999_985).round_ties_even() as usize;
-        let mut weights = vec![1.0f64; whole + 1];
-        for k in 1..=whole {
-            weights[k] = grain * weights[k - 1];
-        }
-        weights[whole] *= layers - whole as f64;
-        let used = weights.iter().take_while(|&&w| w > 0.01).count();
-        weights.truncate(used.max(1));
-        let (min, max) = (s.f(c"min"), s.f(c"max"));
-        let (amplitude, bias) = (s.f(c"amplitude"), s.f(c"bias"));
-        let (scale, offset) = if min < max {
-            let k = amplitude / (max - min);
-            (k, bias - min * k)
-        } else {
-            (0.0, (min + max) * 0.5 * amplitude + bias)
-        };
-        let pre = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
-        let (a, b) = (pre(s.rgba(c"color1")), pre(s.rgba(c"color2")));
-        Noise {
-            style: s.i(c"style").clamp(0, 6) as usize,
-            weights,
-            place: [
-                s.f(c"frequencyX"),
-                s.f(c"frequencyY"),
-                s.f(c"offsetX"),
-                s.f(c"offsetY"),
-                s.f(c"progress"),
-            ],
-            scale,
-            offset,
-            amplitude,
-            colors: if s.b(c"swapColors") { [b, a] } else { [a, b] },
-        }
+/// Test Pattern's pattern: its place in the list.
+fn pattern_kind(s: &Vals) -> u32 {
+    s.i(c"testPatternType").clamp(0, 8) as u32
+}
+
+/// Color Gradient's settings ([`color_gradient`]): the center from the
+/// top, the points VEGAS's way.
+fn gradient_settings(s: &Vals) -> color_gradient::Settings {
+    let n = s.i(c"controlPoints").clamp(1, 9) as usize;
+    let center = s.point(c"center");
+    color_gradient::Settings {
+        kind: s.i(c"gradientType").clamp(0, 2) as u32,
+        angle: s.f(c"aspectRatioAngle").to_radians(),
+        center: [center[0], 1.0 - center[1]],
+        points: gradient_page::POINTS[..n]
+            .iter()
+            .map(|(d, c)| (s.f(d), s.rgba64(c).map(|v| v as f32)))
+            .collect(),
     }
+}
 
-    /// The noise's value at `u`, `v` (the frame's 0–1, from the top left).
-    fn value(&self, u: f64, v: f64) -> f64 {
-        let (kind, turbulent, p) = NOISE_STYLES[self.style];
-        let [fx, fy, ox, oy, z] = self.place;
-        let (x, y) = (u * fx + ox, v * fy + oy);
-        let (mut sum, mut total) = (0.0, 0.0);
-        for (k, &w) in self.weights.iter().enumerate() {
-            let f = f64::from(1u32 << k);
-            let n = gradient_noise(x * f, y * f, z * f) * w * 1.515_151_515_151_515;
-            sum += if turbulent { n.abs() } else { n };
-            total += w;
-        }
-        let n = sum / total;
-        match kind {
-            0 if turbulent => n,
-            0 => n * 0.5 + 0.5,
-            1 => {
-                let mut s = p[2] * n + p[0] * fx * u - p[1] * fy * v;
-                if p[3] > 0.0 {
-                    let t = p[3] * fy * v;
-                    let t = t - t.floor();
-                    s += p[4] * 4.0 * t * (1.0 - t);
-                }
-                let t = s - s.floor();
-                1.0 - (2.0 * t - 1.0) * (2.0 * t - 1.0)
-            }
-            _ => {
-                let s = (n + 2.0) * p[0] * self.amplitude;
-                let t = s - s.floor();
-                if t >= 0.5 {
-                    (4.0 * t - 3.0) * (4.0 * t - 3.0)
-                } else {
-                    2.0 - (4.0 * t - 1.0) * (4.0 * t - 1.0)
-                }
+/// Noise Texture's settings ([`noise_texture`]).
+fn noise_settings(s: &Vals) -> noise_texture::Settings {
+    noise_texture::Settings {
+        style: s.i(c"noiseStyle").clamp(0, 6) as usize,
+        layers: s.f(c"numberOfLayers").clamp(1.0, 5.0),
+        swap: s.b(c"swapcolors"),
+        colors: [s.rgba64(c"color1"), s.rgba64(c"color2")],
+        frequency: [s.f(c"frequencyX"), s.f(c"frequencyY")],
+        offset: [s.f(c"offsetX"), s.f(c"offsetY")],
+        progress: s.f(c"offsetprogressinDegrees"),
+        min: s.f(c"noiseParametersMin"),
+        max: s.f(c"noiseParametersMax"),
+        bias: s.f(c"noiseParametersBias"),
+        amplitude: s.f(c"noiseParametersAmplitude"),
+        falloff: s.f(c"noiseParametersGrainAmplitudeFalloff"),
+    }
+}
+
+/// Checkerboard's settings ([`checkerboard`]).
+fn checker_settings(s: &Vals) -> checkerboard::Settings {
+    checkerboard::Settings {
+        tile: [
+            s.f(c"tileDimensionsWidth").clamp(0.001, 1.0),
+            s.f(c"tileDimensionsHeight").clamp(0.001, 1.0),
+        ],
+        square: s.b(c"tileDimensionsSquare"),
+        blend: [
+            s.f(c"edgeBlendingHorizontal").clamp(0.0, 1.0),
+            s.f(c"edgeBlendingVertical").clamp(0.0, 1.0),
+        ],
+        proportional: s.b(c"edgeBlendingProportional"),
+        colors: [s.rgba64(c"color1"), s.rgba64(c"color2")],
+        offset: [s.f(c"gridOffsetX"), s.f(c"gridOffsetY")],
+    }
+}
+
+/// Checkerboard's links, VEGAS's: with Square the height is the width's,
+/// with Proportional the vertical blending the horizontal's — greyed
+/// out, and set when the user changes either (`changed`; none: only
+/// greyed).
+fn checker_links(fx: Fx, time: f64, changed: Option<&dyn Fn(&CStr) -> bool>) {
+    for (flag, from, to) in [
+        (
+            c"tileDimensionsSquare",
+            c"tileDimensionsWidth",
+            c"tileDimensionsHeight",
+        ),
+        (
+            c"edgeBlendingProportional",
+            c"edgeBlendingHorizontal",
+            c"edgeBlendingVertical",
+        ),
+    ] {
+        let linked = fx.param(flag).int_at(time) != 0;
+        if let Some(changed) = changed
+            && linked
+            && (changed(flag) || changed(from))
+        {
+            let v = fx.param(from).f64_at(time);
+            if fx.param(to).f64_at(time) != v {
+                fx.param(to).set_f64(v);
             }
         }
+        fx.param(to).set_enabled(!linked);
     }
-
-    /// The texture's color at `u`, `v`: the value along the colors' line,
-    /// in 65,536ths as VEGAS's, held within the two colors.
-    pub(crate) fn at(&self, u: f64, v: f64) -> [f32; 4] {
-        let t = ((self.value(u, v) * self.scale + self.offset) * 65536.0 + 0.5 + 1.5e-8)
-            .round_ties_even()
-            .clamp(0.0, 65536.0) as f32
-            * 1.525_878_9e-5;
-        let [a, b] = self.colors;
-        std::array::from_fn(|k| b[k] * t + a[k] * (1.0 - t))
-    }
-
-    /// The card's numbers (`kit_noise_texture`): the place, five weights,
-    /// the line, Amplitude and the two colors; the style and how many
-    /// layers.
-    pub(crate) fn numbers(&self) -> (Vec<f32>, [u32; 4]) {
-        let mut f: Vec<f32> = self.place.iter().map(|&v| v as f32).collect();
-        f.extend((0..5).map(|k| self.weights.get(k).copied().unwrap_or(0.0) as f32));
-        f.extend([self.scale as f32, self.offset as f32, self.amplitude as f32]);
-        f.extend(self.colors.iter().flatten().copied());
-        (f, [self.style as u32, self.weights.len() as u32, 0, 0])
-    }
-}
-
-/// The lattice's gradient at a corner: one of Perlin's twelve directions,
-/// picked by a hash of the corner (whole-number math the card repeats).
-fn lattice(x: i32, y: i32, z: i32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x8da6_b343)
-        ^ (y as u32).wrapping_mul(0xd816_3841)
-        ^ (z as u32).wrapping_mul(0xcb1a_b31f);
-    h ^= h >> 16;
-    h = h.wrapping_mul(0x7feb_352d);
-    h ^= h >> 15;
-    h = h.wrapping_mul(0x846c_a68b);
-    (h ^ (h >> 16)) & 15
-}
-
-fn gradient(h: u32, x: f64, y: f64, z: f64) -> f64 {
-    let u = if h < 8 { x } else { y };
-    let v = if h < 4 {
-        y
-    } else if h == 12 || h == 14 {
-        x
-    } else {
-        z
-    };
-    (if h & 1 == 0 { u } else { -u }) + (if h & 2 == 0 { v } else { -v })
-}
-
-/// Perlin's improved noise (2002) at `x`, `y`, `z`: the quintic fade, the
-/// corners' gradients of unit length.
-fn gradient_noise(x: f64, y: f64, z: f64) -> f64 {
-    let (xi, yi, zi) = (x.floor(), y.floor(), z.floor());
-    let (xf, yf, zf) = (x - xi, y - yi, z - zi);
-    let (xi, yi, zi) = (xi as i32, yi as i32, zi as i32);
-    let fade = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-    let (u, v, w) = (fade(xf), fade(yf), fade(zf));
-    let g = |i: i32, j: i32, k: i32| {
-        let h = lattice(xi + i, yi + j, zi + k);
-        gradient(h, xf - f64::from(i), yf - f64::from(j), zf - f64::from(k))
-    };
-    let lerp = |t: f64, a: f64, b: f64| a + (b - a) * t;
-    let near = lerp(
-        v,
-        lerp(u, g(0, 0, 0), g(1, 0, 0)),
-        lerp(u, g(0, 1, 0), g(1, 1, 0)),
-    );
-    let far = lerp(
-        v,
-        lerp(u, g(0, 0, 1), g(1, 0, 1)),
-        lerp(u, g(0, 1, 1), g(1, 1, 1)),
-    );
-    lerp(w, near, far) * std::f64::consts::FRAC_1_SQRT_2
-}
-
-fn noise_texture(s: &Vals) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
-    let n = Noise::of(s);
-    Box::new(move |u, v| n.at(u, v))
-}
-
-/// A video color (straight, opaque).
-const fn opaque(r: f32, g: f32, b: f32) -> [f32; 4] {
-    [r, g, b, 1.0]
-}
-
-/// VEGAS's Test Pattern: NTSC's bars all at 75 %, PAL's (EBU's) with a
-/// 100 % white; VEGAS's gradient (red to green across, blue toward the
-/// bottom) and gray ramp (black around it, a tenth of the frame); SMPTE's
-/// bars and the black and white references of their bottom row.
-fn test_pattern(s: &Vals, _g: &Grid) -> Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> {
-    let pattern = s.i(c"pattern");
-    Box::new(move |u, v| match pattern {
-        1 => color_bars(u, 1.0),
-        2 => opaque((1.0 - u) as f32, u as f32, v as f32),
-        3 => pluge_row(u, None),
-        4 => {
-            let inside = (0.1..=0.9).contains(&u) && (0.1..=0.9).contains(&v);
-            let t = if inside { u as f32 } else { 0.0 };
-            opaque(t, t, t)
-        }
-        5 => smpte_bars(u, v, 0.75, 0.75),
-        6 => smpte_bars(u, v, 1.0, 0.75),
-        7 => pluge_row(u, Some(opaque(1.0, 1.0, 1.0))),
-        8 => pluge_row(u, Some(opaque(0.75, 0.75, 0.0))),
-        _ => color_bars(u, 0.75),
-    })
-}
-
-/// Seven bars — white, yellow, cyan, green, magenta, red, blue — the
-/// colors at 75 %, the white at `white`; EBU's eighth, black, when the
-/// white is whole.
-fn color_bars(u: f64, white: f32) -> [f32; 4] {
-    let k = 0.75;
-    let bars = [
-        opaque(white, white, white),
-        opaque(k, k, 0.0),
-        opaque(0.0, k, k),
-        opaque(0.0, k, 0.0),
-        opaque(k, 0.0, k),
-        opaque(k, 0.0, 0.0),
-        opaque(0.0, 0.0, k),
-        opaque(0.0, 0.0, 0.0),
-    ];
-    let n = if white >= 1.0 { 8.0 } else { 7.0 };
-    bars[((u * n) as usize).min(n as usize - 1)]
-}
-
-/// SMPTE's color bars (as its EG 1 lays them out): the 75 % colors with a
-/// `white` bar on top, the reversed blue bars, and the bottom row.
-fn smpte_bars(u: f64, v: f64, white: f32, k: f32) -> [f32; 4] {
-    let top = [
-        opaque(white, white, white),
-        opaque(k, k, 0.0),
-        opaque(0.0, k, k),
-        opaque(0.0, k, 0.0),
-        opaque(k, 0.0, k),
-        opaque(k, 0.0, 0.0),
-        opaque(0.0, 0.0, k),
-    ];
-    let black = opaque(0.0, 0.0, 0.0);
-    let bar = ((u * 7.0) as usize).min(6);
-    if v < 0.67 {
-        return top[bar];
-    }
-    if v < 0.75 {
-        return [top[6], black, top[4], black, top[2], black, top[0]][bar];
-    }
-    pluge_row(u, None)
-}
-
-/// SMPTE's bottom row: −I, white, +Q, black and the PLUGE (black, black,
-/// +4 %); with `porch` only that color in the white's place, the rest
-/// black but the PLUGE.
-fn pluge_row(u: f64, porch: Option<[f32; 4]>) -> [f32; 4] {
-    let black = opaque(0.0, 0.0, 0.0);
-    let (minus_i, plus_q) = if porch.is_some() {
-        (black, black)
-    } else {
-        (opaque(0.0, 0.129, 0.290), opaque(0.196, 0.0, 0.416))
-    };
-    let bottom: [(f64, [f32; 4]); 7] = [
-        (1.25, minus_i),
-        (1.25, porch.unwrap_or(opaque(1.0, 1.0, 1.0))),
-        (1.25, plus_q),
-        (1.25, black),
-        (1.0 / 3.0, black),
-        (1.0 / 3.0, opaque(0.04, 0.04, 0.04)),
-        (1.0 + 1.0 / 3.0, black),
-    ];
-    let at = u * 7.0;
-    let mut edge = 0.0;
-    for (w, c) in bottom {
-        edge += w;
-        if at < edge {
-            return c;
-        }
-    }
-    black
 }
 
 /// The factory presets of generator `kind`.
@@ -1047,6 +959,9 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
     let num = |v: &[f64]| PresetValue::Num(v.to_vec());
     let p = |name: &'static str, values: Vec<(&'static str, PresetValue)>| Preset { name, values };
     let one = |name: &'static str, param: &'static str, v: f64| p(name, vec![(param, num(&[v]))]);
+    // At its defaults first, as VEGAS lists a generator none of whose
+    // presets is its default (Checkerboard, Test Pattern).
+    let defaults = || p("(Default)", vec![]);
     match kind {
         Kind::Checkerboard => {
             let m = |name: &'static str,
@@ -1060,16 +975,16 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
                 p(
                     name,
                     vec![
-                        ("tileWidth", num(&[size[0]])),
-                        ("tileHeight", num(&[size[1]])),
-                        ("square", flag(square)),
-                        ("blendHorizontal", num(&[blend[0]])),
-                        ("blendVertical", num(&[blend[1]])),
-                        ("proportional", flag(proportional)),
+                        ("tileDimensionsWidth", num(&[size[0]])),
+                        ("tileDimensionsHeight", num(&[size[1]])),
+                        ("tileDimensionsSquare", flag(square)),
+                        ("edgeBlendingHorizontal", num(&[blend[0]])),
+                        ("edgeBlendingVertical", num(&[blend[1]])),
+                        ("edgeBlendingProportional", flag(proportional)),
                         ("color1", num(&colors[0])),
                         ("color2", num(&colors[1])),
-                        ("offsetX", num(&[offset[0]])),
-                        ("offsetY", num(&[offset[1]])),
+                        ("gridOffsetX", num(&[offset[0]])),
+                        ("gridOffsetY", num(&[offset[1]])),
                     ],
                 )
             };
@@ -1077,6 +992,7 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
             const WHITE: [f64; 4] = [1.0, 1.0, 1.0, 1.0];
             const CLEAR: [f64; 4] = [0.0, 0.0, 0.0, 0.0];
             vec![
+                defaults(),
                 m(
                     "Large Tiles",
                     [0.1, 0.1],
@@ -1190,83 +1106,238 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
                 ),
             ]
         }
-        Kind::ColorGradient => vec![
-            p("Sunset", vec![]),
-            p(
-                "Ocean",
-                vec![
-                    ("angle", num(&[90.0])),
-                    ("color1", num(&[0.03, 0.1, 0.3, 1.0])),
-                    ("color2", num(&[0.1, 0.7, 0.75, 1.0])),
-                ],
-            ),
-            p(
-                "Spotlight",
-                vec![
-                    ("type", num(&[1.0])),
-                    ("distance1", num(&[0.0])),
-                    ("color1", num(&[1.0, 1.0, 0.9, 1.0])),
-                    ("distance2", num(&[1.0])),
-                    ("color2", num(&[0.0, 0.0, 0.0, 1.0])),
-                ],
-            ),
-            p(
-                "Rainbow",
-                vec![
-                    ("points", num(&[4.0])),
-                    ("distance1", num(&[-1.0])),
-                    ("color1", num(&[0.9, 0.1, 0.1, 1.0])),
-                    ("distance2", num(&[1.0])),
-                    ("color2", num(&[0.4, 0.1, 0.9, 1.0])),
-                    ("distance3", num(&[-0.33])),
-                    ("color3", num(&[1.0, 0.85, 0.1, 1.0])),
-                    ("distance4", num(&[0.33])),
-                    ("color4", num(&[0.1, 0.75, 0.3, 1.0])),
-                ],
-            ),
-            p(
-                "Frame",
-                vec![
-                    ("type", num(&[2.0])),
-                    ("distance1", num(&[0.7])),
-                    ("color1", num(&[0.0, 0.0, 0.0, 0.0])),
-                    ("distance2", num(&[1.0])),
-                    ("color2", num(&[0.0, 0.0, 0.0, 1.0])),
-                ],
-            ),
-            p(
-                "Color Wheel",
-                vec![
-                    ("type", num(&[3.0])),
-                    ("points", num(&[4.0])),
-                    ("distance1", num(&[-1.0])),
-                    ("color1", num(&[0.0, 0.6, 1.0, 1.0])),
-                    ("distance2", num(&[1.0])),
-                    ("color2", num(&[0.0, 0.6, 1.0, 1.0])),
-                    ("distance3", num(&[-0.33])),
-                    ("color3", num(&[1.0, 0.2, 0.6, 1.0])),
-                    ("distance4", num(&[0.33])),
-                    ("color4", num(&[1.0, 0.9, 0.2, 1.0])),
-                ],
-            ),
-        ],
+        Kind::ColorGradient => {
+            // VEGAS's eighteen: the type, the angle (degrees) and each
+            // point's distance along it and color.
+            let g = |name: &'static str, kind: u32, angle: f64, points: &[(f64, [f64; 4])]| {
+                let mut values = vec![
+                    ("gradientType", num(&[f64::from(kind)])),
+                    ("aspectRatioAngle", num(&[angle])),
+                    ("center", num(&[0.5, 0.5])),
+                    ("controlPoints", num(&[points.len() as f64])),
+                ];
+                for (&(d, c), &(r, color)) in gradient_page::POINTS.iter().zip(points) {
+                    let (Ok(d), Ok(c)) = (d.to_str(), c.to_str()) else {
+                        continue;
+                    };
+                    values.push((d, num(&[r])));
+                    values.push((c, num(&color)));
+                }
+                p(name, values)
+            };
+            vec![
+                g(
+                    "Linear White to Black",
+                    0,
+                    0.0,
+                    &[(-0.5, [1.0, 1.0, 1.0, 1.0]), (0.5, [0.0, 0.0, 0.0, 1.0])],
+                ),
+                g(
+                    "Linear Black to Transparent",
+                    0,
+                    0.0,
+                    &[(-0.5, [0.0, 0.0, 0.0, 1.0]), (0.5, [0.0, 0.0, 0.0, 0.0])],
+                ),
+                g(
+                    "Linear Red, Green and Blue",
+                    0,
+                    44.998672835087035,
+                    &[
+                        (-0.49497474683058323, [0.0, 0.0, 1.0, 1.0]),
+                        (0.0, [0.0, 1.0, 0.0, 1.0]),
+                        (0.49497474683058323, [1.0, 0.0, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Elliptical White to Black",
+                    1,
+                    44.998672835087035,
+                    &[
+                        (0.0, [1.0, 1.0, 1.0, 1.0]),
+                        (0.49497474683058323, [0.0, 0.0, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Elliptical Transparent to Black",
+                    1,
+                    44.998672835087035,
+                    &[
+                        (0.28284271247461895, [0.0, 0.0, 0.0, 0.0]),
+                        (0.49497474683058323, [0.0, 0.0, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Elliptical Ring",
+                    1,
+                    44.998672835087035,
+                    &[
+                        (0.3535533905932738, [0.0, 0.0, 0.0, 0.0]),
+                        (0.42426406871192857, [1.0, 1.0, 0.0, 1.0]),
+                        (0.49497474683058323, [0.0, 0.0, 0.0, 0.0]),
+                    ],
+                ),
+                g(
+                    "Rectangular Transparent to Black",
+                    2,
+                    44.998672835087035,
+                    &[
+                        (0.28284271247461895, [0.0, 0.0, 0.0, 0.0]),
+                        (0.49497474683058323, [0.0, 0.0, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Linear Red to Yellow",
+                    0,
+                    89.99734567017407,
+                    &[(-0.5, [1.0, 0.0, 0.0, 1.0]), (0.5, [1.0, 1.0, 0.0, 1.0])],
+                ),
+                g(
+                    "Linear, Blue-Green Title Bar",
+                    0,
+                    89.99734567017407,
+                    &[
+                        (0.23099999999999998, [0.10000000149011612, 0.0, 0.5, 1.0]),
+                        (0.266, [0.0, 1.0, 0.0, 1.0]),
+                        (0.5, [0.0, 0.25, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Skyscape",
+                    0,
+                    -269.99203701052215,
+                    &[
+                        (-0.5, [0.11699999868869781, 0.1899999976158142, 1.0, 1.0]),
+                        (0.5, [0.0, 1.0, 0.0, 1.0]),
+                        (
+                            -0.03799998760223389,
+                            [0.9399999976158142, 0.9900000095367432, 1.0, 1.0],
+                        ),
+                        (
+                            -0.025999993085861206,
+                            [0.8799999952316284, 0.5550000071525574, 0.0, 1.0],
+                        ),
+                    ],
+                ),
+                g(
+                    "Desert",
+                    0,
+                    -269.99203701052215,
+                    &[
+                        (-0.5, [0.0, 0.5640000104904175, 1.0, 1.0]),
+                        (0.5, [1.0, 1.0, 1.0, 1.0]),
+                        (
+                            -0.03799998760223389,
+                            [0.9399999976158142, 0.9900000095367432, 1.0, 1.0],
+                        ),
+                        (
+                            -0.025999993085861206,
+                            [0.5899999737739563, 0.4269999861717224, 0.0, 1.0],
+                        ),
+                        (
+                            0.10799998044967651,
+                            [0.8799999952316284, 0.6399999856948853, 0.0, 1.0],
+                        ),
+                    ],
+                ),
+                g(
+                    "Soft-Green Backdrop",
+                    0,
+                    89.99734567017407,
+                    &[
+                        (0.5, [0.0, 0.6470000147819519, 0.46000000834465027, 1.0]),
+                        (-0.5, [0.9399999976158142, 0.9900000095367432, 1.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Soft-Blue Backdrop",
+                    0,
+                    89.99734567017407,
+                    &[
+                        (0.5, [0.0, 0.5049999952316284, 0.8199999928474426, 1.0]),
+                        (-0.5, [0.9399999976158142, 0.9900000095367432, 1.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Soft-Red Backdrop",
+                    0,
+                    89.99734567017407,
+                    &[
+                        (0.5, [0.8799999952316284, 0.17000000178813934, 0.0, 1.0]),
+                        (-0.5, [0.9399999976158142, 0.9900000095367432, 1.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Sunburst",
+                    1,
+                    45.26366581533504,
+                    &[
+                        (0.022627397779014773, [1.0, 1.0, 0.0, 1.0]),
+                        (
+                            0.5472368798397161,
+                            [1.0, 0.3779999911785126, 0.05999999865889549, 1.0],
+                        ),
+                    ],
+                ),
+                g(
+                    "Blue Movie Border",
+                    2,
+                    44.23234178409955,
+                    &[
+                        (0.6781777063502288, [0.0, 0.0, 1.0, 1.0]),
+                        (0.5820008560310374, [0.0, 0.0, 0.0, 0.0]),
+                    ],
+                ),
+                g(
+                    "Eclipse",
+                    1,
+                    50.76406064859094,
+                    &[
+                        (0.5046206495972989, [0.0, 0.0, 0.0, 1.0]),
+                        (
+                            0.29251495688254986,
+                            [1.0, 0.8859999775886536, 0.11800000071525574, 1.0],
+                        ),
+                        (0.27503636123247416, [0.0, 0.0, 0.0, 1.0]),
+                    ],
+                ),
+                g(
+                    "Fancy Wooden Board",
+                    0,
+                    89.99734567017407,
+                    &[
+                        (-0.20400000000000001, [0.0, 0.0, 0.0, 0.0]),
+                        (0.2933, [0.0, 0.0, 0.0, 0.0]),
+                        (
+                            -0.08500000000000002,
+                            [0.5879999995231628, 0.2280000001192093, 0.0, 1.0],
+                        ),
+                        (
+                            -0.16299999999999998,
+                            [1.0, 0.5600000023841858, 0.05900000035762787, 1.0],
+                        ),
+                        (0.246, [0.5289999842643738, 0.17900000512599945, 0.0, 1.0]),
+                        (0.16080000000000005, [1.0, 0.5809999704360962, 0.0, 1.0]),
+                    ],
+                ),
+            ]
+        }
         Kind::NoiseTexture => {
             // VEGAS's presets: Noise style, Number of layers, Frequency X
             // and Y, Offset X and Y, Progress, Min, Max, Bias, Amplitude,
             // Grain; then Color 1 and Color 2.
             let names = [
-                "style",
-                "layers",
+                "noiseStyle",
+                "numberOfLayers",
                 "frequencyX",
                 "frequencyY",
                 "offsetX",
                 "offsetY",
-                "progress",
-                "min",
-                "max",
-                "bias",
-                "amplitude",
-                "grain",
+                "offsetprogressinDegrees",
+                "noiseParametersMin",
+                "noiseParametersMax",
+                "noiseParametersBias",
+                "noiseParametersAmplitude",
+                "noiseParametersGrainAmplitudeFalloff",
             ];
             let n = |name, v: [f64; 12], c1: [f64; 4], c2: [f64; 4]| {
                 let mut values: Vec<(&'static str, PresetValue)> =
@@ -1421,15 +1492,16 @@ pub(crate) fn presets(kind: Kind) -> Vec<Preset> {
             ]
         }
         Kind::TestPattern => vec![
-            one("SMPTE Bars (NTSC)", "pattern", 5.0),
-            one("SMPTE Bars (PAL)", "pattern", 6.0),
-            one("Color Bars (NTSC)", "pattern", 0.0),
-            one("Color Bars (PAL)", "pattern", 1.0),
-            one("White Porches", "pattern", 7.0),
-            one("Yellow Porches", "pattern", 8.0),
-            one("Pluge and Porches", "pattern", 3.0),
-            one("Ramp", "pattern", 4.0),
-            one("Gradient", "pattern", 2.0),
+            defaults(),
+            one("SMPTE Bars (NTSC)", "testPatternType", 5.0),
+            one("SMPTE Bars (PAL)", "testPatternType", 6.0),
+            one("Color Bars (NTSC)", "testPatternType", 0.0),
+            one("Color Bars (PAL)", "testPatternType", 1.0),
+            one("White Porches", "testPatternType", 7.0),
+            one("Yellow Porches", "testPatternType", 8.0),
+            one("Pluge and Porches", "testPatternType", 3.0),
+            one("Ramp", "testPatternType", 4.0),
+            one("Gradient", "testPatternType", 2.0),
         ],
     }
 }
@@ -1470,7 +1542,7 @@ mod tests {
             let presets = presets(kind);
             assert!(!presets.is_empty(), "{kind:?}");
             for p in &presets {
-                let paint = kind.painter(&vals(kind, p), &g);
+                let paint = kind.painter(&vals(kind, p), &g, Look::FLOAT);
                 for (u, v) in [(0.0, 0.0), (0.3, 0.7), (0.5, 0.5), (0.999, 0.999)] {
                     let c = paint(u, v);
                     assert!(c.iter().all(|x| x.is_finite()), "{kind:?} {}", p.name);
@@ -1483,34 +1555,51 @@ mod tests {
     #[test]
     fn the_checkerboard_alternates_its_colors() {
         let g = grid();
-        let p = presets(Kind::Checkerboard).remove(0);
-        let paint = Kind::Checkerboard.painter(&vals(Kind::Checkerboard, &p), &g);
+        // Large Tiles (after the defaults).
+        let p = presets(Kind::Checkerboard).remove(1);
+        let paint = Kind::Checkerboard.painter(&vals(Kind::Checkerboard, &p), &g, Look::FLOAT);
         // Tiles a tenth of the width, square (6.4 pixels): neighbours
         // across differ, diagonal ones match (tiles' middles).
         let (a, b) = (paint(0.55, 16.0 / 36.0), paint(0.45, 16.0 / 36.0));
         assert!((a[0] - b[0]).abs() > 0.9, "{a:?} {b:?}");
         let c = paint(0.45, 9.6 / 36.0);
         assert!((a[0] - c[0]).abs() < 1e-6, "{a:?} {c:?}");
-        // VEGAS's twelve presets; Large Tiles is black and white.
-        assert_eq!(presets(Kind::Checkerboard).len(), 12);
+        // The defaults and VEGAS's twelve presets; Large Tiles is black
+        // and white.
+        assert_eq!(presets(Kind::Checkerboard).len(), 13);
+        assert_eq!(presets(Kind::Checkerboard)[0].name, "(Default)");
         assert_eq!(paint(0.05, 0.05)[..3], [0.0, 0.0, 0.0]);
-        // On an edge the colors are half and half, with the blending
-        // going straight across Edge blending's part of the tile.
+        // A tile's edge blended across the whole tile: between the colors.
         let s = Vals::of(
             Kind::Checkerboard.specs(),
             &|spec| match spec.name().to_bytes() {
-                b"blendHorizontal" => vec![1.0],
+                b"edgeBlendingHorizontal" => vec![1.0],
                 _ => spec.default(),
             },
         );
-        let paint = Kind::Checkerboard.painter(&s, &g);
-        let at = |x: f64| paint(x / 64.0, 16.0 / 36.0)[0];
-        assert!((at(6.4) - 0.5).abs() < 1e-5, "{}", at(6.4));
-        assert!(
-            (at(4.8) - 0.75).abs() < 1e-5 || (at(4.8) - 0.25).abs() < 1e-5,
-            "{}",
-            at(4.8)
-        );
+        let paint = Kind::Checkerboard.painter(&s, &g, Look::FLOAT);
+        let edge = paint(6.5 / 64.0, 16.5 / 36.0)[0];
+        assert!(edge > 0.2 && edge < 0.8, "{edge}");
+    }
+
+    #[test]
+    fn square_tiles_are_square_on_screen() {
+        // Pixels twice as wide as tall: a square tile half as many pixels
+        // wide as tall.
+        let g = Grid {
+            frame: [100.0, 100.0],
+            ..grid()
+        };
+        let p = presets(Kind::Checkerboard).remove(0);
+        let wide = Look {
+            pixel_aspect: 2.0,
+            ..Look::FLOAT
+        };
+        let paint = Kind::Checkerboard.painter(&vals(Kind::Checkerboard, &p), &g, wide);
+        let at = |x: f64, y: f64| paint((x + 0.5) / 100.0, (y + 0.5) / 100.0)[0];
+        // 10 pixels wide, 20 tall.
+        assert_eq!((at(9.0, 0.0), at(10.0, 0.0)), (0.0, 1.0));
+        assert_eq!((at(0.0, 19.0), at(0.0, 20.0)), (0.0, 1.0));
     }
 
     #[test]
@@ -1518,11 +1607,13 @@ mod tests {
         let g = grid();
         let p = presets(Kind::ColorGradient).remove(0);
         let s = vals(Kind::ColorGradient, &p);
-        let paint = Kind::ColorGradient.painter(&s, &g);
-        // Left of the first point its color, right of the last the other's.
-        let (l, r) = (paint(0.0, 0.5), paint(1.0, 0.5));
+        let paint = Kind::ColorGradient.painter(&s, &g, Look::FLOAT);
+        // The first column the first point's color, the last a step from
+        // the other's (the pixels measured from their left edges).
+        let (l, r) = (paint(0.0, 0.5), paint(0.999, 0.5));
         let (c1, c2) = (s.rgba(c"color1"), s.rgba(c"color2"));
-        assert!((l[2] - c1[2]).abs() < 1e-4 && (r[0] - c2[0]).abs() < 1e-4);
+        assert!((l[2] - c1[2]).abs() < 1e-4, "{l:?}");
+        assert!((r[0] - c2[0]).abs() < 0.02, "{r:?}");
         // The middle halfway.
         let m = paint(0.5, 0.5);
         assert!((m[0] - (c1[0] + c2[0]) / 2.0).abs() < 1e-3, "{m:?}");
@@ -1533,13 +1624,13 @@ mod tests {
         let g = grid();
         for style in 0..7 {
             let s = Vals::of(NOISE_TEXTURE, &|spec| {
-                if spec.name() == c"style" {
+                if spec.name() == c"noiseStyle" {
                     vec![f64::from(style)]
                 } else {
                     spec.default()
                 }
             });
-            let paint = Kind::NoiseTexture.painter(&s, &g);
+            let paint = Kind::NoiseTexture.painter(&s, &g, Look::FLOAT);
             let values: Vec<f32> = (0..200)
                 .map(|i| paint(f64::from(i % 20) / 20.0, f64::from(i / 20) / 10.0)[0])
                 .collect();
@@ -1551,24 +1642,15 @@ mod tests {
         }
         let at = |progress: f64| {
             let s = Vals::of(NOISE_TEXTURE, &|spec| {
-                if spec.name() == c"progress" {
+                if spec.name() == c"offsetprogressinDegrees" {
                     vec![progress]
                 } else {
                     spec.default()
                 }
             });
-            Kind::NoiseTexture.painter(&s, &g)(0.37, 0.61)
+            Kind::NoiseTexture.painter(&s, &g, Look::FLOAT)(0.37, 0.61)
         };
         assert!((at(0.0)[0] - at(0.5)[0]).abs() > 1e-4);
-    }
-
-    #[test]
-    fn smpte_bars_are_where_eg_1_puts_them() {
-        assert_eq!(smpte_bars(0.05, 0.3, 0.75, 0.75), opaque(0.75, 0.75, 0.75));
-        assert_eq!(smpte_bars(0.95, 0.3, 0.75, 0.75), opaque(0.0, 0.0, 0.75));
-        assert_eq!(smpte_bars(0.95, 0.7, 0.75, 0.75), opaque(0.75, 0.75, 0.75));
-        // White under the second bar.
-        assert_eq!(smpte_bars(0.25, 0.9, 0.75, 0.75), opaque(1.0, 1.0, 1.0));
     }
 
     /// VEGAS's Solid Color: its ten presets, the color premultiplied,
@@ -1580,34 +1662,39 @@ mod tests {
         assert_eq!(presets.len(), 10);
         let gray = &presets[6];
         assert_eq!(gray.name, "Gray");
-        let paint = Kind::SolidColor.painter(&vals(Kind::SolidColor, gray), &g);
+        let paint = Kind::SolidColor.painter(&vals(Kind::SolidColor, gray), &g, Look::FLOAT);
         assert_eq!(paint(0.3, 0.7), [0.501961, 0.501961, 0.501961, 1.0]);
         let s = Vals::of(Kind::SolidColor.specs(), &|_| vec![1.0, 0.5, 0.0, 0.5]);
         assert_eq!(
-            Kind::SolidColor.painter(&s, &g)(0.9, 0.1),
+            Kind::SolidColor.painter(&s, &g, Look::FLOAT)(0.9, 0.1),
             [0.5, 0.25, 0.0, 0.5]
         );
         let s = Vals::of(Kind::SolidColor.specs(), &|spec| spec.default());
-        assert_eq!(Kind::SolidColor.painter(&s, &g)(0.5, 0.5), [0.0; 4]);
+        assert_eq!(
+            Kind::SolidColor.painter(&s, &g, Look::FLOAT)(0.5, 0.5),
+            [0.0; 4]
+        );
     }
 
     /// VEGAS's list of patterns, its gradient and its ramp.
     #[test]
     fn the_test_patterns_are_vegass() {
-        let g = grid();
+        let g = Grid {
+            frame: [640.0, 360.0],
+            ..grid()
+        };
         let paint = |pattern: f64| {
             let s = Vals::of(Kind::TestPattern.specs(), &|_| vec![pattern]);
-            Kind::TestPattern.painter(&s, &g)
+            Kind::TestPattern.painter(&s, &g, Look::FLOAT)
         };
-        assert_eq!(presets(Kind::TestPattern).len(), 9);
-        // Color bars: NTSC's seven at 75 %, PAL's eight with 100 % white.
-        assert_eq!(paint(0.0)(0.05, 0.5), opaque(0.75, 0.75, 0.75));
-        assert_eq!(paint(1.0)(0.05, 0.5), opaque(1.0, 1.0, 1.0));
-        assert_eq!(paint(1.0)(0.95, 0.5), opaque(0.0, 0.0, 0.0));
-        // Gradient: red to green across, blue toward the bottom.
-        assert_eq!(paint(2.0)(0.25, 0.75), opaque(0.75, 0.25, 0.75));
-        // Ramp: gray across, black within a tenth of the edges.
-        assert_eq!(paint(4.0)(0.5, 0.5), opaque(0.5, 0.5, 0.5));
-        assert_eq!(paint(4.0)(0.5, 0.05), opaque(0.0, 0.0, 0.0));
+        let byte = |c: [f32; 4]| c.map(|v| (v * 255.0).round() as u8);
+        assert_eq!(presets(Kind::TestPattern).len(), 10);
+        // Color bars: NTSC's at 75 %, PAL's with a white of 235.
+        assert_eq!(byte(paint(0.0)(0.05, 0.5)), [180, 180, 180, 255]);
+        assert_eq!(byte(paint(1.0)(0.05, 0.5)), [235, 235, 235, 255]);
+        assert_eq!(byte(paint(1.0)(0.95, 0.5)), [16, 16, 180, 255]);
+        // Ramp: gray across, the border's within a tenth of the edges.
+        assert_eq!(byte(paint(4.0)(0.5, 0.5)), [127, 127, 127, 255]);
+        assert_eq!(byte(paint(4.0)(0.5, 0.05)), [7, 7, 7, 255]);
     }
 }

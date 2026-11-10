@@ -4,9 +4,10 @@
 //! the values as numbers, and an eyedropper that takes a color from
 //! anywhere on the screen.
 
+use crate::cursors::{self, Cursor};
 use crate::egui::{
-    self, Color32, ColorImage, CursorIcon, Mesh, Rect, Sense, Shape, Stroke, TextureHandle,
-    TextureOptions, Ui, Vec2, pos2, vec2,
+    self, Color32, ColorImage, Mesh, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Ui,
+    Vec2, pos2, vec2,
 };
 use crate::i18n::tr;
 use crate::theme;
@@ -140,6 +141,12 @@ impl ColorPicker {
             if picking {
                 self.picking = None;
                 bv_platform::release_mouse();
+            } else if bv_platform::SYSTEM_COLOR_SAMPLER {
+                // The system's sampler (macOS): its magnifier takes the
+                // click and the color.
+                if bv_platform::start_color_sampler() {
+                    self.picking = Some(false);
+                }
             } else {
                 // Clicks on the program's other windows come here instead of
                 // acting on them.
@@ -197,8 +204,23 @@ impl ColorPicker {
         let Some(was_down) = self.picking else {
             return;
         };
+        if bv_platform::SYSTEM_COLOR_SAMPLER {
+            match bv_platform::take_sampled_color() {
+                Some(picked) => {
+                    if let Some(c) = picked {
+                        self.set_rgb(c.map(|v| v as f32 / 255.0));
+                    }
+                    self.picking = None;
+                }
+                None => ui
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50)),
+            }
+            return;
+        }
         ui.interact(ui.max_rect(), id.with("picking"), Sense::click_and_drag());
-        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        // VEGAS's color picker's dropper.
+        cursors::set(ui.ctx(), Cursor::Dropper);
         let down = bv_platform::main_button_down();
         if down && !was_down {
             if let Some((x, y)) = bv_platform::cursor_screen_position()

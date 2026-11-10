@@ -179,7 +179,7 @@ piece of interface.
   their presets (Medium Blur to Yellow Glow; Medium, Light and Heavy;
   Edges to White; Reflect Top to Reflect to Lower Right; White Soft Glow
   to Green Highlights on Brights). In 32-bit projects BananaV's effects keep what
-  passes white or black, as VEGAS's float effects do; 8-bit projects
+  passes white or black, as VEGAS's effects do there; 8-bit projects
   clip each effect's result, as VEGAS's 8-bit pictures. A double click
   puts a setting back at its default: on its slider, as VEGAS's, on a
   color's swatch, or on any setting's name (a position's, a list's, a
@@ -306,7 +306,25 @@ piece of interface.
 - **Timeline thumbnails and waveforms** — thumbnails keep their decoders
   open, come in fixed heights and stand in for each other while loading (no
   blanks when zooming); zoomed in past 10 ms per pixel, waveforms are drawn
-  from the samples themselves, down to single samples.
+  from the samples themselves, down to single samples. Each thumbnail's
+  texture keeps a weak hold on it, so a thumbnail made again (files
+  changed, proxies) never gets another media's picture.
+- **Below the tracks** — events dragged there go each to a new track of
+  its track's kind (the picked ones with the one under the pointer, in
+  their tracks' order), in one undo; media let go there (files, Project
+  Media, generators, the right-drag menu's choices) go on new tracks too,
+  though tracks they could go on exist.
+- **Transitions at an event's end** — a transition let go on a video
+  event's second half goes out with it over its fade-out (a second long
+  when it has none), or becomes the crossfade of the event right after
+  it; drawn on the processor and on the card (`OutTransition`,
+  `FxOwner::TransitionOut`). Its label, and those over fade-ins with a
+  transition, has the Transition Properties button, as crossfades' do;
+  the red box of an event out of sync keeps clear of them. Not yet in
+  `.veg` files (no sample has one).
+- **Plug-In Chooser search** — a field above the list finds plug-ins by
+  name in every folder (accents or not), and letters typed over the list
+  pick the plug-in they begin, as a file manager's list does.
 - **Event Loop and Hold Last Frame** (Edit › Switches) — events stretch
   past their media like VEGAS's: with Loop (on for new events) the media
   repeats, video and audio, with notches where it starts over; without it
@@ -636,8 +654,10 @@ piece of interface.
   menu VEGAS's six (Restore, Center, Flip Horizontal, Flip Vertical, Match
   Output Aspect, Match Source Aspect); the keyframe bar as the OFX
   controller's; Ctrl+C, Ctrl+X, Ctrl+V and Delete on the picked row's
-  keyframe, Ctrl+arrows between keyframes, the program's other keys (Space,
-  Ctrl+Z…) while the window has them. Masks are worked out on every
+  keyframe, Ctrl+arrows between keyframes, the arrows moving the box once
+  a click or a drag picked it (a pixel of the media, ten with Shift, along
+  the axes the movement's mode leaves free), the program's other keys
+  (Space, Ctrl+Z…) while the window has them. Masks are worked out on every
   processor thread and kept while they do not change (2.8 times faster at
   1080p, nothing again while playing).
 - **Crossfades and the track list like VEGAS 23's** (from the user's
@@ -710,6 +730,22 @@ piece of interface.
   start, GL Transition from 300 ms (and 26 frames a second in its middle
   at 1080p) and Sapphire's S_DissolveBlur from a 1.6 s freeze to 60 frames
   a second throughout.
+- **Smooth playback at 4K, and a guard against slowing down again**
+  (2026-11-10, the user's report: a 4K trailer played at 40 frames a
+  second where it played 60) — the interface wrote out the LUT looks'
+  tables at every frame and converted each preview frame pixel by pixel,
+  and video thumbnails decoded on every core during playback. Frames now
+  come back at the size the window shows them (reduced on the graphics
+  card, drawn at Preview Quality's size), their memory used again, a
+  decoded picture written straight into the card's upload memory,
+  thumbnails held while playing or rendering, and a second drawing thread
+  tried only where its readers' seek is cheap or single. The 4K 59.94
+  project at Best (Full): every frame (59.9 a second, from 53.2), the
+  interface 3.4 ms a frame (from 10.7); heavy 4K parts play without
+  stalls. `cargo xtask perf` keeps it: the interface's frame budget with
+  every docked window (it fails with the old LUT code), and with
+  `BV_PLAY_FILE` the engine playing a file with effects, transitions and
+  animation (`play_file`).
 - **Final Cut Pro 7 XML both ways, VEGAS's files too** (the user's
   request, with a project of theirs exported by VEGAS 23) — VEGAS's file
   did not open: VEGAS describes its files in its bins' master clips,
@@ -946,6 +982,304 @@ piece of interface.
   and Delete Track deletes them all, in one undo.
 ## Awaiting the maintainer's review
 
+- **Interface brightness, docking, Transform mode (2026-11-09)** —
+  `theme::shown` (each interface type's greys moved ±40 %, Preferences ›
+  Display, live while the window is open); egui_dock's `HighlightedAreas`
+  overlay in the theme's colors and Float in Its Own Window
+  (`dock::floating_windows`: OS windows with Dock, kept in the session);
+  the Video Preview's Transform mode (`transform_ui.rs`: the box, its
+  drags and the Transform window, through `pancrop::transform_from_key`
+  and `set_clip_box_at`). Dragging media from a window floating in its
+  own OS window onto the timeline is not possible (egui's drags stay in
+  their window): the layout's windows and Undock's do it.
+- **Updates (2026-11-09)** — `updates.rs`: GitHub's latest public release
+  asked through the system's `curl` as BananaV starts (Preferences ›
+  General, BananaV's own) and from Help › Check for Software Updates…;
+  Update / Cancel / Don't Show Again; on Windows installs (the setup
+  downloaded, its SHA-256 checked against GitHub's `digest`, run as
+  BananaV closes), elsewhere the release page. Not tried against a real
+  newer release yet (0.3.0 will be the first).
+- **Loop region as VEGAS's, Envelope Appearance, paired double-clicks
+  (2026-11-09)** — the maintainer's print of VEGAS's loop region; the
+  loop bar's own color; double-click removes the region; envelope line,
+  reach, point size and shape (`envelope_look.rs`); `widgets::double_click`
+  counts clicks in pairs and egui takes the system's double-click time.
+- **Playback start in long-GOP files (2026-11-09)** — the sound waits for
+  the preview's exact first frame (`preroll`, 3 s at most); MP4/MOV
+  keyframe index (`mp4::video_keyframes`) lets both decoders go on within
+  a group of pictures (`playback_start` and `seek_speed` measure it).
+- **Eight partial languages (2026-11-09)** — Simplified Chinese
+  (`zh-CN`), Russian, Spanish (Spain), German, Japanese, French, Polish
+  and Korean (`i18n/zh_cn.rs` … `ko.rs`, `complete: false`): the 1,618
+  texts of the menus and commands, the title bar, the docking windows, the
+  timeline, the Explorer, Project Media, the preview, the Trimmer, the
+  Render window and its templates, Project Properties and the welcome
+  screen; the rest shows in English. Not kept up with new texts (the
+  maintainer's decision). Captures: `telas_idiomas`.
+- **Ten more partial languages (2026-11-10)** — Turkish, Traditional
+  Chinese (`zh-TW`), Spanish (Latin America, `es-419`), Thai, Ukrainian,
+  Italian, Czech, Hungarian, Portuguese (Portugal, `pt-PT`) and Swedish
+  (`i18n/tr_tr.rs`, `zh_tw.rs`, `es_419.rs`, `th.rs`, `uk.rs`, `it.rs`,
+  `cs.rs`, `hu.rs`, `pt_pt.rs`, `sv.rs`), the same 1,616 texts as the
+  first eight, their plural rules (Czech's one, few and other) and number
+  separators; Traditional Chinese's and Thai's letters from the
+  computer's fonts (Microsoft JhengHei, Leelawadee UI and their kin on
+  macOS and Linux). The welcome screen's Language page scrolls. Not kept
+  up with new texts. Captures: `telas_idiomas`.
+- **The Transform window and the loop region (2026-11-10, awaiting the
+  maintainer's review)** — the Transform mode's window docked beside the
+  Explorer and the other browsers (`tabs::transform`), laid out as other
+  editors' effect controls: Video › Motion (Position, Scale with Uniform
+  Scale, Scale Width and Height, Rotation, Crop, Flip, Anchor Point, the
+  Pan/Crop box, the keyframe's curve and Smoothness, the source settings,
+  Reduce Interlace Flicker), Opacity with the fades and their curves,
+  Time (playback and undersample rates, Loop, Hold Last Frame, Reverse),
+  and Audio for the event's audio (Mute, Level, Invert Phase, the fades,
+  Channels, Pitch); a stopwatch, the keyframe arrows and diamond, reset
+  buttons, and the Pan/Crop keyframes on a strip of the event's time
+  (click, drag, their curve or Delete from their menu). The loop region's
+  bar in a grey of the interface's own; a click elsewhere on the timeline
+  lets go of the time selection (the blue room and the lines) while the
+  loop region stays in its bar; a right-click on it removes it; the lines
+  as VEGAS draws them, yellow with a dark one beside, down to the
+  timeline's bottom. About and the title bar give the version.
+- **Letters of every language (2026-11-09)** — the computer's Chinese,
+  Japanese and Korean fonts (and one with many other scripts) behind the
+  interface's (`interface_fonts`), and Titles & Text drawing what its font
+  lacks from a font that has it (`fonts::fallback`).
+- **Starts that end early (2026-11-09)** — the DirectX 12 crash reported
+  on Discord: `safe_start` moves the next start to Vulkan, then OpenGL,
+  keeps what works, starts BananaV again after a crash while starting on
+  Windows, and writes `Crash.log`.
+- **macOS (2026-11-09)** — BananaV for macOS 11 and later, one app for
+  Apple's chips and Intel Macs, in a disk image
+  (`BananaV-…-macos-universal.dmg`, `package.yml`'s macOS jobs): media
+  through FFmpeg with the Mac's media engine (VideoToolbox: H.264 and HEVC
+  decoded and encoded on it, "Apple VideoToolbox" in the Render window's
+  encoders and templates), Core Audio, Metal (every kernel checked in
+  Metal's language), the OS services of the other systems (`bv_platform`'s
+  `mac.rs`: windows, mouse, displays, keyboard layouts, keypad, Trash,
+  project files, removable drives, game pads, MIDI, the Screen Capture
+  window's pictures, processor/memory/disk/graphics use, the Dock's
+  progress, the shutdown after a render, the system's color sampler for
+  the eyedropper), Quit and Finder's files through BananaV's own questions,
+  the system's window buttons over BananaV's bar, Cmd for Ctrl (Control-
+  click a right click; the texts say Cmd and Option), VST 3, VST 2 and
+  OpenFX bundles from the Mac's folders with their editors inside the FX
+  window and a guard around them (`bv-apple`), Intel-only plug-ins
+  explained (Rosetta), settings in `~/Library/Application Support`.
+  Checked from Windows only (clippy for both processors, unit tests of
+  what is plain code, the kernels in Metal's language): the tests, the
+  package and its start run on GitHub's Macs (`ci.yml -f macos=true`,
+  `package.yml`). Not on a Mac yet: burning discs, cameras, a bridge for
+  Intel-only plug-ins on Apple's chips (Rosetta runs the whole app),
+  OpenFX's OpenGL overlays.
+- **VST editors inside the FX window, the Video Media Generators window
+  and the Default presets (2026-11-09)** — from the maintainer's prints.
+  A VST plug-in's own editor shows inside the FX window as VEGAS's
+  (Windows; `vst_ui::embedded`, `bv_platform::EmbeddedWindow`), a 32-bit
+  one's made in its bridge and put inside (`EditorWindow::embed`), the
+  window fitting it; the preset bar's Open VST Preset, Save VST Preset As,
+  Open VST Bank and Save VST Bank As (banks VST 2's: `bv_vst2` reads a
+  whole bank); the chain's button "Name(VST3, 64 Bit)". The Video Media
+  Generators window as VEGAS's: the generator and its columns; Frame Size
+  and the media's own Duration with the plug-in's help (Titles & Text),
+  Replace Plug-In, Match Event Length and Media Properties; the preset;
+  the plug-in's settings (no second title). OpenFX host: switches' boxes
+  where a number goes, colors written with two decimals, generators'
+  sections closed at first and their lists and switches animated (VEGAS's
+  panels), Titles & Text's text drawn as a page (its name and clock, its
+  bar — font, size with its list, B, I, the justification's buttons,
+  Transfer Text Properties —, the text dark on white in its font), new
+  BananaV extensions (`ButtonStyle`, `OptionIcons`, `Suggested`, `Icon`,
+  `Transfer`). Presets: every transition starts with its defaults
+  ("Default" for the 3D ones, Venetian Blinds, Portals and Gradient Wipe,
+  "(Default)" for the others, as VEGAS names them), Checkerboard, Test
+  Pattern and Titles & Text with "(Default)" (Noise Texture's and Solid
+  Color's defaults are presets of theirs). The bridge is found only as a
+  32-bit program (a build of the whole sources leaves one for this
+  processor beside BananaV).
+- **32-bit VST 3 plug-ins in the bridge (2026-11-09)** — asked for by the
+  maintainer after the VST 2 bridge, as long as 64-bit VST 3 plug-ins lose
+  nothing: they run as before (`bv_vst3::Instance` untouched). The
+  bridge's shared part is `bv-bridge` now (layer 0: the frames, the
+  process with its deadlines and crash answers, the server's loop between
+  the windows' messages, the editor's window), used by `bv-vst2` and
+  `bv-vst3`. A VST 3 module with only a 32-bit library (a bundle's
+  `Contents/x86-win`, or a 32-bit `.vst3` file: `bv_vst3::is_32bit`) is
+  looked at by the bridge (`--vst3-scan`; without the bridge it waits for
+  it, looked at again once there is one) and runs there as
+  `bv_vst3::Bridged` (`--vst3-serve`): parameters and their texts, blocks
+  of sound with ramps and the timeline's place and tempo, programs,
+  states and `.vstpreset` files, latency and tail, its editor in the
+  bridge's own window, a crash coming back with its details. The FX
+  window's page keeps a bridged plug-in's answers a moment (values for
+  250 ms, texts by value) so its rows cost no request each frame; the
+  bridge's thread joins an OLE apartment and has an 8 MiB stack. Listed
+  with "(32-bit)" in the Plug-In Chooser's VST3 folder and in
+  Preferences. Tried with BananaV's test plug-ins built for i686 (no
+  32-bit VST 3 plug-in is installed on the maintainer's computer). Not
+  done: a 64-bit bridge for x64 plug-ins on ARM64.
+- **VST 2 compatibility and the 32-bit bridge (2026-11-09)** — asked for by
+  the maintainer to run the 32-bit and 64-bit VST 2 plug-ins they own,
+  with BananaV's own compatibility to keep clear of Steinberg's VST 2
+  licence: `bv-vst2-sys` declares the binary interface from how plug-ins
+  behave (no Steinberg code, header or text), `bv-vst2` hosts them —
+  libraries never unloaded, every call behind a crash guard (`guard.c`),
+  parameters, programs, the state (BananaV's: the program and the values or
+  the bank's chunk; `.fxp`/`.fxb` taken too), the time information,
+  ramps cutting the block at their points, editors (opened on BananaV's
+  plug-in window), shells' plug-ins, a scan in a process of its
+  own (`--vst2-scan`, `vst2_cache.json`). 32-bit libraries run in
+  `bananav-bridge32.exe` (`apps/bridge32`, built for i686; packaged on x64):
+  a process per plug-in fed through its standard input and output (blocks of
+  sound, requests), its editor in a window of its own, a crash caught there
+  sent back with its details, a hang ended after 10 s. Preferences: "Enable
+  support for 32-bit VST plug-ins" (on), the VST 2 boxes working, "(32-bit)"
+  marks; the Plug-In Chooser's VST folder; `.veg` VST 2 effects with their
+  programs. Tried with the eFX plug-ins of the other editor's folder (their
+  64-bit and 32-bit builds: 31 parameters, 128 programs, editors). Not done:
+  VST 2 instruments and MIDI, a 64-bit bridge for x64 plug-ins on ARM64.
+- **The VST 3 standard (2026-11-09)** — from the maintainer's study of how
+  VEGAS hosts VST 3 plug-ins (its scan in a process apart and its cache,
+  the identity its projects give a plug-in, its presets and states,
+  latency), adapted to BananaV: `bv_vst3::scan` tries
+  each module in a BananaV of its own (`--vst3-scan`; several at once;
+  `vst3_cache.json` beside the settings, the cache's known effects
+  listed at once; crashes and hangs looked at again next time), every
+  call into a plug-in's sound and states behind a crash guard
+  (`guard.c`, structured exception handling: a crashing module is
+  switched off, its effects pass the sound, the interface says so),
+  programs from the program-change parameter and its unit's program list
+  (`IUnitInfo`) in the FX window's preset list, the standard
+  `.vstpreset` file (`bv_vst3::preset`, `Documents/VST3 Presets/Vendor/Plugin`),
+  the process context filled (place, tempo, meter, playing), FX
+  automation as ramps every 32 samples (points within each block),
+  plug-ins kept across seeks (restarted, not made again),
+  sleeping through silence longer than their tail, tails told
+  (`getTailSamples`). Preferences › VST Effects: working boxes (by class,
+  `vst_effects_off`), progress, failures with why, Refresh looks again,
+  repeated names told apart. `.veg` import: other VST 3 plug-ins come
+  with their states (the component's and the controller's, as text of
+  6-bit letters in the file),
+  found among those installed by `bv_timeline::vst_id` (the class's
+  number, the name's and file's CRC-16; all four fields of the measured
+  equalizer agree). Not done: instruments, sidechain buses, writing
+  VST 3 effects into `.veg` files (their class depends on
+  where the other editor is installed), the plug-in's window on Linux
+  untried.
+- **Internal preferences and envelope painting (2026-11-09)** — from the
+  maintainer's prints of VEGAS's Internal preferences window and how
+  Shift paints the composite level. Options opened with Shift
+  held has Internal… (`internal_prefs.rs`): every preference of BananaV in
+  one list, named as VEGAS's where it has the same setting and in its
+  order, values shown and read back as its window does (whole numbers to
+  their last digit, "%f" decimals, TRUE/FALSE by the first letter, ranges
+  left alone when broken), the search keeping the internal ones once used,
+  columns sorted by their heads, OK/Cancel/Apply; VEGAS's settings BananaV
+  lacks (stereoscopic 3D, HDR, VU meter type, MIDI driver type) greyed.
+  New internal preferences wired in: Enable Envelope Painting, Thinning gap
+  threshold (ms), Dim Attenuation, Minimum Video Render Threads and Max For
+  Maximum Video Render Threads (Video's thread spin box), Number of Control
+  Plug-ins allowed. Shift on a track envelope's line paints it
+  (`bv_timeline::envelope_paint`): a point each move, the points passed
+  over taken, the press keeping the envelope's value; let go, thinned as
+  measured (the same sixteen points of VEGAS's stroke, a test), the
+  tolerance 20 pixels of the zoom; with Ctrl/Alt or painting off, a point
+  to drag. Envelope lanes map values a pixel in from their edges, as
+  measured. The video track's Level slider: thousandths, Ctrl or the right
+  button half a step a pixel with the pointer put back on the knob, the
+  wheel a page (a line with Ctrl), Shift nothing; "Track Overlay Level
+  Change" undo. Not done: the window's cells keep BananaV's look, not
+  VEGAS's skin colors; "Enable envelopes for OFX plugins" (its hover
+  pointers) is not there; events', bus tracks' and effects' (keyframes
+  areas) envelopes do not paint.
+- **Pointers (2026-11-08)** — from the maintainer's recordings of where
+  VEGAS shows each of its pointers (its timeline's zones, keys, tools and
+  options; Pan/Crop; other windows), with BananaV's own drawings:
+  `cursors.rs` draws about ninety (a white body in a black outline on a
+  32-unit grid, details black; arrows, double arrows, an event's edge and
+  body, a filmstrip, hands, a magnifier, a pen's nib, a pencil, badges),
+  again at each screen scale, and hands them to the system as hardware
+  cursors (`egui::Context::set_cursor_image`); the vendored egui-winit
+  keeps them for every window, so BananaV's dialogs (immediate viewports)
+  show them too. Over an event, one function decides what a press does and
+  the pointer that tells it (`event_act`): as VEGAS's pointers behave,
+  checked case by case (six edit modes, eight key combinations, the middle, a crossfade,
+  the start and the end); so the keys now work in every mode and each
+  mode acts on every part as VEGAS's (Slip's edges slip-trim, Slide's trim
+  the adjacent event, Stretch's middle moves, Split Trim's splits and
+  trims when dragged), with VEGAS's tooltips. Fades, the level line, the
+  snap offset, envelopes (the arrow, the hand while a line is held, the
+  four-way hand while dragging, the pencil painting with Shift), Ctrl's
+  scrub (a mark where it began), the time selection's edges (now dragged
+  over the tracks), the edit cursor's line, locked events, the Envelope,
+  Selection and Zoom tools, media dragged in, the wheel's scrolling (its
+  mark; the pointer toward where the view runs). The timeline's other
+  zones: the headers' divider, tracks' and bus tracks' heights, the loop
+  region bar, markers' and regions' flags, the CD and command bars, bus
+  tracks' envelopes, the effect keyframes' area. Pan/Crop's and Track
+  Motion's handles turn with the box (a step each 45°, two more on a
+  mirrored box's corners, `handle_cursor`), the box moved, turned or its
+  center moved, the workspace's hand (now dragging the view) and Zoom tool
+  (its right button now zooming out by half), masks' pens and crosshair;
+  the Video Preview's hands when zoomed, droppers, plug-in curves and
+  keyframe controllers, Edit Details' columns, meters, split bars, things
+  dragged where nothing takes them. BananaV's adaptations: Ctrl scrubs
+  wherever its press does (VEGAS shows it within 4 pixels of the cursor);
+  the event's edges keep BananaV's reach. Not done (BananaV lacks them):
+  markers' labels (VEGAS renames on a double-click, BananaV adds a
+  marker), the timeline's overview, a vertical zoom handle, grids' rows,
+  "What's This?".
+- **Media generators' round (2026-11-08)** — from the maintainer's
+  reference measurements and renders: Checkerboard, Color Gradient, Noise
+  Texture, Solid Color and Test Pattern draw as VEGAS's renders show them
+  in 8-bit projects (their parameters named as VEGAS's; 125 reference
+  frames matched pixel for pixel, `generators_draw_as_the_measured_frames`),
+  on the card from the same tables (Noise Texture and Color Gradient in
+  single precision there, a level apart at most here and there); Color
+  Gradient with VEGAS's three shapes, up to nine points on the angle's axis
+  and its eighteen presets; Credit Roll with VEGAS's settings (sixteen ways
+  in and out, four displays, the connector, the sides' snapping, sizes for
+  480 lines, room in parts of the frame's height, eight presets), its
+  layout and scrolling as measured (lines within a pixel or two of the
+  renders; Zoom, Wipe and timed sequences past their start have no
+  reference frame yet); Titles & Text's Crop Background to Text, its lines
+  on the fonts' cell heights, rich text read and written for `.veg`; the
+  Arial Narrow mix-up fixed (a family's narrow faces no longer stand in for
+  it). `.veg`: every generator's media read and written (OpenFX settings
+  byte for byte as VEGAS writes them; Color Gradient's and Credit Roll's
+  records; 165 sample media round trip,
+  `generated_media_go_back_as_they_came`); a generated media's own length
+  times it. Reduce Interlace Flicker only in interlaced projects (VEGAS's
+  progressive renders show none). The name of the animation a `.veg`
+  title had is kept and written back. Then the panels as VEGAS's: Titles
+  & Text's text box bar (typeface, size, bold, italic, justification)
+  above the text, its Animation list played by BananaV's own animation
+  engine (`title_animations`: VEGAS's fifty animations' moves and timings
+  kept as data — lines, words or letters moving along curves and paths,
+  scaling, turning, fading, blurring and glowing over the media's length,
+  staggered), its fifty-two presets (texts naming VEGAS say BananaV).
+  Titles & Text 2.0 counts as VEGAS does, so a `.veg`'s numbers and the
+  panel's are the same (`PluginFx::upgrade` converts older projects,
+  keeping their look): points of a 200th of the frame's height, tracking
+  in twentieths of it, the outline a stroke a 400th of the height wide a
+  unit (half outside the letters, a pixel at least), the shadow's offsets
+  and blur tenths of the frame's width; VEGAS's defaults (white 48-point
+  Verdana); the fonts' external leading between lines; letters half a
+  pixel right and down; see-through letters cutting the background out
+  (Rough Day). Against VEGAS's 128 Titles & Text renders (each preset at
+  the middle of its media, and the settings one by one): a mean difference
+  of 0.37 of 255 and every ink box within a pixel, but Title08's, whose
+  whole block sits 6 pixels left of VEGAS's for a reason not yet found;
+  awaiting the maintainer's review. Color Gradient's Control Points box (points
+  to drag on the axis, a bar adding, deleting, picking and reordering
+  them, the picked one's settings); Credit Roll's Properties and Styles
+  tabs (one style shown, by name). The older built-in generators open as
+  the plug-ins that replace them. The OpenFX host gained controls on one
+  line (the no-new-line layout hint) and pages as tabs
+  (`kBananaVParamPropTab`).
+
 The VEGAS Pro 2026 documentation audit (2026-10-20): everything below
 was made automatically from VEGAS's online Help, without the user's
 prints or inspection, so each counts as partial until the user has
@@ -1048,16 +1382,13 @@ items move up to Done.
   means) and Looks (AutoLooks, with BananaV's own looks), with their
   settings and presets, as BananaV's own OFX effects.
 - **Media generators and Credit Roll (audit pack 10)** — VEGAS's
-  Checkerboard (square, edge blending, offset), Color Gradient (linear,
-  elliptical, rectangular, angular; up to four control points), Noise
-  Texture (BananaV's own styles, layers, frequency, offset, progress, min,
-  max, bias, amplitude, grain) and Test Pattern (SMPTE bars at 75 and
-  100 %, full-field bars, grays, grid) as BananaV's own OFX generators,
-  with presets; Credit Roll (VEGAS's text format, title, item and
-  two-column styles, scrolling over its event or a timed sequence with
-  ways in and out); generator plug-ins are told their event's length, and
-  their thumbnails follow the time; the Media Generator window lists them
-  (the older built-in generators stay for old projects).
+  Checkerboard, Color Gradient, Noise Texture, Solid Color and Test
+  Pattern as BananaV's own OFX generators, with presets; Credit Roll
+  (VEGAS's text format, title, item and two-column styles, scrolling over
+  its event or a timed sequence with ways in and out); generator plug-ins
+  are told their event's length, and their thumbnails follow the time; the
+  Media Generator window lists them (the older built-in generators stay
+  for old projects). Rebuilt in the generators' round above.
 - **3D and page transitions (audit pack 11)** — VEGAS's 3D Blinds
   (sections, extra spins, stagger), 3D Cascade (sections, twist), 3D Fly
   In/Out (the far point, rotations about three axes, in or out), 3D
@@ -2391,8 +2722,7 @@ items move up to Done.
   grey swatch opens the color picker for any hue, and their spectrum,
   dragged sideways, turns the hues round. Still to come: the HSL Curves'
   tangents (Lock Tangents, Smooth Curves, Lock Axis) and arrow keys, the
-  Color Curves' Select Curves and zoom, Bézier Mask, Samsung Log,
-  VEGAS's own math (the kernel came with audit pack 139).
+  Color Curves' Select Curves and zoom, Bézier Mask and Samsung Log.
 - **Brightness and Contrast's Automatic Contrast** — VEGAS 23's section
   under Contrast center: Input's Histogram Cut-Off, Output's Minimum and
   Maximum Brightness, Analysis Mode (Current Frame, Current Clip, Set for
@@ -2732,8 +3062,8 @@ items move up to Done.
 - **Hardware acceleration, further** — decoded pictures straight from the
   decoder to the compositor without passing through memory (Direct3D 11 to
   12 sharing; VA-API and CUDA surfaces on Linux); 10-bit VP9 and AV1 kept
-  10-bit on Windows; VideoToolbox on macOS; thumbnails and the render's
-  encoding on the card.
+  10-bit on Windows; macOS's decoded pictures straight to Metal;
+  thumbnails and the render's encoding on the card.
 - **Text and titles, further** — Titles & Text's rich text (formatting
   per selection, as VEGAS's text box), kerning and complex scripts, its
   Animation list; subtitle formats (SRT, WebVTT, closed captions).
