@@ -2199,7 +2199,8 @@ fn flicker_matched(v: f32, k: u32) -> f32 {
     if !(x > -1.0 && x < 1024.0) {
         return v;
     }
-    let l = i32(x);
+    // Cut toward zero first, as the processor's `as i32` does.
+    let l = i32(trunc(x));
     if l < P.i.x || l >= P.i.y {
         return v;
     }

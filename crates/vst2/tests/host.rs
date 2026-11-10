@@ -295,12 +295,21 @@ fn libraries_are_looked_at_in_a_process_of_their_own() {
     } else {
         assert!(matches!(crashed.result, Err(Failure::Crashed(_))));
     }
+    // Aborting as it starts: the child's crash; where the guard catches an
+    // abort too (macOS), the child lives and tells it.
     let ended = scanner(&[("BV_VST2_TESTPLUG_CRASH", "start")], None).describe(&file);
-    assert!(
-        matches!(ended.result, Err(Failure::Crashed(_))),
-        "{:?}",
-        ended.result
-    );
+    let told = match &ended.result {
+        Err(Failure::Crashed(_)) => true,
+        Err(Failure::Refused(why)) => cfg!(target_os = "macos") && why.contains("crashed"),
+        Ok(effects) => {
+            cfg!(target_os = "macos")
+                && effects
+                    .iter()
+                    .all(|e| e.error.as_deref().is_some_and(|w| w.contains("crashed")))
+        }
+        _ => false,
+    };
+    assert!(told, "{:?}", ended.result);
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
 }
 

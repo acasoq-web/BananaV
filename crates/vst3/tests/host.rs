@@ -518,13 +518,21 @@ fn modules_are_looked_at_in_a_process_of_their_own() {
     } else {
         assert!(matches!(crashed.result, Err(Failure::Crashed(_))));
     }
-    // Ending the process as one starts: the child's crash.
+    // Aborting as one starts: the child's crash; where the guard catches
+    // an abort too (macOS), the child lives and tells it.
     let ended = scanner(&[("BV_VST3_TESTPLUG_CRASH", "start")]).describe(&bundle);
-    assert!(
-        matches!(ended.result, Err(Failure::Crashed(_))),
-        "{:?}",
-        ended.result
-    );
+    let told = match &ended.result {
+        Err(Failure::Crashed(_)) => true,
+        Err(Failure::Refused(why)) => cfg!(target_os = "macos") && why.contains("crashed"),
+        Ok(effects) => {
+            cfg!(target_os = "macos")
+                && effects
+                    .iter()
+                    .all(|e| e.error.as_deref().is_some_and(|w| w.contains("crashed")))
+        }
+        _ => false,
+    };
+    assert!(told, "{:?}", ended.result);
     // In the cache: what worked is kept.
     let mut cache = bv_vst3::scan::Cache::default();
     let describe = |m: &Path| scanner(&[]).describe(m);

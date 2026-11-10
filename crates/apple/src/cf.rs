@@ -65,7 +65,10 @@ impl Owned {
     /// # Safety
     /// `r` is null or a reference the caller owns.
     pub unsafe fn take(r: Ref) -> Option<Owned> {
-        (!r.is_null()).then_some(Owned(r))
+        // Never `then_some(Owned(r))`: that makes the object first, and
+        // dropping it for a null releases null, which Core Foundation
+        // answers by ending the program.
+        if r.is_null() { None } else { Some(Owned(r)) }
     }
 
     /// A reference of its own to `r`, which someone else owns.
@@ -95,8 +98,12 @@ impl Owned {
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        // SAFETY: a reference this owns.
-        unsafe { CFRelease(self.0) };
+        // Never null (`take` and `retain` make none of a null): checked all
+        // the same, Core Foundation ending the program on a null.
+        if !self.0.is_null() {
+            // SAFETY: a reference this owns.
+            unsafe { CFRelease(self.0) };
+        }
     }
 }
 
