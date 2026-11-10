@@ -39,14 +39,16 @@ ninja -C "$work/dav1d/build" install
 mkdir -p "$prefix/share/licenses/dav1d"
 cp "$work/dav1d/COPYING" "$prefix/share/licenses/dav1d/"
 
-# LAME: MP3 encoding. Its symbol list names a function its sources no
-# longer have, which Apple's linker refuses: left out.
+# LAME: MP3 encoding. Its symbol list names functions the library does
+# not have here — one its sources no longer have, and the decoder's
+# (`hip_…`, `lame_decode…`), left out with the decoder —, which Apple's
+# linker refuses: they leave the list too.
 curl -fsSL --retry 5 -o "$work/lame.tar.gz" \
     "https://downloads.sourceforge.net/project/lame/lame/$lame_version/lame-$lame_version.tar.gz"
 tar -xzf "$work/lame.tar.gz" -C "$work"
 (
     cd "$work/lame-$lame_version"
-    sed -i '' '/lame_init_old/d' include/libmp3lame.sym
+    sed -i '' -e '/lame_init_old/d' -e '/^hip_/d' -e '/^lame_decode/d' include/libmp3lame.sym
     CFLAGS="-O2 $min" LDFLAGS="$min" ./configure --prefix="$prefix" \
         --enable-shared --disable-static --disable-frontend --disable-decoder
     make -j"$jobs"
