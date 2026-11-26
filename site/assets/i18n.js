@@ -4,6 +4,27 @@
 // and a button to the language menu in index.html.
 window.BANANAV_I18N = {
   "pt-BR": {
+    // BananaV 0.4.0.
+    "BananaV 0.4.0 is out, with 267 new professional effects": "O BananaV 0.4.0 saiu, com 267 efeitos profissionais novos",
+    "What's new in 0.4.0": "Novidades da versão 0.4.0",
+    "267 new professional effects": "267 efeitos profissionais novos",
+    "Banana Split, a pack of effects, generators and transitions on the graphics card, a preview that changes speed as it plays, AI agents and steadier renders.": "Banana Split, um pacote de efeitos, geradores e transições na placa de vídeo, uma prévia que muda de velocidade enquanto toca, agentes de IA e renderizações mais estáveis.",
+    "Banana Split: 267 effects": "Banana Split: 267 efeitos",
+    "147 video effects — glows, lens flares, color looks, distortions, blurs, stylized looks and time effects —, 38 generators and 82 transitions, with over 700 presets.": "147 efeitos de vídeo — brilhos, reflexos de lente, looks de cor, distorções, desfoques, estilizações e efeitos de tempo —, 38 geradores e 82 transições, com mais de 700 presets.",
+    "The preview's speed, as it plays": "A velocidade da prévia, enquanto toca",
+    "From 0.25x to 4x, changed with K and L without a stop, voices keeping their pitch, and sped-up 4K staying smooth.": "De 0,25x a 4x, mudada com K e L sem parar, as vozes mantendo o tom, e 4K acelerado continuando liso.",
+    "AI agents and a command line": "Agentes de IA e linha de comando",
+    "Render and edit projects from scripts, and let AI agents such as Claude edit through BananaV's MCP server, every edit an undo step.": "Renderize e edite projetos por scripts, e deixe agentes de IA como o Claude editarem pelo servidor MCP do BananaV, cada edição um passo de desfazer.",
+    "Faster, steadier renders": "Renderizações mais rápidas e estáveis",
+    "No more slowdowns at the ends of recordings, no render left waiting on a graphics card's encoder, and the computer kept awake while it renders.": "Sem lentidão no fim das gravações, nenhuma renderização esperando para sempre o codificador da placa, e o computador acordado enquanto renderiza.",
+    "SVG drawings and more MOV files": "Desenhos SVG e mais arquivos MOV",
+    "SVG drawings import sharp, more MOV files open, and phones' portrait videos come in standing up.": "Desenhos SVG entram nítidos, mais arquivos MOV abrem, e vídeos de celular na vertical entram em pé.",
+    "BananaV Mods": "Mods do BananaV",
+    "Extras you switch on: Track Select tools, envelope points selected with events, the Transform window and AI agents.": "Extras que você liga: ferramentas Track Select, pontos de envelope selecionados com os eventos, a janela Transform e agentes de IA.",
+    "BananaV 0.4.0 is out for Windows and Linux, and for macOS as an experimental version. Its source code is on GitHub.": "O BananaV 0.4.0 saiu para Windows e Linux, e para macOS como versão experimental. O código-fonte está no GitHub.",
+    "November 26, 2026": "26 de novembro de 2026",
+    "BananaV 0.4.0, 267 new effects": "BananaV 0.4.0, 267 efeitos novos",
+    "Banana Split brings 267 professional effects, generators and transitions with over 700 presets. The preview's speed changes as it plays with voices keeping their pitch, AI agents edit projects through BananaV's MCP server, and renders are faster and steadier. Read what changed.": "O Banana Split traz 267 efeitos, geradores e transições profissionais com mais de 700 presets. A velocidade da prévia muda enquanto toca, com as vozes mantendo o tom, agentes de IA editam projetos pelo servidor MCP do BananaV, e as renderizações ficaram mais rápidas e estáveis. Veja o que mudou.",
     // BananaV 0.3.0.
     "BananaV comes to the Mac": "O BananaV chega ao Mac",
     "macOS as an experimental version, smooth 4K playback, VST plug-ins, a Transform mode and windows where you want them.": "O macOS como versão experimental, reprodução lisa em 4K, plug-ins VST, um modo Transform e janelas onde você quiser.",

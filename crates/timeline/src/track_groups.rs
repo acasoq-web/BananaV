@@ -228,8 +228,8 @@ impl Project {
         for g in groups {
             // Its runs of tracks: the longest stays (the first of equals).
             let mut runs: Vec<(usize, usize)> = Vec::new();
-            for i in 0..n {
-                if self.tracks[i].group == Some(g) {
+            for (i, t) in self.tracks.iter().enumerate() {
+                if t.group == Some(g) {
                     match runs.last_mut() {
                         Some((_, end)) if *end == i => *end = i + 1,
                         _ => runs.push((i, i + 1)),
