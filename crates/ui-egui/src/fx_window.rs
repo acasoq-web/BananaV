@@ -400,15 +400,22 @@ struct PanEditor {
     zoom: f32,
     offset: Vec2,
     drag: Option<Drag>,
+    /// The needle's time (from the event's start) the drag began at: the
+    /// box it edits is the one there.
+    drag_at: Tick,
     /// The box (the F) picked by a click or a drag on it: the arrow keys
     /// move it, until a click off it.
     picked: bool,
     /// Seções abertas: Posição, Rotação, Interpolação, Origem, Espaço.
     sections: [bool; 5],
-    /// Posição na linha de quadros-chave, a partir do início do clipe.
+    /// The keyframe controller's needle, from the event's start.
     pos: Tick,
-    /// Acompanha o cursor da timeline.
+    /// Sync Cursor: the needle is the timeline's (the playback position
+    /// while it plays).
     sync: bool,
+    /// The needle dragged in the keyframe controller while playing holds
+    /// playback (let go when the drag ends).
+    holds_playback: bool,
     /// Geometria do último desenho da área de trabalho.
     view: Option<(Space, Viewport)>,
     /// The keyframe controller's row picked: Position (the framing) or
@@ -477,10 +484,12 @@ impl Default for PanEditor {
             zoom: 1.0,
             offset: Vec2::ZERO,
             drag: None,
+            drag_at: Tick::ZERO,
             picked: false,
             sections: [true; 5],
             pos: Tick::ZERO,
             sync: true,
+            holds_playback: false,
             view: None,
             row: KeyRow::Position,
             mask: crate::pancrop_mask::MaskEditor::default(),
@@ -787,6 +796,15 @@ impl FxWindow {
             })
             .min_size([360.0, 220.0])
             .show(ctx, |ui| {
+                // The keys, while this window (an OS window of its own) has
+                // them, are the program's, as VEGAS's (see below): the
+                // transport's first, before the page takes them.
+                let program_keys = !ui.ctx().embed_viewports()
+                    && ui.input(|i| i.focused)
+                    && !ui.ctx().egui_wants_keyboard_input();
+                if program_keys {
+                    app.transport_keys(ui.ctx());
+                }
                 let top = ui.cursor().top();
                 let name = self.target.name(&project);
                 let header = match (self.node, self.target) {
@@ -823,13 +841,10 @@ impl FxWindow {
                     Node::Effect(i) => self.effect_editor(ui, app, &chain, i, chooser),
                 };
                 // The other keys, while this window (an OS window of its
-                // own) has them, are the program's, as VEGAS's: Space plays,
-                // Ctrl+Z undoes… The clipboard's, Delete and Ctrl+arrows
-                // stay the page's (its keyframes').
-                if !ui.ctx().embed_viewports()
-                    && ui.input(|i| i.focused)
-                    && !ui.ctx().egui_wants_keyboard_input()
-                {
+                // own) has them, are the program's, as VEGAS's: Ctrl+Z
+                // undoes… The clipboard's, Delete and Ctrl+arrows stay the
+                // page's (its keyframes').
+                if program_keys && !ui.ctx().egui_wants_keyboard_input() {
                     ui.input_mut(|i| {
                         i.events.retain(|e| match e {
                             egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => false,
@@ -1873,8 +1888,11 @@ impl FxWindow {
             .map_or(out, |v| (v.width as f32, v.height as f32));
         let rate = s.frame_rate;
         let last = (clip.duration - rate.frame_duration()).max(Tick::ZERO);
-        if self.pan.sync && app.cursor >= clip.start && app.cursor < clip.end() {
-            self.pan.pos = rate.snap_floor(app.cursor) - clip.start;
+        // Sync Cursor: the needle is the timeline's, the playback position
+        // while it plays (it moves with the preview's frames).
+        let now = app.display_time();
+        if self.pan.sync && now >= clip.start && now < clip.end() {
+            self.pan.pos = rate.snap_floor(now) - clip.start;
         }
         self.pan.pos = self.pan.pos.clamp(Tick::ZERO, last);
         let t = clip.start + self.pan.pos;
@@ -2299,6 +2317,7 @@ impl FxWindow {
         if resp.drag_started()
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
+            self.pan.drag_at = self.pan.pos;
             let view = Drag::View {
                 offset: self.pan.offset,
                 from: o,
@@ -2325,6 +2344,19 @@ impl FxWindow {
             } else {
                 None
             };
+        }
+        // A drag of the box edits the box at the needle's time it began
+        // at. The needle gone elsewhere meanwhile (Sync Cursor following
+        // playback, a drag the system never let go of), it ends: the box
+        // would be set at every time the needle passes, a keyframe at each.
+        // Moving the view goes on.
+        if self
+            .pan
+            .drag
+            .is_some_and(|d| !matches!(d, Drag::View { .. }))
+            && self.pan.drag_at != self.pan.pos
+        {
+            self.pan.drag = None;
         }
         if resp.dragged()
             && let (Some(d), Some(p)) = (self.pan.drag, pointer)
@@ -2577,7 +2609,9 @@ impl FxWindow {
                 .snap
                 .then_some([f64::from(src.0) / n, f64::from(src.1) / n]);
             let normal = self.pan.tool == Tool::Normal;
-            *new_mask = self.pan.mask.workspace(
+            // What the workspace did, else what the properties did (drawn
+            // before it, from the same masks).
+            let edited = self.pan.mask.workspace(
                 ui,
                 &resp,
                 &painter,
@@ -2587,6 +2621,9 @@ impl FxWindow {
                 grid,
                 normal,
             );
+            if edited.is_some() {
+                *new_mask = edited;
+            }
         } else {
             paint_f_box(&painter, &sp, &vp, flips, turns, true);
         }
@@ -2677,8 +2714,25 @@ impl FxWindow {
         if let Some(np) = answer.pos {
             self.pan.pos = np;
             if self.pan.sync {
-                app.seek(rate.snap_floor(clip.start + np));
+                let t = rate.snap_floor(clip.start + np);
+                if !app.is_playing() {
+                    app.seek(t);
+                } else if self.pan.keys.dragging() {
+                    // Dragged while playing: playback waits at the needle,
+                    // as the timeline's held needle, until it is let go.
+                    app.hold_playback();
+                    app.move_playhead(t);
+                    self.pan.holds_playback = true;
+                } else {
+                    // A click while playing: playback goes on from there,
+                    // as from a click on the timeline's ruler.
+                    app.seek_playback(t);
+                }
             }
+        }
+        if self.pan.holds_playback && !self.pan.keys.dragging() {
+            self.pan.holds_playback = false;
+            app.release_playback();
         }
     }
 
@@ -2854,8 +2908,8 @@ impl Chooser {
     /// Save LUT: the chain's enabled effects as a `.cube` file.
     fn save_lut(&self, app: &mut BananaApp) {
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Save LUT"))
-            .add_filter(tr("Cube LUT"), &["cube"])
+            .set_title(crate::i18n::os_text(tr("Save LUT")))
+            .add_filter(crate::i18n::os_text(tr("Cube LUT")), &["cube"])
             .set_file_name("Plug-In Chain.cube")
             .save_file()
         else {
@@ -4250,7 +4304,7 @@ fn animate_footer(ui: &mut egui::Ui) -> bool {
 /// The bar between a plug-in's settings and its keyframe controller
 /// (`tray` high, at most `most`): dragged, it gives the controller the
 /// height returned.
-fn splitter(ui: &mut egui::Ui, tray: f32, most: f32) -> Option<f32> {
+pub(crate) fn splitter(ui: &mut egui::Ui, tray: f32, most: f32) -> Option<f32> {
     let (bar, resp) =
         ui.allocate_exact_size(vec2(ui.available_width(), SPLITTER), egui::Sense::drag());
     let hot = resp.hovered() || resp.dragged();
@@ -5318,6 +5372,532 @@ mod tests {
     fn shapes(app: &BananaApp, id: ClipId) -> Vec<Vec<bv_timeline::mask::MaskAnchor>> {
         let c = app.project().clip(id).expect("the event");
         c.mask.as_ref().expect("masks").shapes_at(Tick::ZERO)
+    }
+
+    /// One frame at `t` seconds (the time egui tells clicks from drags by).
+    fn frame_at(ctx: &egui::Context, app: &mut BananaApp, t: &mut f64, events: Vec<egui::Event>) {
+        *t += 1.0 / 60.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 960.0))),
+            events,
+            time: Some(*t),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+        out.textures_delta.clear();
+    }
+
+    /// A drag on the workspace from `from` whose release never comes (the
+    /// pointer leaves the window and is let go outside it), then the
+    /// timeline's cursor walked from the event's start to `to` while the
+    /// pointer moves over the workspace again: a drag the system never
+    /// let go of, the needle following the cursor.
+    fn held_while_the_needle_moves(
+        ctx: &egui::Context,
+        app: &mut BananaApp,
+        id: ClipId,
+        from: Pos2,
+        to: Tick,
+    ) {
+        let mut t = 0.0;
+        for _ in 0..4 {
+            frame_at(ctx, app, &mut t, Vec::new());
+        }
+        frame_at(ctx, app, &mut t, vec![egui::Event::PointerMoved(from)]);
+        frame_at(ctx, app, &mut t, vec![button(from, true)]);
+        for i in 1..=5 {
+            let p = from + vec2(3.0 * i as f32, 0.0);
+            frame_at(ctx, app, &mut t, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame_at(ctx, app, &mut t, vec![egui::Event::PointerGone]);
+        frame_at(ctx, app, &mut t, Vec::new());
+        let start = app.project().clip(id).expect("the event").start;
+        for i in 0..=20 {
+            app.cursor = start + Tick(to.0 * i / 20);
+            let p = from + vec2(20.0 + i as f32, 5.0);
+            frame_at(ctx, app, &mut t, vec![egui::Event::PointerMoved(p)]);
+        }
+    }
+
+    /// A drag on the workspace that goes on while the needle moves — its
+    /// release never came (macOS can drop it when the pointer is let go
+    /// outside the window), and Sync Cursor follows the timeline's cursor
+    /// — edits only the time it began at: it ends when the needle leaves
+    /// it, instead of leaving a keyframe at every time the needle passes.
+    /// The masks' drags and the box's alike.
+    #[test]
+    fn a_drag_held_while_the_needle_moves_leaves_no_keyframe_at_each_step() {
+        use crate::pancrop_mask::MaskTool;
+        // The masks: an anchor of the oval dragged, between two keyframes.
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        let (id, sp) = masked(&ctx, &mut app, MaskTool::Normal);
+        let duration = app.project().clip(id).expect("the event").duration;
+        let rate = app.project().settings.frame_rate;
+        let later = rate.snap_floor(Tick(duration.0 * 6 / 10));
+        app.modify(|p| {
+            let m = p.clip_mut(id).and_then(|c| c.mask.as_mut()).expect("masks");
+            m.add_key(Tick::ZERO);
+            m.map_path_at(later, 0, |q| [q[0] + 40.0, q[1] + 20.0]);
+        });
+        app.cursor = app.project().clip(id).expect("the event").start;
+        let anchor = shapes(&app, id)[0][0].at;
+        let mask_keys = |app: &BananaApp| {
+            let c = app.project().clip(id).expect("the event");
+            c.mask.as_ref().map_or(0, |m| m.keys.len())
+        };
+        let before = mask_keys(&app);
+        held_while_the_needle_moves(
+            &ctx,
+            &mut app,
+            id,
+            sp.screen64((anchor[0], anchor[1])),
+            later,
+        );
+        assert_eq!(
+            mask_keys(&app),
+            before,
+            "the drag at the first keyframe, no other"
+        );
+        assert!(
+            app.clip_windows.fx_window().expect("the window").pan.pos > Tick::ZERO,
+            "the needle moved"
+        );
+
+        // The box: moved from inside it, on the Position row.
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.load_demo();
+        let id = app.primary_clip().expect("an event picked");
+        app.cursor = app.project().clip(id).expect("the event").start;
+        app.open_clip_window("pancrop");
+        let mut t = 0.0;
+        for _ in 0..4 {
+            frame_at(&ctx, &mut app, &mut t, Vec::new());
+        }
+        let inside = app
+            .pan_crop_spot_for_review(0.3, 0.3)
+            .expect("the box drawn");
+        let duration = app.project().clip(id).expect("the event").duration;
+        held_while_the_needle_moves(&ctx, &mut app, id, inside, Tick(duration.0 * 6 / 10));
+        let keys = &app.project().clip(id).expect("the event").pan_crop.keys;
+        // The box at the start, and where the drag began: no more.
+        assert!(
+            keys.len() <= 2,
+            "{:?}",
+            keys.iter().map(|k| k.at.0).collect::<Vec<_>>()
+        );
+    }
+
+    /// The needle walked between two mask keyframes with the properties
+    /// shown and a path picked (its values there change at every step)
+    /// makes no keyframe: the properties write only what is edited.
+    #[test]
+    fn the_needle_between_mask_keyframes_with_the_properties_makes_none() {
+        use crate::pancrop_mask::MaskTool;
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.pan_crop_properties_for_review(true);
+        let (id, _) = masked(&ctx, &mut app, MaskTool::Normal);
+        let clip = app.project().clip(id).expect("the event").clone();
+        let rate = app.project().settings.frame_rate;
+        let later = rate.snap_floor(Tick(clip.duration.0 * 6 / 10));
+        app.modify(|p| {
+            let m = p.clip_mut(id).and_then(|c| c.mask.as_mut()).expect("masks");
+            m.add_key(Tick::ZERO);
+            m.map_path_at(later, 0, |q| [q[0] + 40.0, q[1] + 20.0]);
+            // A look of its own at the second keyframe.
+            let mut look = m.paths_at_units(bv_timeline::pancrop::local_units(later))[0].clone();
+            look.opacity = 0.35;
+            look.feather_pct = 9.0;
+            m.set_look_at(later, 0, &look);
+        });
+        app.clip_windows.mask_row = Some((Some(0), Some(0), true));
+        let mut t = 0.0;
+        for _ in 0..4 {
+            frame_at(&ctx, &mut app, &mut t, Vec::new());
+        }
+        let keys = |app: &BananaApp| {
+            let c = app.project().clip(id).expect("the event");
+            c.mask.as_ref().map_or(0, |m| m.keys.len())
+        };
+        let before = keys(&app);
+        assert_eq!(before, 2);
+        for i in 0..=30 {
+            app.cursor = clip.start + Tick(later.0 * i / 30);
+            frame_at(&ctx, &mut app, &mut t, Vec::new());
+        }
+        assert_eq!(keys(&app), before);
+    }
+
+    /// The Mask row's properties edit the picked path: its Opacity dragged
+    /// in them is the path's (the workspace drawn after them used to put
+    /// the masks back as they were).
+    #[test]
+    fn the_mask_properties_edit_the_picked_path() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let id = app.primary_clip().expect("an event picked");
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.state_mut().pan_crop_properties_for_review(true);
+        assert!(h.state_mut().pan_crop_masks_for_review());
+        h.run_steps(8);
+        let opacity = |h: &Harness<'_, BananaApp>| {
+            let c = h.state().project().clip(id).expect("the event").clone();
+            c.mask.expect("masks").paths[0].opacity
+        };
+        assert_eq!(opacity(&h), 1.0);
+        let label = h.get_by_label("Opacity (%):").rect();
+        // Its value, on the label's row.
+        let field = h
+            .query_all_by_role(egui::accesskit::Role::SpinButton)
+            .map(|n| n.rect())
+            .find(|r| (r.center().y - label.center().y).abs() < 6.0 && r.left() > label.left())
+            .expect("the Opacity field");
+        let from = field.center();
+        h.event(egui::Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=10 {
+            h.event(egui::Event::PointerMoved(from - vec2(4.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(from - vec2(40.0, 0.0), false));
+        h.run_steps(4);
+        let now = opacity(&h);
+        assert!(now < 0.95 && now > 0.5, "the path's opacity: {now}");
+    }
+
+    /// A report's steps: a mask without a feather, its Feather type picked
+    /// in the properties (In: it stays, at 5 % as the small toolbar's), then
+    /// its Feather (%) dragged there.
+    #[test]
+    fn the_mask_properties_set_the_feather() {
+        use bv_timeline::mask::{MaskFeather, MaskPath};
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let id = app.primary_clip().expect("an event picked");
+        let mut h = Harness::builder()
+            .with_size(vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.state_mut().pan_crop_properties_for_review(true);
+        assert!(h.state_mut().pan_crop_masks_for_review());
+        // The second path, the rectangle: no feather.
+        h.state_mut().clip_windows.mask_row = Some((Some(1), Some(0), true));
+        h.run_steps(8);
+        let path = |h: &Harness<'_, BananaApp>| -> MaskPath {
+            let c = h.state().project().clip(id).expect("the event").clone();
+            c.mask.expect("masks").paths[1].clone()
+        };
+        assert_eq!(path(&h).feather, MaskFeather::None);
+        let click = |h: &mut Harness<'_, BananaApp>, at: Pos2| {
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            h.event(button(at, true));
+            h.step();
+            h.event(button(at, false));
+            h.run_steps(3);
+        };
+        let row = |h: &Harness<'_, BananaApp>, name: &str| h.get_by_label(name).rect();
+        let label = row(&h, "Feather type:");
+        let combo = h
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .map(|n| n.rect())
+            .find(|r| (r.center().y - label.center().y).abs() < 6.0 && r.left() > label.left())
+            .expect("the Feather type's value");
+        click(&mut h, combo.center());
+        let inside = h
+            .query_all_by_label("In")
+            .map(|n| n.rect())
+            .find(|r| r.top() > combo.top())
+            .expect("In among the feathers");
+        click(&mut h, inside.center());
+        h.run_steps(8);
+        let p = path(&h);
+        assert_eq!(p.feather, MaskFeather::In, "the Feather type stays");
+        assert_eq!(p.feather_pct, 5.0);
+        // Its Feather (%), dragged right.
+        let label = row(&h, "Feather (%):");
+        let field = h
+            .query_all_by_role(egui::accesskit::Role::SpinButton)
+            .map(|n| n.rect())
+            .find(|r| (r.center().y - label.center().y).abs() < 6.0 && r.left() > label.left())
+            .expect("the Feather (%) field");
+        let from = field.center();
+        h.event(egui::Event::PointerMoved(from));
+        h.step();
+        h.event(button(from, true));
+        h.step();
+        for i in 1..=10 {
+            h.event(egui::Event::PointerMoved(from + vec2(4.0 * i as f32, 0.0)));
+            h.step();
+        }
+        h.event(button(from + vec2(40.0, 0.0), false));
+        h.run_steps(4);
+        let p = path(&h);
+        assert_eq!(p.feather, MaskFeather::In);
+        assert!(p.feather_pct > 5.5, "the path's feather: {}", p.feather_pct);
+    }
+
+    /// Waits for playback to start (the preview's first frame in).
+    fn until_playing(ctx: &egui::Context, app: &mut BananaApp, to: Option<egui::ViewportId>) {
+        let start = std::time::Instant::now();
+        while !app.engine.is_playing() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "playback started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            match to {
+                Some(w) => frame_in_windows(ctx, app, w, Vec::new()),
+                None => frame(ctx, app, Vec::new()),
+            }
+        }
+    }
+
+    fn pan_pos(app: &BananaApp) -> Tick {
+        app.clip_windows.fx_window().expect("the window").pan.pos
+    }
+
+    /// The demo's event picked, the edit cursor at its start, its Pan/Crop
+    /// window open.
+    fn pan_crop_open(ctx: &egui::Context, app: &mut BananaApp) -> Clip {
+        app.load_demo();
+        let id = app.primary_clip().expect("an event picked");
+        let clip = app.project().clip(id).expect("the event").clone();
+        assert!(clip.duration > Tick::from_seconds(2), "{:?}", clip.duration);
+        app.cursor = clip.start;
+        app.open_clip_window("pancrop");
+        for _ in 0..4 {
+            frame(ctx, app, Vec::new());
+        }
+        clip
+    }
+
+    /// With Sync Cursor, the keyframe controller's needle is the
+    /// timeline's playback position while it plays (the edit cursor
+    /// staying), the held playback needle's too; without, it stays.
+    #[test]
+    fn the_pan_crop_needle_follows_playback() {
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        let clip = pan_crop_open(&ctx, &mut app);
+        let rate = app.project().settings.frame_rate;
+        assert_eq!(pan_pos(&app), Tick::ZERO);
+        app.start_playback(app.cursor);
+        until_playing(&ctx, &mut app, None);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        frame(&ctx, &mut app, Vec::new());
+        let play = app.playhead.expect("playing");
+        assert!(play > clip.start && play < clip.end(), "{play:?}");
+        assert_eq!(pan_pos(&app), rate.snap_floor(play) - clip.start);
+        assert!(pan_pos(&app) > Tick::ZERO, "the needle moved");
+        assert_eq!(app.cursor, clip.start, "the edit cursor stays");
+        // The timeline's playback needle grabbed and moved.
+        app.hold_playback();
+        let to = clip.start + Tick(clip.duration.0 / 2);
+        app.move_playhead(to);
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(pan_pos(&app), rate.snap_floor(to) - clip.start);
+        // Sync Cursor off: the needle stays where it is.
+        app.clip_windows
+            .fx_window_mut()
+            .expect("the window")
+            .pan
+            .sync = false;
+        app.move_playhead(clip.start + Tick(clip.duration.0 / 4));
+        frame(&ctx, &mut app, Vec::new());
+        assert_eq!(pan_pos(&app), rate.snap_floor(to) - clip.start);
+        app.stop();
+    }
+
+    /// While playing, a click in the keyframe controller goes on playing
+    /// from there (as a click on the timeline's ruler); a drag holds
+    /// playback at the needle and lets it go on from where it is let go.
+    #[test]
+    fn the_pan_crop_controller_moves_playback() {
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        let clip = pan_crop_open(&ctx, &mut app);
+        let rate = app.project().settings.frame_rate;
+        app.start_playback(app.cursor);
+        until_playing(&ctx, &mut app, None);
+        // A click on the row: the edit cursor and playback there.
+        let spot = app
+            .pan_crop_lane_spot_for_review(false, 0.7)
+            .expect("the row");
+        click_at(&ctx, &mut app, spot);
+        let clicked = app.cursor;
+        assert!(
+            clicked > clip.start + Tick(clip.duration.0 / 2),
+            "{clicked:?}"
+        );
+        assert!(clip.start + pan_pos(&app) >= clicked, "the needle there");
+        assert!(app.is_playing());
+        until_playing(&ctx, &mut app, None);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(app.playhead.expect("playing") >= clicked);
+        // A drag: held at the needle while it goes, on from where let go.
+        let (from, to) = (
+            app.pan_crop_lane_spot_for_review(false, 0.1)
+                .expect("the row"),
+            app.pan_crop_lane_spot_for_review(false, 0.2)
+                .expect("the row"),
+        );
+        frame(&ctx, &mut app, vec![egui::Event::PointerMoved(from)]);
+        frame(&ctx, &mut app, vec![button(from, true)]);
+        for i in 1..=6 {
+            let p = from + (to - from) * (i as f32 / 6.0);
+            frame(&ctx, &mut app, vec![egui::Event::PointerMoved(p)]);
+        }
+        assert!(app.held_playback, "held while dragged");
+        let left = app.display_time();
+        assert_eq!(left, rate.snap_floor(clip.start + pan_pos(&app)));
+        assert!(left < clicked, "{left:?}");
+        frame(&ctx, &mut app, vec![button(to, false)]);
+        frame(&ctx, &mut app, Vec::new());
+        assert!(!app.held_playback && app.is_playing(), "let go");
+        until_playing(&ctx, &mut app, None);
+        frame(&ctx, &mut app, Vec::new());
+        let at = app.playhead.expect("playing");
+        assert!(at >= left && at < clicked, "on from where let go: {at:?}");
+        app.stop();
+    }
+
+    thread_local! {
+        /// The events for an OS window's next frame (`frame_in_windows`).
+        static WINDOW_EVENTS: std::cell::RefCell<(egui::ViewportId, Vec<egui::Event>)> =
+            const { std::cell::RefCell::new((egui::ViewportId::ROOT, Vec::new())) };
+    }
+
+    /// A frame with the dialogs in OS windows of their own, as in the
+    /// program (each one's contents in a pass with its own input):
+    /// `events` go to window `to`, which has the keyboard.
+    fn frame_in_windows(
+        ctx: &egui::Context,
+        app: &mut BananaApp,
+        to: egui::ViewportId,
+        events: Vec<egui::Event>,
+    ) {
+        ctx.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(|ctx, viewport| {
+            let this = viewport.ids.this;
+            let events = WINDOW_EVENTS.with(|w| {
+                let mut w = w.borrow_mut();
+                if w.0 == this {
+                    std::mem::take(&mut w.1)
+                } else {
+                    Vec::new()
+                }
+            });
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(
+                this,
+                egui::ViewportInfo {
+                    focused: Some(true),
+                    ..Default::default()
+                },
+            );
+            let raw = egui::RawInput {
+                viewport_id: this,
+                viewports,
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(940.0, 640.0))),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let mut ui_cb = viewport.viewport_ui_cb;
+            let mut out = ctx.run_ui(raw, |ui| ui_cb(ui));
+            out.textures_delta.clear();
+        });
+        WINDOW_EVENTS.with(|w| *w.borrow_mut() = (to, events));
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 960.0))),
+            focused: false,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+        out.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        [true, false]
+            .map(|pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            })
+            .to_vec()
+    }
+
+    /// The FX window in an OS window of its own, with the keyboard: Space
+    /// plays and pauses there (Pan/Crop's needle going along), Esc stops,
+    /// Shift+Space plays from the start and Enter stops, as in the main
+    /// window — before the page's controls can take them.
+    #[test]
+    fn the_transport_keys_work_in_the_fx_window() {
+        use egui::{Key, Modifiers};
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        let clip = pan_crop_open(&ctx, &mut app);
+        let rate = app.project().settings.frame_rate;
+        let fx = egui::ViewportId::from_hash_of(egui::Id::new("janela-fx"));
+        for _ in 0..4 {
+            frame_in_windows(&ctx, &mut app, fx, Vec::new());
+        }
+        assert!(app.clip_windows.fx_window().is_some(), "the window open");
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Space, Modifiers::NONE));
+        assert!(app.is_playing(), "Space plays");
+        until_playing(&ctx, &mut app, Some(fx));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        frame_in_windows(&ctx, &mut app, fx, Vec::new());
+        let play = app.playhead.expect("playing");
+        assert_eq!(pan_pos(&app), rate.snap_floor(play) - clip.start);
+        // Space again pauses (the default: Play/Pause), the cursor there.
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Space, Modifiers::NONE));
+        assert!(!app.is_playing(), "Space pauses");
+        assert!(app.cursor >= rate.snap_floor(play), "{:?}", app.cursor);
+        let paused = app.cursor;
+        // Esc stops playback; the window stays open.
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Space, Modifiers::NONE));
+        assert!(app.is_playing());
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Escape, Modifiers::NONE));
+        assert!(!app.is_playing(), "Esc stops");
+        assert_eq!(app.cursor, paused, "the edit cursor stays");
+        assert!(app.clip_windows.fx_window().is_some(), "the window open");
+        // Shift+Space plays from the project's start, Enter stops there.
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Space, Modifiers::SHIFT));
+        assert!(app.is_playing(), "Shift+Space plays");
+        assert!(app.display_time() < paused, "from the start");
+        frame_in_windows(&ctx, &mut app, fx, key(Key::Enter, Modifiers::NONE));
+        assert!(!app.is_playing(), "Enter stops");
     }
 
     fn mask_editor(app: &BananaApp) -> &crate::pancrop_mask::MaskEditor {

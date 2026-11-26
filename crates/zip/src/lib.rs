@@ -327,6 +327,8 @@ fn flags(name: &str) -> u16 {
 #[derive(Debug)]
 pub struct ZipReader<R: Read + Seek> {
     input: R,
+    /// The archive's length.
+    len: u64,
     entries: Vec<Entry>,
 }
 
@@ -428,7 +430,11 @@ impl<R: Read + Seek> ZipReader<R> {
             });
             p += total;
         }
-        Ok(ZipReader { input, entries })
+        Ok(ZipReader {
+            input,
+            len,
+            entries,
+        })
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -486,9 +492,19 @@ impl<R: Read + Seek> ZipReader<R> {
                 }
             }
             DEFLATED => {
+                // The compressed size is the directory's word: one beyond
+                // what the archive holds from here on would ask for memory
+                // the file never fills.
+                let at = self.input.stream_position()?;
+                if e.compressed > self.len.saturating_sub(at) {
+                    return Err(bad("damaged file size"));
+                }
                 let mut packed = vec![0; e.compressed as usize];
                 self.input.read_exact(&mut packed)?;
-                let data = bv_deflate::inflate(&packed).map_err(|err| bad(&err.to_string()))?;
+                // And no more unpacked than the size it declares.
+                let limit = usize::try_from(e.size).unwrap_or(usize::MAX);
+                let data = bv_deflate::inflate_limited(&packed, limit)
+                    .map_err(|err| bad(&err.to_string()))?;
                 if data.len() as u64 != e.size {
                     return Err(bad("wrong size"));
                 }
@@ -571,6 +587,41 @@ mod tests {
         let mut r = ZipReader::new(Cursor::new(bytes)).unwrap();
         let i = r.find("media/clip é.mov").unwrap();
         assert!(r.read(i).is_err());
+    }
+
+    /// Where the first file's ZIP64 sizes are in the central directory of
+    /// `archive(true)`: its size, then its compressed size.
+    fn first_sizes(bytes: &[u8]) -> usize {
+        let cd = bytes
+            .windows(4)
+            .position(|w| w == CENTRAL.to_le_bytes())
+            .unwrap();
+        let name_len = le16(&bytes[cd + 28..]) as usize;
+        assert_eq!(&bytes[cd + 46..cd + 46 + name_len], b"content.otio");
+        cd + 46 + name_len + 4
+    }
+
+    #[test]
+    fn a_compressed_size_beyond_the_archive_is_refused() {
+        let bytes = archive(true);
+        let at = first_sizes(&bytes) + 8;
+        for claimed in [u64::MAX, 1 << 40, bytes.len() as u64] {
+            let mut bytes = bytes.clone();
+            bytes[at..at + 8].copy_from_slice(&claimed.to_le_bytes());
+            let mut r = ZipReader::new(Cursor::new(bytes)).unwrap();
+            assert!(r.read(0).is_err(), "{claimed} bytes");
+        }
+    }
+
+    #[test]
+    fn a_file_that_unpacks_past_its_size_is_refused() {
+        // The file says 10 bytes and unpacks to 450.
+        let mut bytes = archive(true);
+        let at = first_sizes(&bytes);
+        bytes[at..at + 8].copy_from_slice(&10u64.to_le_bytes());
+        let mut r = ZipReader::new(Cursor::new(bytes)).unwrap();
+        let e = r.read(0).unwrap_err();
+        assert!(e.to_string().contains("more data than expected"), "{e}");
     }
 
     #[test]

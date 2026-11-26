@@ -4,6 +4,7 @@
 mod files;
 mod generator;
 mod markers;
+mod mov;
 mod nested;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod plugins;

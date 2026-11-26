@@ -55,11 +55,36 @@ fn all_media() -> Vec<&'static str> {
         .collect()
 }
 
+/// `extensions` as a file dialog's filter takes them: on Linux in capitals
+/// too, its dialogs telling `.MOV` from `.mov` (a phone names its videos
+/// `IMG_1234.MOV`); elsewhere the system's dialogs do not.
+pub(crate) fn cased(extensions: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = extensions.iter().map(|e| (*e).to_string()).collect();
+    if cfg!(target_os = "linux") {
+        for e in extensions {
+            let upper = e.to_ascii_uppercase();
+            if upper != *e {
+                out.push(upper);
+            }
+        }
+    }
+    out
+}
+
 /// Each kind of media's filter, then any file's.
 fn kinds(d: rfd::FileDialog) -> rfd::FileDialog {
-    d.add_filter(tr("Video Files"), VIDEO_EXTENSIONS)
-        .add_filter(tr("Audio Files"), AUDIO_EXTENSIONS)
-        .add_filter(tr("Image Files"), IMAGE_EXTENSIONS)
+    d.add_filter(
+        crate::i18n::os_text(tr("Video Files")),
+        &cased(VIDEO_EXTENSIONS),
+    )
+    .add_filter(
+        crate::i18n::os_text(tr("Audio Files")),
+        &cased(AUDIO_EXTENSIONS),
+    )
+    .add_filter(
+        crate::i18n::os_text(tr("Image Files")),
+        &cased(IMAGE_EXTENSIONS),
+    )
 }
 
 /// Import Media's filters: all media (projects too, which are nested),
@@ -67,9 +92,12 @@ fn kinds(d: rfd::FileDialog) -> rfd::FileDialog {
 pub(crate) fn media_filters(d: rfd::FileDialog) -> rfd::FileDialog {
     let mut all = all_media();
     all.push("bvproj");
-    kinds(d.add_filter(tr("All Media Files"), &all))
-        .add_filter(tr("BananaV Project"), &["bvproj"])
-        .add_filter(tr("All Files"), &["*"])
+    kinds(d.add_filter(crate::i18n::os_text(tr("All Media Files")), &cased(&all)))
+        .add_filter(
+            crate::i18n::os_text(tr("BananaV Project")),
+            &cased(&["bvproj"]),
+        )
+        .add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
 }
 
 /// File › Open's filters: projects, timelines and media together first
@@ -78,14 +106,29 @@ pub(crate) fn open_filters(d: rfd::FileDialog) -> rfd::FileDialog {
     let mut all = vec!["bvproj", "veg", "otio", "otioz", "xml", "fcpxml"];
     all.extend(all_media());
     let d = d
-        .add_filter(tr("All Project and Media Files"), &all)
-        .add_filter(tr("BananaV Project"), &["bvproj"])
-        .add_filter(tr("VEG Project (*.veg)"), &["veg"])
-        .add_filter("OpenTimelineIO (*.otio, *.otioz)", &["otio", "otioz"])
-        .add_filter("Final Cut Pro 7/DaVinci Resolve (*.xml)", &["xml"])
-        .add_filter("Final Cut Pro X (*.fcpxml)", &["fcpxml"])
-        .add_filter(tr("All Media Files"), &all_media());
-    kinds(d).add_filter(tr("All Files"), &["*"])
+        .add_filter(
+            crate::i18n::os_text(tr("All Project and Media Files")),
+            &cased(&all),
+        )
+        .add_filter(
+            crate::i18n::os_text(tr("BananaV Project")),
+            &cased(&["bvproj"]),
+        )
+        .add_filter(
+            crate::i18n::os_text(tr("VEG Project (*.veg)")),
+            &cased(&["veg"]),
+        )
+        .add_filter(
+            "OpenTimelineIO (*.otio, *.otioz)",
+            &cased(&["otio", "otioz"]),
+        )
+        .add_filter("Final Cut Pro 7/DaVinci Resolve (*.xml)", &cased(&["xml"]))
+        .add_filter("Final Cut Pro X (*.fcpxml)", &cased(&["fcpxml"]))
+        .add_filter(
+            crate::i18n::os_text(tr("All Media Files")),
+            &cased(&all_media()),
+        );
+    kinds(d).add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
 }
 
 /// Why a file could not be imported, in the interface's language.
@@ -116,6 +159,19 @@ pub(crate) fn error_text(e: &MediaError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dialogs' patterns: in capitals too where the dialogs tell them
+    /// apart (Linux).
+    #[test]
+    fn dialogs_take_capitals_where_they_differ() {
+        let got = cased(&["mov", "mp4"]);
+        if cfg!(target_os = "linux") {
+            assert_eq!(got, ["mov", "mp4", "MOV", "MP4"]);
+        } else {
+            assert_eq!(got, ["mov", "mp4"]);
+        }
+        assert_eq!(kind_of(Path::new("IMG_1234.MOV")), Some(FileKind::Video));
+    }
 
     #[test]
     fn kinds_by_extension() {

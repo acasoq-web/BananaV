@@ -31,6 +31,7 @@ mod resample;
 mod sample;
 mod scenes;
 mod source_view;
+mod tempo;
 mod thumbs;
 mod track_mix;
 
@@ -78,7 +79,7 @@ pub use motion_tracking::{TrackDirection, TrackRequest, TrackingProgress};
 pub use nonrealtime::{NrtFormat, NrtProgress, trim_sound};
 pub use playback::{AudioStatus, PlayOptions};
 pub use prerender::{PrerenderFormat, PrerenderOptions, PrerenderProgress};
-pub use preview::{Channel, PreviewFrame, PreviewLook};
+pub use preview::{Channel, FrameKey, PreviewFrame, PreviewLook};
 pub use proxy::{ProxyDone, ProxyProgress, decodes_in_time, larger_than_4k, proxy_path};
 pub use realtime::{RealTimeDone, RealTimeProgress};
 pub use record::{InputDevice, RecordTake, Recorded, RecordingWave, input_devices};
@@ -87,8 +88,8 @@ pub use render::{
     RenderOptions, RenderProgress, RenderSettings, VideoParams, sequence_path,
 };
 pub use sample::{
-    compositor_sample, effect_chain_cube, effect_sample, file_picture, frame_picture,
-    night_picture, ripple_map, sample_picture, transition_sample,
+    compositor_sample, effect_chain_cube, effect_sample, effect_sample_at, file_picture,
+    frame_picture, night_picture, ripple_map, sample_picture, transition_sample,
 };
 pub use scenes::SceneProgress;
 pub use source_view::SourcePicture;
@@ -148,6 +149,43 @@ fn alone(project: &Project, clip: bv_timeline::ClipId) -> Project {
 
 /// Chamado quando há algo novo para mostrar (quadro renderizado, fim do playback).
 pub type RepaintFn = Arc<dyn Fn() + Send + Sync>;
+
+/// A lock taken whatever happened to the thread that held it last: a
+/// panic there (written to the crash log) leaves its data as it was, and
+/// everything the engine keeps under a lock — progress, meters, queues,
+/// frames — is still usable. Poisoning would turn one thread's panic into
+/// the interface's, at its next look at a meter or a progress bar.
+pub(crate) trait LockExt<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for std::sync::Mutex<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// What a job's progress says when its thread stopped on a panic (its
+/// details are in the crash log).
+pub(crate) const STOPPED: &str = "it stopped unexpectedly (the crash log has the details)";
+
+/// A job's progress as its thread left it. A thread that ended without
+/// saying it finished panicked: the progress is then marked finished with
+/// [`STOPPED`] by `stopped`, so its window closes and says so instead of
+/// waiting for ever.
+pub(crate) fn settled<P: Clone>(
+    progress: &std::sync::Mutex<P>,
+    thread: Option<&std::thread::JoinHandle<()>>,
+    finished: impl Fn(&P) -> bool,
+    stopped: impl FnOnce(&mut P),
+) -> P {
+    let mut p = progress.locked();
+    if !finished(&p) && thread.is_some_and(|t| t.is_finished()) {
+        stopped(&mut p);
+    }
+    p.clone()
+}
 
 pub struct Engine {
     project: Arc<Project>,
@@ -276,7 +314,7 @@ impl Engine {
     fn drawing(&self, room: (u32, u32)) -> preview::Drawing {
         let look = self.preview_look;
         let bypassed = look.bypass.map(|_| {
-            let mut b = self.bypassed.lock().expect("bypassed project");
+            let mut b = self.bypassed.locked();
             match &*b {
                 Some((g, p)) if *g == self.generation => p.clone(),
                 _ => {
@@ -290,6 +328,7 @@ impl Engine {
             look,
             bypassed,
             room,
+            stride: 0.0,
         }
     }
 
@@ -392,6 +431,14 @@ impl Engine {
         let p = playback::Playback::start(self.project.clone(), from, options, held);
         self.audio_status = p.audio_status();
         self.playback = Some(p);
+    }
+
+    /// Plays `rate` times as fast from now on, without stopping (its pitch
+    /// kept).
+    pub fn set_play_rate(&mut self, rate: f64) {
+        if let Some(p) = &self.playback {
+            p.set_rate(rate);
+        }
     }
 
     /// Keeps the audio output open between playbacks (playback starts at
@@ -722,7 +769,11 @@ impl Engine {
         mask: usize,
     ) -> Option<[[f64; 2]; 4]> {
         let values = effect_values(values);
-        bv_effects::tracked_region(id, bv_effects::accel::Values(&values), aspect, mask)
+        let values = bv_effects::accel::Values(&values);
+        if bv_banana::is_own(id) {
+            return bv_banana::tracked_region(id, values, aspect);
+        }
+        bv_effects::tracked_region(id, values, aspect, mask)
     }
 
     /// The latest VU/PPM reading (a sine's amplitude per channel) of each
@@ -1301,24 +1352,34 @@ impl Engine {
     pub fn request_preview_in(&self, t: Tick, max_w: u32, max_h: u32, room: (u32, u32)) {
         let s = &self.project.settings;
         let (w, h) = preview_size(s, max_w, max_h);
-        let t = s.frame_rate.snap_floor(t);
         // While playing forward, the next frame is drawn ahead.
-        let ahead = self
+        let playing = self
             .playback
             .as_ref()
             .filter(|p| !p.finished() && p.rate() > 0.0)
-            .map(|p| {
-                let d = s.frame_rate.frame_duration();
-                let step = Tick((d.0 as f64 * p.rate()).round() as i64).max(d);
-                s.frame_rate.snap_floor(t + step)
-            });
+            .map(|p| p.rate());
+        let d = s.frame_rate.frame_duration();
+        let mut drawing = self.drawing(room);
+        let (t, ahead) = match playing {
+            // Faster, the frames shown are as far apart as it is faster.
+            Some(rate) if rate > 1.0 => {
+                drawing.stride = d.0 as f64 * rate;
+                let (now, then) = preview::strided(s.frame_rate, t, drawing.stride);
+                (now, Some(then))
+            }
+            Some(_) => {
+                let t = s.frame_rate.snap_floor(t);
+                (t, Some(s.frame_rate.snap_floor(t + d)))
+            }
+            None => (s.frame_rate.snap_floor(t), None),
+        };
         self.preview.request_with(
             self.project.clone(),
             self.preview_generation(),
             t,
             (w, h),
             ahead,
-            self.drawing(room),
+            drawing,
         );
     }
 
@@ -1381,4 +1442,52 @@ fn effect_values(values: &[(String, bv_ofx::Value)]) -> Vec<(String, bv_effects:
             Some((name.clone(), v))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Progress {
+        finished: bool,
+        error: Option<String>,
+    }
+
+    /// A job's thread that panicked: its progress says it finished, with
+    /// an error, and its lock is still usable.
+    #[test]
+    fn a_job_whose_thread_panicked_is_finished_with_an_error() {
+        let progress = Arc::new(Mutex::new(Progress::default()));
+        let thread = {
+            let progress = progress.clone();
+            std::thread::spawn(move || {
+                let _held = progress.locked();
+                panic!("a job's own failure (this test's)");
+            })
+        };
+        while !thread.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(progress.is_poisoned());
+        let read = |thread: Option<&std::thread::JoinHandle<()>>| {
+            settled(
+                &progress,
+                thread,
+                |p| p.finished,
+                |p| {
+                    p.finished = true;
+                    p.error = Some(STOPPED.into());
+                },
+            )
+        };
+        let p = read(Some(&thread));
+        assert!(p.finished);
+        assert_eq!(p.error.as_deref(), Some(STOPPED));
+        // A job still running, or gone with nothing to tell: as it is.
+        *progress.locked() = Progress::default();
+        assert_eq!(read(None), Progress::default());
+        let _ = thread.join();
+    }
 }

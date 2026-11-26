@@ -161,7 +161,12 @@ mod window {
             param: *mut std::ffi::c_void,
         ) -> isize;
         pub fn DestroyWindow(hwnd: isize) -> i32;
+        #[cfg(target_env = "msvc")]
+        pub fn GetWindow(hwnd: isize, which: u32) -> isize;
     }
+    /// `GetWindow`'s first child window.
+    #[cfg(target_env = "msvc")]
+    pub const GW_CHILD: u32 = 5;
 }
 
 /// The gain's editor in a window of the test's (never shown): it asks
@@ -469,6 +474,66 @@ fn a_plug_in_that_crashes_is_switched_off_not_the_host() {
     let mut g = instance("BananaV Test Gain", false);
     g.setup(48_000.0, 128, 2).unwrap();
     assert!(!g.crashed());
+}
+
+/// The editor of a plug-in whose module crashed is forgotten, not closed:
+/// none of the module's code is called again, its view's neither — the
+/// window the view made in the host's is left as it was.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn a_crashed_modules_editor_is_forgotten_not_closed() {
+    let m = bv_vst3::linked("crashplug-editor", plug::GetPluginFactoryCrash).expect("its module");
+    let class = m.effects().next().expect("its effect").clone();
+    let mut c = Instance::new(&m, &class, true).expect("made");
+    let name: Vec<u16> = "STATIC\0".encode_utf16().collect();
+    // SAFETY: a hidden window of the test's own.
+    let parent = unsafe {
+        window::CreateWindowExW(
+            0,
+            name.as_ptr(),
+            name.as_ptr(),
+            0,
+            0,
+            0,
+            400,
+            300,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(parent, 0);
+    let ed = c.editor().expect("an editor");
+    // SAFETY: the window lives until the test ends.
+    let attached = unsafe {
+        ed.attach(
+            parent as *mut std::ffi::c_void,
+            bv_vst3::PLATFORM_HWND,
+            Box::new(|_, _| {}),
+        )
+    };
+    assert!(attached);
+    // SAFETY: the test's window.
+    let view = unsafe { window::GetWindow(parent, window::GW_CHILD) };
+    assert_ne!(view, 0, "the view's window");
+    c.setup(48_000.0, 128, 2).expect("set up");
+    let mut ch = vec![tone(64), tone(64)];
+    c.process(&mut ch);
+    assert!(c.crashed(), "it crashed as it processed");
+    // The host has no editor of it any more, and closing it calls nothing.
+    assert!(c.editor().is_none());
+    c.close_editor();
+    drop(c);
+    // SAFETY: the test's window.
+    unsafe {
+        assert_eq!(
+            window::GetWindow(parent, window::GW_CHILD),
+            view,
+            "the view was not called to take its window away"
+        );
+        window::DestroyWindow(parent);
+    }
 }
 
 fn scanner(env: &[(&str, &str)]) -> bv_vst3::scan::Scanner {

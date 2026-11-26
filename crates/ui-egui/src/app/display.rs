@@ -36,7 +36,12 @@ impl BananaApp {
     /// scaling" off, one screen pixel per point, as on a 100 % display).
     pub(super) fn apply_look(&mut self, ctx: &egui::Context) {
         let p = &self.settings.prefs;
-        crate::envelope_look::set(p.envelope_look);
+        // Options › Envelope Appearance…, while its mod is on.
+        crate::envelope_look::set(if self.settings.mods.envelope_look {
+            p.envelope_look
+        } else {
+            crate::envelope_look::EnvelopeLook::default()
+        });
         theme::set_button_highlight(p.button_highlight);
         theme::set_icon_strength(p.icon_strength);
         // The brightness the Preferences window shows while it is open (its

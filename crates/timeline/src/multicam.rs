@@ -143,10 +143,17 @@ impl Project {
                     continue;
                 }
                 let id = ClipId(self.alloc_id());
+                // A take placed before its media's start plays from its
+                // start where the event does not loop.
+                let source_in = c.source_in + take.offset;
                 let clip = Clip {
                     id,
                     media: take.media,
-                    source_in: c.source_in + take.offset,
+                    source_in: if c.looped {
+                        source_in
+                    } else {
+                        source_in.max(Tick::ZERO)
+                    },
                     takes: Vec::new(),
                     active_take: 0,
                     muted: c.muted || k != active,
@@ -399,6 +406,31 @@ mod tests {
         assert!(a.clips.iter().all(|c| !c.muted));
         assert_eq!(b.clips.len(), 2);
         assert!(b.clips[0].muted && !b.clips[1].muted);
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_camera_looped_before_its_media_starts_at_it_where_nothing_loops() {
+        let (mut p, t1, t2) = cameras();
+        // Camera A does not loop; camera B does, and starts 3 s before its
+        // media.
+        let a = p.track(t1).unwrap().clips[0].id;
+        let b = p.track(t2).unwrap().clips[0].id;
+        p.clip_mut(a).unwrap().looped = false;
+        p.clip_mut(b).unwrap().source_in = -s(3);
+        p.check_invariants().unwrap();
+        let track = p.create_multicamera_track(&[t1, t2]).unwrap()[0];
+        p.check_invariants().unwrap();
+        // Cut to B at 5 s, where its media has not started: from its start.
+        let mut cut = p.clone();
+        let middle = cut.track(track).unwrap().clips[1].id;
+        let done = cut.switch_take_at(middle, s(5), 1, true).unwrap();
+        assert_eq!(cut.clip(done[0]).unwrap().source_in, Tick::ZERO);
+        cut.check_invariants().unwrap();
+        // Expanded: B's event under A's starts no earlier than its media.
+        let made = p.expand_multicamera_track(track, true).unwrap();
+        let under = &p.track(made[1]).unwrap().clips[0];
+        assert_eq!((under.start, under.source_in), (s(4), Tick::ZERO));
         p.check_invariants().unwrap();
     }
 }

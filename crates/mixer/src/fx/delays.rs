@@ -150,10 +150,16 @@ const TAP_SWING: [f32; 8] = [0.7, 0.9, 0.4, 0.6, 0.8, 0.9, 0.1, 0.9];
 /// The line's room: the longest tap and its nudge, a little more.
 const MULTI_TAP_SECONDS: f64 = 2.6;
 
+/// The most the Multi-Tap Delay's line gets back of what it gave, its
+/// taps all in step: just under 1, so that the echoes always fall.
+const LOOP_LIMIT: f32 = 0.99;
+
 /// Multi-Tap Delay, as VEGAS's: the channels at the input gain (darkened
 /// by the low-pass when on) go, averaged, into one line, with the taps'
 /// sums fed back (the feedback over the taps' total level when that is
-/// more than 1, so the loop never runs away). Each tap reads it at its
+/// more than 1 — and, the feedback going up to 150 %, never more than
+/// gives the line back [`LOOP_LIMIT`] of what it gave, so the loop never
+/// runs away). Each tap reads it at its
 /// time, a little nudged, shortened by a sine swing (one for all taps,
 /// each its own share of it), and plays at its gain on its side of the
 /// stereo picture; the taps' sums go out through the low-pass too.
@@ -242,6 +248,11 @@ impl Own for MultiTapDelay {
             .collect();
         let total: f32 = taps.iter().map(|t| t.2.abs().max(t.3.abs())).sum();
         let feedback = self.p(mt::FEEDBACK) / total.max(1.0);
+        // What the line gets back of what it gave when the taps are all in
+        // step (a tap gives the mean of its two sides): never as much as
+        // it gave, however high the feedback.
+        let round: f32 = taps.iter().map(|t| ((t.2 + t.3) / 2.0).abs()).sum();
+        let feedback = feedback.min(LOOP_LIMIT / round);
         let stereo = channels.len() >= 2;
         let [mut low_l, mut low_r, mut out_l, mut out_r] = self.lows;
         for i in 0..n {
@@ -388,11 +399,11 @@ mod tests {
 
     #[test]
     fn multi_tap_feedback_is_shared_by_the_taps() {
-        // Two taps at full gain, 150 % feedback: 75 % each way round.
+        // Two taps at full gain, 90 % feedback: 45 % each way round.
         let mut d = multi_tap(&[
             (mt::DRY, -80.0),
             (mt::WET, 0.0),
-            (mt::FEEDBACK, 1.5),
+            (mt::FEEDBACK, 0.9),
             (mt::TAPS, 2.0),
             (mt::TAP + mt::DELAY, 10.0),
             (mt::TAP + mt::PER_TAP + mt::DELAY, 500.0),
@@ -400,6 +411,45 @@ mod tests {
         let mut x = vec![click(4_000)];
         d.process(&mut x);
         // The first tap's echo, then its echo of itself 10 ms later.
+        let one = (10.123f32 * 48.0).round() as usize;
+        let first: f32 = x[0][one - 2..one + 3].iter().sum();
+        let again: f32 = x[0][2 * one - 3..2 * one + 4].iter().sum();
+        assert!((again / first - 0.45).abs() < 0.03, "{first} {again}");
+    }
+
+    /// Feedback goes up to 150 %: the line still gets back less than it
+    /// gave, so a click's echoes fall instead of growing each time round.
+    #[test]
+    fn multi_tap_feedback_above_100_percent_does_not_run_away() {
+        // One tap in the middle at full gain, 10 ms: a hundred times round
+        // in a second.
+        let mut d = multi_tap(&[
+            (mt::DRY, -80.0),
+            (mt::WET, 0.0),
+            (mt::FEEDBACK, 1.5),
+            (mt::TAP + mt::DELAY, 10.0),
+        ]);
+        let mut x = vec![click(48_000), click(48_000)];
+        d.process(&mut x);
+        let peak = |from: usize| {
+            let part = &x[0][from..from + 4_800];
+            part.iter().fold(0f32, |m, s| m.max(s.abs()))
+        };
+        let (first, last) = (peak(0), peak(43_200));
+        assert!(first > 0.5, "{first}");
+        assert!(last < first, "{first} {last}");
+        assert!(x.iter().flatten().all(|s| s.abs() <= 1.0));
+        // Off to one side a tap gives the line half of itself: 150 % is
+        // 75 % a round there, as it always was.
+        let mut d = multi_tap(&[
+            (mt::DRY, -80.0),
+            (mt::WET, 0.0),
+            (mt::FEEDBACK, 1.5),
+            (mt::TAP + mt::DELAY, 10.0),
+            (mt::TAP + mt::PAN, 1.0),
+        ]);
+        let mut x = vec![click(4_000), click(4_000)];
+        d.process(&mut x);
         let one = (10.123f32 * 48.0).round() as usize;
         let first: f32 = x[0][one - 2..one + 3].iter().sum();
         let again: f32 = x[0][2 * one - 3..2 * one + 4].iter().sum();

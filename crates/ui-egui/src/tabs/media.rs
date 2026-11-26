@@ -118,6 +118,8 @@ pub struct MediaWindow {
     part_drag: Option<(MediaId, super::thumb_part::PartDrag)>,
     /// Where each thumbnail's picture was drawn (the tests' pointer).
     pub(crate) thumb_rects: HashMap<MediaId, Rect>,
+    /// The media the keys picked, to scroll into view.
+    reveal: Option<MediaId>,
     /// Where the media being dragged came from: a custom bin or a
     /// storyboard's cells, which a drop on a storyboard moves them out of.
     pub(crate) drag_from: Option<DragFrom>,
@@ -163,6 +165,7 @@ impl Default for MediaWindow {
             drag_from: None,
             dwell: None,
             thumb_rects: HashMap::new(),
+            reveal: None,
         }
     }
 }
@@ -280,6 +283,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     ) {
         super::storyboard::ui(ui, app, list);
     } else {
+        media_keys(app, list);
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| list_ui(ui, app));
         // Nothing dragged goes onto the media: the system's "no".
         if dragged_here(ui, app, list) {
@@ -1392,6 +1396,59 @@ fn shown(app: &BananaApp) -> Vec<MediaInfo> {
         .collect()
 }
 
+/// The keys while Project Media has them (`crate::browse`): a name's
+/// letters, the arrows, Home, End and the pages select a media as a click
+/// does (opening it in the Trimmer), and it scrolls into view.
+fn media_keys(app: &mut BananaApp, list: Rect) {
+    let keys = app.browse.take(crate::dock::Tab::ProjectMedia);
+    if keys.is_empty() {
+        return;
+    }
+    let media = shown(app);
+    let (columns, page) = match app.media_window.view {
+        MediaView::Thumbnail => {
+            let across = ((list.width() - 6.0 + 12.0) / (THUMB.x + 12.0)).floor();
+            (across.max(1.0) as usize, 2)
+        }
+        _ => (
+            1,
+            ((list.height() / (ROW_H + 2.0)) as usize)
+                .saturating_sub(2)
+                .max(1),
+        ),
+    };
+    let at = app
+        .selected_media
+        .and_then(|id| media.iter().position(|m| m.id == id));
+    let names: Vec<String> = media.iter().map(crate::i18n::media_name).collect();
+    let to = if keys.find.is_empty() {
+        crate::browse::step(media.len(), at, &keys.moves, columns, page)
+    } else {
+        crate::browse::find(names.iter().map(String::as_str), at, &keys.find)
+    };
+    let Some(id) = to.map(|i| media[i].id) else {
+        return;
+    };
+    app.media_window.reveal = Some(id);
+    if Some(id) == app.selected_media {
+        return;
+    }
+    app.media_window.picked.clear();
+    app.selected_media = Some(id);
+    app.open_in_trimmer(id);
+    if app.settings.media_auto_preview {
+        preview(app, id);
+    }
+}
+
+/// Scrolls to `rect`, media `id`'s, when the keys picked it.
+fn reveal(ui: &Ui, app: &mut BananaApp, id: MediaId, rect: Rect) {
+    if app.media_window.reveal == Some(id) {
+        app.media_window.reveal = None;
+        ui.scroll_to_rect(rect, None);
+    }
+}
+
 /// The chosen bin's media, as the view says.
 fn list_ui(ui: &mut Ui, app: &mut BananaApp) {
     let media = shown(app);
@@ -1421,6 +1478,7 @@ fn list_ui(ui: &mut Ui, app: &mut BananaApp) {
                         vec2(ui.available_width(), ROW_H + 2.0),
                         Sense::click_and_drag(),
                     );
+                    reveal(ui, app, m.id, rect);
                     if ui.is_rect_visible(rect) {
                         paint_row(ui, app, m, rect, &resp, details);
                     }
@@ -1635,6 +1693,7 @@ fn place_part(app: &mut BananaApp, id: MediaId, at: Tick) {
 fn thumbnail_cell(ui: &mut Ui, app: &mut BananaApp, m: &MediaInfo) {
     let (rect, resp) =
         ui.allocate_exact_size(vec2(THUMB.x, THUMB.y + 32.0), Sense::click_and_drag());
+    reveal(ui, app, m.id, rect);
     let pic = Rect::from_min_size(rect.min, THUMB);
     app.media_window.thumb_rects.insert(m.id, pic);
     let taken = part_drag(app, m, pic, &resp);
@@ -1870,6 +1929,69 @@ pub(crate) mod tests {
             modifiers: Modifiers::NONE,
         });
         h.step();
+    }
+
+    /// Typed and pressed while Project Media has the keys, a name's letters
+    /// and the arrows select media, in the thumbnails and in the list,
+    /// and the timeline's shortcuts on those keys wait.
+    #[test]
+    fn letters_and_arrows_select_media() {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        let names = ["apple", "banana", "berry", "cherry"];
+        let ids: Vec<MediaId> = names.iter().map(|n| offline_video(&mut app, n)).collect();
+        app.media_window.view = MediaView::Thumbnail;
+        app.show_tab(Tab::ProjectMedia, false);
+        app.keys_tab = Some(Tab::ProjectMedia);
+        let mut h = harness(app);
+        let order: Vec<MediaId> = shown(h.state()).iter().map(|m| m.id).collect();
+        let type_in = |h: &mut Harness<'_, BananaApp>, text: &str| {
+            for c in text.chars() {
+                let key = egui::Key::from_name(&c.to_string()).expect("key");
+                h.event(Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+                h.event(Event::Text(c.to_string()));
+            }
+            h.step();
+        };
+        type_in(&mut h, "b");
+        assert_eq!(h.state().selected_media, Some(ids[1]));
+        type_in(&mut h, "b");
+        assert_eq!(h.state().selected_media, Some(ids[2]), "b again: the next");
+        type_in(&mut h, "c");
+        assert_eq!(h.state().selected_media, Some(ids[3]));
+        h.key_press(egui::Key::Home);
+        h.step();
+        assert_eq!(h.state().selected_media, Some(order[0]));
+        h.key_press(egui::Key::ArrowRight);
+        h.step();
+        assert_eq!(h.state().selected_media, Some(order[1]));
+        h.state_mut().media_window.view = MediaView::List;
+        h.step();
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+        assert_eq!(h.state().selected_media, Some(order[2]));
+        h.key_press(egui::Key::End);
+        h.step();
+        assert_eq!(h.state().selected_media, Some(order[3]));
+        // Nothing reached the timeline (Up and Down zoom it).
+        let zoom = h.state().timeline.ticks_per_px;
+        h.key_press(egui::Key::ArrowUp);
+        h.step();
+        assert_eq!(h.state().timeline.ticks_per_px, zoom);
+        assert_eq!(h.state().selected_media, Some(order[2]));
+        // With the timeline's keys, the arrows are its own again.
+        h.state_mut().keys_tab = Some(Tab::Timeline);
+        h.key_press(egui::Key::ArrowUp);
+        h.step();
+        assert_ne!(h.state().timeline.ticks_per_px, zoom);
+        assert_eq!(h.state().selected_media, Some(order[2]));
     }
 
     /// A drag across a thumbnail picks a part, I and O move its ends where

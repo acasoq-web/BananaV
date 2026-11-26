@@ -34,6 +34,15 @@ pub struct TrackFacts {
     pub full_range: Option<bool>,
     /// A picture with alpha (a depth of 32).
     pub alpha: bool,
+    /// A picture's depth as its sample entry says: bits per pixel (1, 2,
+    /// 4, 8 with a palette; 16, 24, 32) or 34, 36 and 40 for gray ones.
+    pub depth: u16,
+    /// The colors of a picture of 8 bits or fewer, when its sample entry
+    /// holds its own color table (none: QuickTime's default ones).
+    pub palette: Vec<[u8; 3]>,
+    /// Quarter turns clockwise its track's matrix shows the picture with
+    /// (0–3): a phone's portrait video is stored lying and turned by it.
+    pub rotation: u8,
     /// A sound's channels, sample rate (Hz) and sample size (bits).
     pub channels: u16,
     pub sample_rate: u32,
@@ -83,6 +92,7 @@ fn track(trak: &[u8]) -> Option<TrackFacts> {
     let mdia = child(trak, b"mdia")?;
     let mut t = TrackFacts {
         handler: child(mdia, b"hdlr")?.get(8..12)?.try_into().ok()?,
+        rotation: child(trak, b"tkhd").map_or(0, rotation),
         ..TrackFacts::default()
     };
     // `mdhd`: version/flags, two times, the timescale and the duration.
@@ -120,8 +130,28 @@ fn track(trak: &[u8]) -> Option<TrackFacts> {
     Some(t)
 }
 
+/// Quarter turns clockwise a track header's (`tkhd`) matrix shows the
+/// picture with: its `a b c d` (16.16 fixed point) for a point (p, q) shown
+/// at (a·p + c·q, b·p + d·q), y down. Mirrored or skewed ones count as
+/// none.
+fn rotation(tkhd: &[u8]) -> u8 {
+    // Version/flags, times, the track's id and length, then 16 bytes.
+    let at = if tkhd.first() == Some(&1) { 52 } else { 40 };
+    let m = |i: usize| be_u32(tkhd, at + 4 * i).map(|v| v as i32);
+    let (Some(a), Some(b), Some(c), Some(d)) = (m(0), m(1), m(3), m(4)) else {
+        return 0;
+    };
+    match (a.signum(), b.signum(), c.signum(), d.signum()) {
+        (0, 1, -1, 0) => 1,
+        (-1, 0, 0, -1) => 2,
+        (0, -1, 1, 0) => 3,
+        _ => 0,
+    }
+}
+
 /// A visual sample entry: 8 bytes of every entry, then its fields, its
-/// boxes after them (78 bytes in).
+/// boxes after them (78 bytes in; after its color table when it holds
+/// one).
 fn visual(t: &mut TrackFacts, entry: &[u8]) {
     let u16_at = |at: usize| {
         entry
@@ -130,8 +160,23 @@ fn visual(t: &mut TrackFacts, entry: &[u8]) {
     };
     t.width = u16_at(24).unwrap_or(0);
     t.height = u16_at(26).unwrap_or(0);
-    t.alpha = u16_at(74) == Some(32);
-    let inner = entry.get(78..).unwrap_or(&[]);
+    t.depth = u16_at(74).unwrap_or(0);
+    t.alpha = t.depth == 32;
+    // A color table of its own (its id 0) for 8 bits or fewer: a seed, flags
+    // and the count less one, then the colors (an index, then red, green
+    // and blue in 16 bits each).
+    let mut boxes_at = 78;
+    if u16_at(76) == Some(0) && matches!(t.depth, 1..=8 | 33..=40) {
+        let count = u16_at(84).map_or(0, |n| n as usize + 1);
+        t.palette = (0..count)
+            .map_while(|i| {
+                let c = entry.get(86 + 8 * i..94 + 8 * i)?;
+                Some([c[2], c[4], c[6]])
+            })
+            .collect();
+        boxes_at = 86 + 8 * count;
+    }
+    let inner = entry.get(boxes_at..).unwrap_or(&[]);
     t.bit_depth = match &t.codec {
         b"avc1" | b"avc3" => child(inner, b"avcC").and_then(avc_bit_depth),
         b"hvc1" | b"hev1" => child(inner, b"hvcC")
@@ -407,6 +452,34 @@ mod tests {
         avcc.extend_from_slice(&[0]);
         assert_eq!(avc_bit_depth(&avcc), Some(8));
         assert_eq!(avc_full_range(&avcc), Some(false));
+    }
+
+    /// A track header's matrix as quarter turns: a phone's portrait video
+    /// (turned clockwise), the other way, upside down, none and a mirror.
+    #[test]
+    fn track_matrices_turn_pictures() {
+        let tkhd = |version: u8, m: [i32; 9]| {
+            let mut b = vec![version, 0, 0, 0];
+            b.resize(if version == 1 { 52 } else { 40 }, 0);
+            for v in m {
+                b.extend_from_slice(&v.to_be_bytes());
+            }
+            b.extend_from_slice(&[0; 8]);
+            b
+        };
+        let one = 0x0001_0000;
+        let w = 0x4000_0000;
+        let turned = [0, one, 0, -one, 0, 0, 1080 << 16, 0, w];
+        assert_eq!(rotation(&tkhd(0, turned)), 1);
+        assert_eq!(rotation(&tkhd(1, turned)), 1);
+        assert_eq!(
+            rotation(&tkhd(0, [0, -one, 0, one, 0, 0, 0, 1920 << 16, w])),
+            3
+        );
+        assert_eq!(rotation(&tkhd(0, [-one, 0, 0, 0, -one, 0, 0, 0, w])), 2);
+        assert_eq!(rotation(&tkhd(0, [one, 0, 0, 0, one, 0, 0, 0, w])), 0);
+        assert_eq!(rotation(&tkhd(0, [-one, 0, 0, 0, one, 0, 0, 0, w])), 0);
+        assert_eq!(rotation(&[0, 0, 0]), 0);
     }
 
     /// An `esds` with its decoder configuration's rates.

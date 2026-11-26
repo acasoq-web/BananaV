@@ -174,6 +174,17 @@ mod white_balance;
 
 use bv_core::curve::CurvePoint;
 
+/// The host as BananaV's plug-ins see it, for the packs written as these
+/// are (`bv-banana`).
+pub mod host {
+    pub use crate::colors::{pixel as read_pixel, put_pixel, rgba_row};
+    pub use crate::kit::for_chunks;
+    pub use crate::ofx::{
+        Clicks, Depth, Draw, Fx, Image, Param, Props, Suites, for_rows, interact_props, is,
+        near_handle, redraw, set_host, suites,
+    };
+}
+
 /// The name BananaV gives the binary its effects are built into.
 pub const BINARY: &str = "BananaV";
 

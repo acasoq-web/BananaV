@@ -385,6 +385,13 @@ fn edit_menu(ui: &mut Ui, app: &mut BananaApp) {
         for t in [Tool::Envelope, Tool::Select, Tool::Zoom] {
             cmd(ui, app, Cmd::UseTool(t));
         }
+        // A mod's (Options › BananaV Mods…).
+        if app.settings.mods.track_select {
+            ui.separator();
+            for back in [false, true] {
+                cmd(ui, app, Cmd::UseTool(Tool::TrackSelect { back }));
+            }
+        }
         ui.separator();
         cmd(ui, app, Cmd::NextTool);
         cmd(ui, app, Cmd::PrevTool);
@@ -572,7 +579,10 @@ fn view_menu(ui: &mut Ui, app: &mut BananaApp) {
         cmd(ui, app, Cmd::Window(Tab::LoudnessMeters));
         cmd(ui, app, Cmd::Window(Tab::ColorGrading));
         cmd(ui, app, Cmd::Window(Tab::Properties));
-        cmd(ui, app, Cmd::Window(Tab::Transform));
+        // A mod's (Options › BananaV Mods…).
+        if app.settings.mods.transform {
+            cmd(ui, app, Cmd::Window(Tab::Transform));
+        }
     });
     sub(ui, tr("Extensions"), false, |_| {});
     ui.separator();
@@ -873,7 +883,11 @@ fn options_menu(ui: &mut Ui, app: &mut BananaApp) {
     cmd(ui, app, Cmd::CustomizeToolbar);
     cmd(ui, app, Cmd::CustomizeTimelineToolbar);
     cmd(ui, app, Cmd::CustomizeKeyboard);
-    cmd(ui, app, Cmd::EnvelopeAppearance);
+    // Its mod's, while it is on.
+    if app.settings.mods.envelope_look {
+        cmd(ui, app, Cmd::EnvelopeAppearance);
+    }
+    cmd(ui, app, Cmd::Mods);
     ui.separator();
     cmd(ui, app, Cmd::ExportPreferences);
     cmd(ui, app, Cmd::ImportPreferences);

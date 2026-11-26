@@ -31,6 +31,7 @@ bv-gpu.workspace = true
 bv-ofx.workspace = true
 bv-cuda.workspace = true
 bv-effects.workspace = true
+bv-banana.workspace = true
 bv-track.workspace = true
 bv-platform.workspace = true
 cpal = "0.18"

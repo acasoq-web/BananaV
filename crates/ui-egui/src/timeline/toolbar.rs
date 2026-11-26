@@ -35,11 +35,16 @@ pub(crate) fn ui(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut BananaApp
             ui.set_clip_rect(room.intersect(ui.clip_rect()));
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 1.0;
+                // The buttons read and switch the timeline's view (Show
+                // Video Event Edge Frames…): the app holds a stand-in while
+                // the view draws, so it gets the view itself for them.
+                std::mem::swap(&mut app.timeline, view);
                 crate::toolbar_buttons::paint(
                     ui,
                     app,
                     crate::toolbar_buttons::ToolbarKind::Timeline,
                 );
+                std::mem::swap(&mut app.timeline, view);
             });
         },
     );
@@ -330,8 +335,7 @@ pub(crate) fn rate(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut BananaA
         let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
         if resp.lost_focus() || cancel {
             if !cancel && let Some(v) = crate::fmt::parse(text) {
-                app.play_rate = v.clamp(0.1, MAX_RATE);
-                app.restart_if_playing();
+                app.set_play_rate(v.min(MAX_RATE));
             }
             view.rate_text = None;
         }
@@ -413,8 +417,7 @@ pub(crate) fn rate(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut BananaA
         app.scrub_rate = 0.0;
     }
     if shuttle.double_clicked() {
-        app.play_rate = 1.0;
-        app.restart_if_playing();
+        app.set_play_rate(1.0);
     }
     shuttle.on_hover_text(tr(
         "Scrub: drag to shuttle from the cursor, the further the faster · double-click: normal rate 1",
@@ -433,18 +436,14 @@ pub(crate) fn rate(view: &mut TimelineView, ui: &mut egui::Ui, app: &mut BananaA
     {
         let v = from_x(p.x).clamp(0.1, MAX_RATE);
         // Pulls to 1.
-        app.play_rate = if (v - 1.0).abs() < 0.06 {
+        app.set_play_rate(if (v - 1.0).abs() < 0.06 {
             1.0
         } else {
             (v * 100.0).round() / 100.0
-        };
-    }
-    if normal.drag_stopped() || normal.clicked() {
-        app.restart_if_playing();
+        });
     }
     if normal.double_clicked() {
-        app.play_rate = 1.0;
-        app.restart_if_playing();
+        app.set_play_rate(1.0);
     }
     normal.on_hover_text(tr("Normal rate: the speed of Play (double-click: 1)"));
 
@@ -525,34 +524,16 @@ pub(crate) fn scrollbars(
     // Vertical.
     painter.rect_filled(l.vscroll, 0.0, theme::panel());
     let content = l.content_height.max(1.0);
-    if content > l.lanes.height() {
-        let f0 = view.scroll_y / content;
-        let f1 = (view.scroll_y + l.lanes.height()) / content;
-        let thumb = Rect::from_min_max(
-            pos2(
-                l.vscroll.left() + 2.0,
-                l.vscroll.top() + l.vscroll.height() * f0,
-            ),
-            pos2(
-                l.vscroll.right() - 2.0,
-                l.vscroll.top() + l.vscroll.height() * f1.min(1.0),
-            ),
-        );
-        let resp = ui.interact(l.vscroll, ui.id().with("rolagem-v"), Sense::drag());
-        painter.rect_filled(
-            thumb,
-            4.0,
-            if resp.dragged() {
-                theme::knob()
-            } else {
-                theme::separator()
-            },
-        );
-        if resp.dragged() {
-            let max = (content - l.lanes.height() + 20.0).max(0.0);
-            view.scroll_y = (view.scroll_y + resp.drag_delta().y / l.vscroll.height() * content)
-                .clamp(0.0, max);
-        }
+    if content > l.lanes.height()
+        && let Some(y) = crate::widgets::vertical_scrollbar(
+            ui,
+            l.vscroll,
+            ui.id().with("rolagem-v"),
+            (view.scroll_y, l.lanes.height()),
+            content + 20.0,
+        )
+    {
+        view.scroll_y = y;
     }
 }
 

@@ -16,6 +16,7 @@ bv-color.workspace = true
 bv-timeline.workspace = true
 bv-media.workspace = true
 bv-effects.workspace = true
+bv-banana.workspace = true
 bv-lut.workspace = true
 bv-ocio.workspace = true
 bv-cuda.workspace = true

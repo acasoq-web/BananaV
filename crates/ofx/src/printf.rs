@@ -10,6 +10,12 @@ pub(crate) trait Args {
     fn string(&mut self) -> Option<String>;
 }
 
+/// The widest field and the longest precision of a number taken: a
+/// plug-in's format (or its `*` value) asking for more would have
+/// `format!` fail (it has a limit of its own), or make a text of
+/// gigabytes.
+const MAX_FIELD: usize = 512;
+
 /// `fmt` with its conversions replaced by `args`' values. Supports the
 /// flags `-+ #0`, width and precision (also `*`), the length modifiers and
 /// the conversions `d i u o x X c s p f F e E g G a A %` (`n` is skipped).
@@ -44,11 +50,11 @@ pub(crate) fn format(fmt: &[u8], args: &mut impl Args) -> String {
             if w < 0 {
                 spec.left = true;
             }
-            spec.width = w.unsigned_abs() as usize;
+            spec.width = (w.unsigned_abs() as usize).min(MAX_FIELD);
             i += 1;
         } else {
             while let Some(d) = fmt.get(i).filter(|d| d.is_ascii_digit()) {
-                spec.width = spec.width * 10 + (d - b'0') as usize;
+                spec.width = (spec.width * 10 + (d - b'0') as usize).min(MAX_FIELD);
                 i += 1;
             }
         }
@@ -60,7 +66,7 @@ pub(crate) fn format(fmt: &[u8], args: &mut impl Args) -> String {
                 i += 1;
             } else {
                 while let Some(d) = fmt.get(i).filter(|d| d.is_ascii_digit()) {
-                    p = p * 10 + (d - b'0') as usize;
+                    p = p.saturating_mul(10).saturating_add((d - b'0') as usize);
                     i += 1;
                 }
             }
@@ -131,6 +137,14 @@ struct Spec {
     precision: Option<usize>,
 }
 
+impl Spec {
+    /// A number's precision, no longer than the longest taken (a text's
+    /// only cuts the text: any is taken).
+    fn digits(&self) -> Option<usize> {
+        self.precision.map(|p| p.min(MAX_FIELD))
+    }
+}
+
 fn sign(negative: bool, spec: &Spec) -> &'static str {
     if negative {
         "-"
@@ -145,7 +159,7 @@ fn sign(negative: bool, spec: &Spec) -> &'static str {
 
 fn signed(v: i64, spec: &Spec) -> String {
     let digits = v.unsigned_abs().to_string();
-    let digits = match spec.precision {
+    let digits = match spec.digits() {
         Some(p) if digits.len() < p => format!("{digits:0>p$}"),
         _ => digits,
     };
@@ -159,7 +173,7 @@ fn unsigned(v: u64, conv: u8, spec: &Spec) -> String {
         b'X' => format!("{v:X}"),
         _ => v.to_string(),
     };
-    let digits = match spec.precision {
+    let digits = match spec.digits() {
         Some(p) if digits.len() < p => format!("{digits:0>p$}"),
         _ => digits,
     };
@@ -181,7 +195,7 @@ fn floating(v: f64, conv: u8, spec: &Spec) -> String {
             s
         };
     }
-    let p = spec.precision.unwrap_or(6);
+    let p = spec.digits().unwrap_or(6);
     let body = match conv {
         b'f' | b'F' => format!("{:.p$}", v.abs()),
         b'e' | b'E' => exponent(v.abs(), p),
@@ -324,5 +338,33 @@ mod tests {
         assert_eq!(fmt("%c%c", &[b'o' as u64, b'k' as u64], &[], &[]), "ok");
         assert_eq!(fmt("%lld", &[u64::MAX], &[], &[]), "-1");
         assert_eq!(fmt("%*d", &[4, 9], &[], &[]), "   9");
+    }
+
+    /// A width or a number's precision past any message's — a plug-in's
+    /// `*` value, or digits on end in its format — is cut to the longest
+    /// taken: formatting it would fail, or fill the memory.
+    #[test]
+    fn widths_and_precisions_past_the_longest_are_cut() {
+        assert_eq!(fmt("%*d", &[100_000, 9], &[], &[]).len(), MAX_FIELD);
+        assert_eq!(fmt("%.*d", &[100_000, 9], &[], &[]).len(), MAX_FIELD);
+        let most = i32::MAX as u64;
+        assert_eq!(fmt("%.*x", &[most, 255], &[], &[]).len(), MAX_FIELD);
+        // "1." and the decimals (then "e+00").
+        assert_eq!(fmt("%.*f", &[100_000], &[1.5], &[]).len(), 2 + MAX_FIELD);
+        assert_eq!(
+            fmt("%.*e", &[100_000], &[1.5], &[]).len(),
+            2 + MAX_FIELD + 4
+        );
+        assert_eq!(fmt("%.*g", &[100_000], &[1.5], &[]), "1.5");
+        // Digits on end in the format itself.
+        let digits = "9".repeat(40);
+        let wide = fmt(&format!("%{digits}d"), &[9], &[], &[]);
+        assert_eq!(wide.len(), MAX_FIELD);
+        let precise = fmt(&format!("%.{digits}f"), &[], &[1.5], &[]);
+        assert_eq!(precise.len(), 2 + MAX_FIELD);
+        // A text's precision only cuts the text: any is taken.
+        let long = "x".repeat(1000);
+        assert_eq!(fmt(&format!("%.{digits}s"), &[], &[], &[Some(&long)]), long);
+        assert_eq!(fmt("%.*s", &[100_000], &[], &[Some(&long)]), long);
     }
 }

@@ -229,7 +229,7 @@ fn apply_with(app: &mut BananaApp, clips: &[ClipId], set: impl Fn(&mut Clip)) {
                 if made > Tick::ZERO && !auto {
                     // Without Automatic Crossfades the event fades in over
                     // the overlap by itself.
-                    c.fade_in = c.fade_in.max(made);
+                    c.fade_in_at_least(made);
                 }
                 if c.fade_in == Tick::ZERO && !has_overlap && made == Tick::ZERO {
                     c.fade_in = Tick::SECOND.min(c.duration - c.fade_out);
@@ -293,10 +293,10 @@ impl Kind {
     /// Its category among [`categories`].
     fn category(self) -> usize {
         match self {
-            Kind::Zoom => 0,
-            Kind::Push | Kind::Slide => 1,
-            Kind::Wipe | Kind::Iris | Kind::Clock => 2,
-            Kind::Dissolve | Kind::FadeThroughBlack => 3,
+            Kind::Zoom => 1,
+            Kind::Push | Kind::Slide => 2,
+            Kind::Wipe | Kind::Iris | Kind::Clock => 3,
+            Kind::Dissolve | Kind::FadeThroughBlack => 4,
         }
     }
 
@@ -331,14 +331,16 @@ impl Kind {
 }
 
 /// The window's categories, as VEGAS's (GL Transitions: its GL
-/// Transition, the open collection's transitions as presets).
-fn categories() -> [Category; 7] {
+/// Transition, the open collection's transitions as presets; Banana
+/// Split: BananaV's own pack, by group in its Filter).
+fn categories() -> [Category; 8] {
     let c = |name, ready| Category {
         name,
         ready,
         packages: false,
     };
     [
+        c("Banana Split", true),
         c(tr("3D Effects"), true),
         c(tr("Reveals"), true),
         c(tr("Wipes"), true),
@@ -355,19 +357,25 @@ fn categories() -> [Category; 7] {
     ]
 }
 
+/// The window's index of the Banana Split category.
+const BANANA_SPLIT: usize = 0;
+
 /// The window's index of the Third Party category (OFX plug-ins).
-const THIRD_PARTY: usize = 6;
+const THIRD_PARTY: usize = 7;
 
 /// The category of one of BananaV's own transitions, by its grouping
 /// ("BananaV/Wipes").
 fn own_category(info: &bv_ofx::PluginInfo) -> usize {
+    if bv_engine::plugins::is_banana_split(info) {
+        return BANANA_SPLIT;
+    }
     match info.grouping.rsplit('/').next().unwrap_or("") {
-        "3D Effects" => 0,
-        "Reveals" => 1,
-        "Wipes" => 2,
-        "Loop and Peels" => 4,
-        "GL Transitions" => 5,
-        _ => 3,
+        "3D Effects" => 1,
+        "Reveals" => 2,
+        "Wipes" => 3,
+        "Loop and Peels" => 5,
+        "GL Transitions" => 6,
+        _ => 4,
     }
 }
 
@@ -445,6 +453,7 @@ fn paint_plugin(painter: &Painter, rect: Rect, previews: &mut Previews, fx: &Plu
 /// transition halfway; under the pointer it plays.
 pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     let mut state = std::mem::take(&mut app.choosers.transitions);
+    state.keys = app.browse.take(crate::dock::Tab::Transitions);
     let categories = categories();
     let (mine, ofx): (Vec<_>, Vec<_>) = crate::ofx::transitions()
         .into_iter()
@@ -464,19 +473,23 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         ],
         provider: None,
     });
-    let plugins_own = mine.iter().map(|p| Plugin {
-        key: format!("ofx:{}", p.identifier),
-        name: crate::ofx::plugin_name(p),
-        category: own_category(p),
-        ready: true,
-        about: [
-            trf!(
-                "{}: BananaV, 32-bit floating point",
-                crate::ofx::plugin_name(p)
-            ),
-            trf!("Description: {}", tr(&p.description)),
-        ],
-        provider: None,
+    let plugins_own = mine.iter().map(|p| {
+        let (name, category) = (crate::ofx::plugin_name(p), own_category(p));
+        Plugin {
+            key: format!("ofx:{}", p.identifier),
+            about: [
+                if category == BANANA_SPLIT {
+                    crate::ofx::own_about(p, &name, categories[category].name)
+                } else {
+                    trf!("{}: BananaV, 32-bit floating point", name)
+                },
+                trf!("Description: {}", tr(&p.description)),
+            ],
+            name,
+            category,
+            ready: true,
+            provider: (category == BANANA_SPLIT).then(|| crate::ofx::group_of(p)),
+        }
     });
     let theirs = ofx.iter().map(|p| Plugin {
         key: format!("ofx:{}", p.identifier),
@@ -521,7 +534,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             None if i - kinds.len() < mine.len() => {
                 // BananaV's own: its factory presets.
                 let p = &mine[i - kinds.len()];
-                let presets = crate::presets::builtin_plugin(&p.identifier);
+                let mut presets = crate::presets::builtin_plugin(&p.identifier);
+                // The pack's defaults, where none of its presets is them.
+                if bv_engine::plugins::is_banana_split(p)
+                    && presets.iter().all(|(_, values)| !values.is_empty())
+                {
+                    presets.insert(0, (tr("(Default)").to_string(), Default::default()));
+                }
                 if presets.is_empty() {
                     (
                         vec![Pick::Plugin(crate::ofx::plugin_fx(p))],

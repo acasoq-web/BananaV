@@ -116,15 +116,23 @@ pub fn stored(clips: bool, img: &mut ImageRgbaF32) {
         return;
     }
     let w = img.width as usize;
-    par::for_each_pixel(&mut img.data, w, |_, _, px| {
-        let a = px[3].clamp(0.0, 1.0);
-        *px = [
-            px[0].clamp(0.0, a),
-            px[1].clamp(0.0, a),
-            px[2].clamp(0.0, a),
-            a,
-        ];
-    });
+    par::for_each_pixel(&mut img.data, w, |_, _, px| *px = clipped(*px));
+}
+
+/// A pixel within what an 8-bit picture holds: its alpha within 0–1, its
+/// premultiplied colors within 0 and the alpha. A value that is not a
+/// number (a plug-in's, a file's) becomes 0: `f32::clamp` panics on one
+/// as a bound, which stopped the thread drawing the frame.
+pub(crate) fn clipped(px: [f32; 4]) -> [f32; 4] {
+    // `max` and `min` take the number when one side is not a number; a
+    // comparison with one is false.
+    let a = if px[3] > 0.0 { px[3].min(1.0) } else { 0.0 };
+    [
+        px[0].max(0.0).min(a),
+        px[1].max(0.0).min(a),
+        px[2].max(0.0).min(a),
+        a,
+    ]
 }
 
 /// A plug-in effect on `img`, when the scene has someone to draw it.
@@ -468,6 +476,22 @@ fn transpose(src: &[[f32; 4]], w: usize, h: usize) -> Vec<[f32; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pixel that is not a number in an 8-bit project: clipped to 0, not
+    /// a panic of the thread drawing the frame.
+    #[test]
+    fn a_pixel_that_is_not_a_number_is_clipped_not_a_panic() {
+        assert_eq!(clipped([f32::NAN, 0.5, 2.0, f32::NAN]), [0.0; 4]);
+        assert_eq!(clipped([0.5, f32::NAN, -1.0, 0.8]), [0.5, 0.0, 0.0, 0.8]);
+        assert_eq!(clipped([1.2, 0.3, 0.9, 1.5]), [1.0, 0.3, 0.9, 1.0]);
+        let mut img = ImageRgbaF32::transparent(2, 1);
+        img.data = vec![
+            [f32::NAN, 0.2, 0.3, f32::NAN],
+            [0.4, 0.5, 0.6, f32::INFINITY],
+        ];
+        stored(true, &mut img);
+        assert_eq!(img.data, vec![[0.0; 4], [0.4, 0.5, 0.6, 1.0]]);
+    }
 
     fn gray(v: f32) -> ImageRgbaF32 {
         ImageRgbaF32::filled(40, 30, [v, v, v, 1.0])

@@ -12,7 +12,7 @@ use bv_core::{
     ColorInfo, ColorPrimaries, ColorRange, ImageRgbaF32, MatrixCoefficients, PixelFormat, Plane,
     PlaneData, Tick, TransferCharacteristic, VideoFrame,
 };
-use bv_gpu::{Compositor, Gpu, Output, Rendered};
+use bv_gpu::{Compositor, Gpu, GpuError, Output, Rendered};
 use bv_render::VideoPool;
 use bv_timeline::fx::grade;
 use bv_timeline::{
@@ -27,10 +27,14 @@ fn gpu() -> Option<Compositor> {
             g.warm_up().expect("every kernel compiles");
             Some(Compositor::new(g))
         }
-        Err(e) => {
-            println!("no graphics card ({e}): skipped");
+        // Only a computer without a card skips these (and not even it
+        // with BV_REQUIRE_GPU set): a card that fails to open is a failure,
+        // not a pass that compared nothing.
+        Err(GpuError::NoAdapter) if std::env::var_os("BV_REQUIRE_GPU").is_none() => {
+            println!("no graphics card: skipped");
             None
         }
+        Err(e) => panic!("the graphics card did not open: {e}"),
     }
 }
 

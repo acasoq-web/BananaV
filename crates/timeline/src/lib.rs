@@ -40,6 +40,7 @@ pub mod notes;
 pub mod otio;
 pub mod pancrop;
 pub mod prerender;
+pub mod repair;
 mod ripple;
 pub mod scene;
 pub mod space;

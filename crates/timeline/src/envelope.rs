@@ -280,20 +280,22 @@ impl Envelope {
         if t <= first.at {
             return first.value;
         }
-        for w in self.points.windows(2) {
-            let (a, b) = (&w[0], &w[1]);
-            if t < b.at {
-                let curve = if self.kind.is_held() {
-                    KeyCurve::Hold
-                } else {
-                    a.curve
-                };
-                let span = (b.at - a.at).0.max(1) as f64;
-                let f = curve.eval(((t - a.at).0 as f64 / span) as f32);
-                return a.value + (b.value - a.value) * f;
-            }
-        }
-        self.points.last().map_or(first.value, |p| p.value)
+        // The segment `t` is in, looked up (the points are in order; the
+        // mixer asks at every sample): from the last point at or before
+        // `t` to the first one after it.
+        let after = self.points.partition_point(|p| p.at <= t);
+        let before = after.checked_sub(1).and_then(|i| self.points.get(i));
+        let (Some(a), Some(b)) = (before, self.points.get(after)) else {
+            return self.points.last().map_or(first.value, |p| p.value);
+        };
+        let curve = if self.kind.is_held() {
+            KeyCurve::Hold
+        } else {
+            a.curve
+        };
+        let span = (b.at - a.at).0.max(1) as f64;
+        let f = curve.eval(((t - a.at).0 as f64 / span) as f32);
+        a.value + (b.value - a.value) * f
     }
 
     /// The sum of the envelope's values from 0 to `d`, in ticks: how far a
@@ -612,13 +614,68 @@ impl Project {
                         EnvelopePoint {
                             at: Tick::ZERO,
                             value: old.value_at(Tick::ZERO),
-                            curve: old.points[0].curve,
+                            // An envelope without points (a file may have
+                            // one) is at its default value.
+                            curve: old.points.first().map_or(KeyCurve::Linear, |p| p.curve),
                         },
                     );
                 }
                 env.points = points;
             }
         }
+    }
+
+    /// The points of track `track`'s `kind` envelope at `times` as they
+    /// were in `before` moved `delta` later (earlier when negative, none
+    /// before the start): those picked along with events (Options ›
+    /// BananaV Mods: Envelope points with events). A moved point takes the
+    /// place of one where it lands; the envelope keeps a point at the
+    /// start, with the value it had there.
+    pub fn carry_picked_points(
+        &mut self,
+        before: &Project,
+        track: TrackId,
+        kind: EnvelopeKind,
+        times: &[Tick],
+        delta: Tick,
+    ) -> Result<()> {
+        let Some(old) = before
+            .track(track)
+            .and_then(|t| t.envelopes.iter().find(|e| e.kind == kind))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let env = self.envelope_mut(track, kind)?;
+        let (moved, kept): (Vec<EnvelopePoint>, Vec<EnvelopePoint>) =
+            old.points.iter().partition(|p| times.contains(&p.at));
+        let moved: Vec<EnvelopePoint> = moved
+            .into_iter()
+            .map(|p| EnvelopePoint {
+                at: (p.at + delta).max(Tick::ZERO),
+                ..p
+            })
+            .collect();
+        let landed: Vec<Tick> = moved.iter().map(|m| m.at).collect();
+        let mut points: Vec<EnvelopePoint> = kept
+            .into_iter()
+            .filter(|k| !landed.contains(&k.at))
+            .chain(moved)
+            .collect();
+        points.sort_by_key(|p| p.at);
+        points.dedup_by_key(|p| p.at);
+        if points.first().is_none_or(|p| p.at != Tick::ZERO) {
+            points.insert(
+                0,
+                EnvelopePoint {
+                    at: Tick::ZERO,
+                    value: old.value_at(Tick::ZERO),
+                    curve: old.points.first().map_or(KeyCurve::Linear, |p| p.curve),
+                },
+            );
+        }
+        env.points = points;
+        Ok(())
     }
 
     /// Adds the envelope to the track, or removes it when present. Returns
@@ -810,14 +867,26 @@ impl Project {
             .envelopes
             .iter_mut()
             .find(|e| e.kind == EnvelopeKind::Velocity)
-            .expect("just added");
+            .ok_or(EditError::UnknownClip(clip))?;
+        // An envelope without a point at the event's start (none at all,
+        // or its first one later: a file may have it so) holds its first
+        // value from there.
+        if env.points.first().is_none_or(|p| p.at > Tick::ZERO) {
+            let value = env.value_at(Tick::ZERO);
+            env.points.insert(
+                0,
+                EnvelopePoint {
+                    at: Tick::ZERO,
+                    value,
+                    curve: KeyCurve::Linear,
+                },
+            );
+        }
         let v = env.value_at(d);
         env.points.retain(|p| p.at <= d);
-        let prev = env
-            .points
-            .iter()
-            .rposition(|p| p.at < d)
-            .expect("the first point is at the event's start");
+        let Some(prev) = env.points.iter().rposition(|p| p.at < d) else {
+            return Ok(());
+        };
         let flat = env.points[prev].value == v && env.points.last().is_some_and(|p| p.at < d);
         if flat {
             // Held to the cursor, then 0: two points where there was one.
@@ -912,6 +981,78 @@ impl Project {
             at.clamp(min, max.max(min))
         };
         p.value = value.clamp(lo, hi);
+        Ok(())
+    }
+
+    /// Moves several points of `owner`'s `kind` envelope as one: `from`
+    /// gives each one's index with the time and value it had; their times
+    /// go `dt` later (earlier when negative) and their values `dv` up, in
+    /// the envelope's own unit (0 to 1, as [`EnvelopeKind::to_unit`]). The
+    /// time is held so that none passes the points left out around them
+    /// or the envelope's end, which keeps their order; the first point
+    /// stays at time zero.
+    pub fn move_envelope_points(
+        &mut self,
+        owner: impl Into<EnvelopeOwner>,
+        kind: EnvelopeKind,
+        from: &[(usize, Tick, f32)],
+        dt: Tick,
+        dv: f32,
+    ) -> Result<()> {
+        let owner = owner.into();
+        let end = self.envelope_end(owner);
+        let env = self.envelope_mut(owner, kind)?;
+        let n = env.points.len();
+        // The first point never moves in time.
+        let moving: Vec<bool> = (0..n)
+            .map(|i| i > 0 && from.iter().any(|f| f.0 == i))
+            .collect();
+        let (mut lo, mut hi) = (i64::MIN, i64::MAX);
+        for &(i, at, _) in from.iter().filter(|f| f.0 > 0 && f.0 < n) {
+            if let Some(b) = (0..i).rev().find(|&j| !moving[j]) {
+                lo = lo.max(env.points[b].at.0 + 1 - at.0);
+            }
+            let after = (i + 1..n)
+                .find(|&j| !moving[j])
+                .map_or(end.0, |a| env.points[a].at.0 - 1);
+            hi = hi.min(after - at.0);
+        }
+        let dt = if lo > hi { 0 } else { dt.0.clamp(lo, hi) };
+        let (min, max) = kind.range();
+        for &(i, at, v) in from {
+            let Some(p) = env.points.get_mut(i) else {
+                continue;
+            };
+            if i > 0 {
+                p.at = Tick(at.0 + dt);
+            }
+            p.value = if dv == 0.0 {
+                v
+            } else {
+                kind.from_unit(kind.to_unit(v) + dv).clamp(min, max)
+            };
+        }
+        Ok(())
+    }
+
+    /// Removes the points at `indices` (the first point cannot be removed).
+    pub fn remove_envelope_points(
+        &mut self,
+        owner: impl Into<EnvelopeOwner>,
+        kind: EnvelopeKind,
+        indices: &[usize],
+    ) -> Result<()> {
+        let env = self.envelope_mut(owner, kind)?;
+        let mut indices: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| i > 0 && i < env.points.len())
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        for i in indices.into_iter().rev() {
+            env.points.remove(i);
+        }
         Ok(())
     }
 
@@ -1209,6 +1350,48 @@ mod tests {
         assert!((e.value_at(s(11)) - 0.5).abs() < 1e-6);
     }
 
+    /// Points picked along with events go with them, earlier or later;
+    /// those where they land give way, and the start keeps its point.
+    #[test]
+    fn picked_points_move_and_the_start_keeps_one() {
+        let mut p = Project::default();
+        let a = p.tracks[1].id;
+        let kind = EnvelopeKind::Volume;
+        p.toggle_envelope(a, kind).unwrap();
+        for (t, v) in [(2, 0.5), (4, 0.25), (9, 0.75)] {
+            p.set_envelope_point(a, kind, s(t), v).unwrap();
+        }
+        let before = p.clone();
+        // 2 and 4 s, 5 s later: the one at 9 s gives way to 4's.
+        p.carry_picked_points(&before, a, kind, &[s(2), s(4)], s(5))
+            .unwrap();
+        let points = |p: &Project| -> Vec<(Tick, f32)> {
+            p.track(a).unwrap().envelopes[0]
+                .points
+                .iter()
+                .map(|q| (q.at, q.value))
+                .collect()
+        };
+        assert_eq!(
+            points(&p),
+            vec![(Tick::ZERO, 1.0), (s(7), 0.5), (s(9), 0.25)]
+        );
+        // The start's own point taken along: another at the start.
+        let mut q = before.clone();
+        q.carry_picked_points(&before, a, kind, &[Tick::ZERO, s(2)], s(1))
+            .unwrap();
+        assert_eq!(
+            points(&q),
+            vec![
+                (Tick::ZERO, 1.0),
+                (s(1), 1.0),
+                (s(3), 0.5),
+                (s(4), 0.25),
+                (s(9), 0.75)
+            ]
+        );
+    }
+
     /// A video event 10 s long at 25 s, 20 s into a minute of media.
     fn event(p: &mut Project) -> ClipId {
         use crate::model::{MediaId, MediaInfo, MediaSource, VideoStreamInfo};
@@ -1412,6 +1595,148 @@ mod tests {
         assert!(!p.toggle_envelope(a, EnvelopeKind::Volume).unwrap());
     }
 
+    /// [`Envelope::value_at`] worked out one segment after the other, as
+    /// it was before it looked its segment up.
+    fn value_by_scanning(env: &Envelope, t: Tick) -> f32 {
+        let Some(first) = env.points.first() else {
+            return env.kind.default_value();
+        };
+        if t <= first.at {
+            return first.value;
+        }
+        for w in env.points.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            if t < b.at {
+                let curve = if env.kind.is_held() {
+                    KeyCurve::Hold
+                } else {
+                    a.curve
+                };
+                let span = (b.at - a.at).0.max(1) as f64;
+                let f = curve.eval(((t - a.at).0 as f64 / span) as f32);
+                return a.value + (b.value - a.value) * f;
+            }
+        }
+        env.points.last().map_or(first.value, |p| p.value)
+    }
+
+    #[test]
+    fn a_value_looked_up_is_the_value_found_segment_by_segment() {
+        // Numbers of its own making: the same envelopes at every run.
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let curves = [
+            KeyCurve::Linear,
+            KeyCurve::Fast,
+            KeyCurve::Slow,
+            KeyCurve::Smooth,
+            KeyCurve::Sharp,
+            KeyCurve::Hold,
+        ];
+        for round in 0..400 {
+            let kind = if round % 5 == 0 {
+                EnvelopeKind::Mute
+            } else {
+                EnvelopeKind::Volume
+            };
+            // None to eleven points, the first before, at or after zero,
+            // now and then two at one time.
+            let mut at = (next() % 2000) as i64 - 500;
+            let mut points = Vec::new();
+            for _ in 0..next() % 12 {
+                points.push(EnvelopePoint {
+                    at: Tick(at),
+                    value: (next() % 1000) as f32 / 250.0,
+                    curve: curves[(next() % curves.len() as u64) as usize],
+                });
+                at += (next() % 5) as i64 * (next() % 300) as i64;
+            }
+            let env = Envelope { kind, points };
+            // Before the first point, on every point and a tick around it,
+            // after the last, and anywhere.
+            let mut times = vec![Tick(-10_000), Tick::ZERO, Tick(10_000)];
+            for p in &env.points {
+                times.extend([p.at - Tick(1), p.at, p.at + Tick(1)]);
+            }
+            times.extend((0..40).map(|_| Tick((next() % 6000) as i64 - 1500)));
+            for t in times {
+                assert_eq!(
+                    env.value_at(t).to_bits(),
+                    value_by_scanning(&env, t).to_bits(),
+                    "round {round} at {t}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_velocity_envelope_without_a_first_point_still_freezes_a_frame() {
+        // No points at all (a file may have it so): the frame at the cursor
+        // holds as on an envelope left at 100 %.
+        let mut p = Project::default();
+        let id = event(&mut p);
+        p.toggle_event_envelope(id, EnvelopeKind::Velocity).unwrap();
+        p.clip_mut(id).unwrap().envelopes[0].points.clear();
+        p.freeze_frame_at(id, s(28)).unwrap();
+        for (x, at) in [(2.0, 22.0), (3.0, 23.0), (9.5, 23.0)] {
+            assert!(
+                (shown(&p, id, x) - at).abs() < 1e-6,
+                "{x}: {}",
+                shown(&p, id, x)
+            );
+        }
+        p.check_invariants().unwrap();
+        // Its first point after the cursor: that point's value holds
+        // before it — 200 % for 3 s, then the frame.
+        let mut q = Project::default();
+        let id = event(&mut q);
+        q.toggle_event_envelope(id, EnvelopeKind::Velocity).unwrap();
+        q.clip_mut(id).unwrap().envelopes[0].points = vec![EnvelopePoint {
+            at: s(6),
+            value: 2.0,
+            curve: KeyCurve::Linear,
+        }];
+        q.freeze_frame_at(id, s(28)).unwrap();
+        for (x, at) in [(2.0, 24.0), (3.0, 26.0), (8.0, 26.0)] {
+            assert!(
+                (shown(&q, id, x) - at).abs() < 1e-6,
+                "{x}: {}",
+                shown(&q, id, x)
+            );
+        }
+        q.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_track_envelope_without_points_goes_with_the_events_at_its_default() {
+        use crate::model::{Generator, MediaInfo};
+        let mut p = Project::default();
+        let a = p.tracks[1].id;
+        let tone = p.add_media(MediaInfo::generated(
+            Generator::TestTone {
+                frequency_hz: 440.0,
+                level_db: -12.0,
+            },
+            &p.settings.clone(),
+        ));
+        let id = p.insert_media(tone, s(2), None, Some(a)).unwrap()[0];
+        p.trim_end(id, s(4)).unwrap();
+        p.toggle_envelope(a, EnvelopeKind::Volume).unwrap();
+        p.track_by_id_mut(a).unwrap().envelopes[0].points.clear();
+        let before = p.clone();
+        p.move_clip(id, s(10), None).unwrap();
+        p.carry_envelopes(&before, &[id]);
+        let e = &p.track(a).unwrap().envelopes[0];
+        let points: Vec<(Tick, f32)> = e.points.iter().map(|q| (q.at, q.value)).collect();
+        assert_eq!(points, vec![(Tick::ZERO, 1.0)]);
+        p.check_invariants().unwrap();
+    }
+
     #[test]
     fn points_stay_ordered() {
         let mut p = Project::default();
@@ -1432,6 +1757,53 @@ mod tests {
         assert_eq!(env.points[1].value, 1.0, "clamped to the range");
         p.remove_envelope_point(a, EnvelopeKind::Pan, 0).unwrap();
         assert_eq!(p.track(a).unwrap().envelopes[0].points.len(), 3);
+    }
+
+    #[test]
+    fn picked_points_move_and_go_together() {
+        let mut p = Project::default();
+        let a = p.tracks[1].id;
+        ramp(&mut p, a);
+        let k = EnvelopeKind::Pan;
+        let from = |p: &Project, ix: &[usize]| -> Vec<(usize, Tick, f32)> {
+            ix.iter()
+                .map(|&i| (i, pan(p, a).points[i].at, pan(p, a).points[i].value))
+                .collect()
+        };
+        // Points 3 and 4 (at 3 s and 4 s) half a second later and a tenth
+        // of the lane up: both, by the same amounts.
+        let picked = from(&p, &[3, 4]);
+        let mut moved = p.clone();
+        moved
+            .move_envelope_points(a, k, &picked, Tick::from_seconds_f64(0.5), 0.1)
+            .unwrap();
+        let e = pan(&moved, a);
+        assert_eq!(e.points[3].at, Tick::from_seconds_f64(3.5));
+        assert_eq!(e.points[4].at, Tick::from_seconds_f64(4.5));
+        // A tenth of the lane is a fifth of pan's range (−1 to 1).
+        assert!((e.points[3].value - (-0.4 + 0.2)).abs() < 1e-5);
+        assert!((e.points[4].value - (-0.2 + 0.2)).abs() < 1e-5);
+        // Far later: held just before the point after them (5 s), in order.
+        let mut far = p.clone();
+        far.move_envelope_points(a, k, &picked, s(30), 0.0).unwrap();
+        let e = pan(&far, a);
+        assert!(e.points[3].at < e.points[4].at && e.points[4].at < e.points[5].at);
+        assert_eq!(e.points[4].at, s(5) - Tick(1));
+        assert_eq!(e.points[3].value, pan(&p, a).points[3].value, "values kept");
+        // With the first point: it stays at zero, the rest go no earlier
+        // than just after it.
+        let mut first = p.clone();
+        first
+            .move_envelope_points(a, k, &from(&p, &[0, 1, 2]), -s(5), 0.0)
+            .unwrap();
+        let e = pan(&first, a);
+        assert_eq!(e.points[0].at, Tick::ZERO);
+        assert!(e.points[1].at > Tick::ZERO && e.points[1].at < e.points[2].at);
+        first.check_invariants().unwrap();
+        // Deleted together, the first point kept.
+        p.remove_envelope_points(a, k, &[0, 2, 5, 5, 9]).unwrap();
+        let times: Vec<Tick> = pan(&p, a).points.iter().map(|q| q.at).collect();
+        assert_eq!(times, vec![s(0), s(1), s(3), s(4), s(6), s(7), s(8), s(10)]);
     }
 
     #[test]

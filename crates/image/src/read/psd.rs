@@ -8,7 +8,9 @@
 //! mask), with its blend mode (`psd_layer_blends`), as Adobe's published
 //! file format describes its layer records.
 
-use super::{Picture, PictureData, ReadError, Result, corrupt, unsupported};
+use super::{
+    Picture, PictureData, ReadError, Result, checked_size, corrupt, pixel_count, unsupported,
+};
 
 fn be16(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(d.get(at..at + 2)?.try_into().ok()?))
@@ -40,6 +42,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     if width == 0 || height == 0 || width > 1 << 17 || height > 1 << 17 || channels == 0 {
         return corrupt("Photoshop document size");
     }
+    let pixels = pixel_count(width, height)?;
     if !matches!(depth, 1 | 8 | 16 | 32) {
         return unsupported(format!("Photoshop document of {depth} bits"));
     }
@@ -52,6 +55,11 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         9 => return unsupported("Lab Photoshop document"),
         m => return unsupported(format!("Photoshop color mode {m}")),
     };
+    // Every color of the mode has its channel: with fewer, a color would
+    // be read from a plane that is not there.
+    if channels < colors {
+        return corrupt("Photoshop document channels");
+    }
     let mut pos = 26;
     let cmap_len = be32(d, pos).ok_or_else(bad)? as usize;
     let palette = d.get(pos + 4..pos + 4 + cmap_len).unwrap_or(&[]).to_vec();
@@ -82,7 +90,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let compression = be16(d, pos).ok_or_else(bad)?;
     pos += 2;
     let row_bytes = (width * depth).div_ceil(8);
-    let plane_bytes = row_bytes * height;
+    let plane_bytes = checked_size(row_bytes, height)?;
     // Only the channels needed: the colors and maybe alpha.
     let used = (colors + usize::from(channels > colors)).min(channels);
     let mut planes: Vec<Vec<u8>> = Vec::with_capacity(used);
@@ -122,7 +130,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                 d.get(pos..).ok_or_else(bad)?,
                 compression == 3,
                 row_bytes,
-                height * channels,
+                checked_size(height, channels)?,
                 depth,
             )?;
             for c in 0..used {
@@ -149,8 +157,8 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         }
     };
     let has_alpha = merged_alpha && planes.len() > colors;
-    let n = width * height;
-    let mut rgba = vec![0f32; n * 4];
+    let n = pixels;
+    let mut rgba = vec![0f32; checked_size(n, 4)?];
     for i in 0..n {
         let a = if has_alpha {
             sample(&planes[colors], i)
@@ -225,9 +233,11 @@ fn unzip(
     rows: usize,
     depth: usize,
 ) -> Result<Vec<u8>> {
-    let mut out = bv_deflate::zlib_decompress(data)
+    // No more unpacked than its rows: a few bytes can be made to unpack
+    // into gigabytes.
+    let want = checked_size(row_bytes, rows)?;
+    let mut out = bv_deflate::zlib_decompress_limited(data, want)
         .map_err(|_| ReadError::Corrupt("Photoshop ZIP data".into()))?;
-    let want = row_bytes * rows;
     if out.len() < want {
         return corrupt("Photoshop ZIP data");
     }
@@ -447,7 +457,9 @@ fn layer_records(d: &[u8]) -> Result<(Header, Vec<LayerRecord>)> {
         pos += 12;
         let extra = be32(d, pos).ok_or_else(bad)? as usize;
         pos += 4;
-        let extra_end = pos + extra;
+        // Its extra data ends where the file does, whatever its length
+        // says: its blocks are not looked for past it.
+        let extra_end = pos.saturating_add(extra).min(d.len());
         // The layer mask and the blending ranges.
         let mut at = pos;
         let mask = layer_mask(d, at, &channels);
@@ -461,18 +473,28 @@ fn layer_records(d: &[u8]) -> Result<(Header, Vec<LayerRecord>)> {
         // Additional information: the Unicode name, the group sections.
         let mut section = 0;
         while at + 12 <= extra_end {
-            let sig = &d[at..at + 4];
+            let (Some(sig), Some(key)) = (d.get(at..at + 4), d.get(at + 4..at + 8)) else {
+                break;
+            };
             if sig != b"8BIM" && sig != b"8B64" {
                 break;
             }
-            let key = &d[at + 4..at + 8];
             let len = be32(d, at + 8).ok_or_else(bad)? as usize;
             let data = at + 12;
             match key {
                 b"luni" => {
+                    // As many letters as it says, and no more than its
+                    // block holds (a count of billions was walked through
+                    // one by one).
                     let chars = be32(d, data).unwrap_or(0) as usize;
-                    let units: Vec<u16> = (0..chars)
-                        .filter_map(|k| be16(d, data + 4 + k * 2))
+                    let end = data.saturating_add(len).min(extra_end);
+                    let letters = d.get(data + 4..end).unwrap_or(&[]);
+                    let units: Vec<u16> = letters
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .take(chars)
+                        .map(|b| u16::from_be_bytes(*b))
                         .collect();
                     let text = String::from_utf16_lossy(&units);
                     let text = text.trim_end_matches('\0');
@@ -550,10 +572,15 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
         4 => 4,
         m => return unsupported(format!("Photoshop layers in color mode {m}")),
     };
-    let lw = (r.right - r.left).max(0) as usize;
-    let lh = (r.bottom - r.top).max(0) as usize;
+    // Sizes in 64 bits: a rectangle's sides may be further apart than 32
+    // bits count.
+    let extent = |lo: i32, hi: i32| (i64::from(hi) - i64::from(lo)).max(0) as usize;
+    let lw = extent(r.left, r.right);
+    let lh = extent(r.top, r.bottom);
     let bytes = h.depth / 8;
     let mask = r.mask;
+    let (w, ht) = (h.width, h.height);
+    let canvas = pixel_count(w, ht)?;
     // Each channel's plane over the layer's rectangle (the mask's over
     // its own).
     let mut planes: Vec<(i16, Vec<u8>)> = Vec::new();
@@ -562,10 +589,7 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
         let block = d.get(at..at + len).ok_or_else(bad)?;
         at += len;
         let (pw, ph) = match mask.filter(|m| m.channel == id) {
-            Some(m) => (
-                (m.right - m.left).max(0) as usize,
-                (m.bottom - m.top).max(0) as usize,
-            ),
+            Some(m) => (extent(m.left, m.right), extent(m.top, m.bottom)),
             None if id >= -1 => (lw, lh),
             None => continue,
         };
@@ -573,14 +597,16 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
             continue;
         }
         let (lw, lh) = (pw, ph);
+        // A layer may be larger than the canvas, within the budget.
+        let plane_bytes = checked_size(pixel_count(lw, lh)?, bytes)?;
         let row_bytes = lw * bytes;
         let compression = be16(block, 0).ok_or_else(bad)?;
         let data = &block[2..];
         let plane = match compression {
-            0 => data.get(..row_bytes * lh).ok_or_else(bad)?.to_vec(),
+            0 => data.get(..plane_bytes).ok_or_else(bad)?.to_vec(),
             1 => {
                 let count_size = if h.big { 4 } else { 2 };
-                let mut out = Vec::with_capacity(row_bytes * lh);
+                let mut out = Vec::with_capacity(plane_bytes);
                 let mut data_at = lh * count_size;
                 for y in 0..lh {
                     let n = if h.big {
@@ -608,19 +634,20 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
             _ => u16::from_be_bytes([p[i * 2], p[i * 2 + 1]]),
         }
     };
-    let (w, ht) = (h.width, h.height);
-    let mut rgba = vec![0u16; w * ht * 4];
+    let mut rgba = vec![0u16; checked_size(canvas, 4)?];
     let opacity = u32::from(r.opacity);
-    for y in 0..lh {
-        let cy = r.top + y as i32;
-        if cy < 0 || cy >= ht as i32 {
-            continue;
-        }
-        for x in 0..lw {
-            let cx = r.left + x as i32;
-            if cx < 0 || cx >= w as i32 {
-                continue;
-            }
+    // Only the part of the layer on the canvas is walked: its rectangle
+    // may be billions of pixels each way. The columns (or rows) of a
+    // layer `len` long from `from` that are on a canvas `size` long.
+    let on_canvas = |from: i32, len: usize, size: usize| {
+        let first = (-i64::from(from)).clamp(0, len as i64) as usize;
+        let last = (size as i64 - i64::from(from)).clamp(0, len as i64) as usize;
+        first..last.max(first)
+    };
+    for y in on_canvas(r.top, lh, ht) {
+        let cy = (i64::from(r.top) + y as i64) as usize;
+        for x in on_canvas(r.left, lw, w) {
+            let cx = (i64::from(r.left) + x as i64) as usize;
             let i = y * lw + x;
             let c = |id: i16| plane(id).map_or(0, |p| sample(p, i));
             let (red, green, blue) = match colors {
@@ -640,9 +667,9 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
             // The layer mask: its pixel there, else its value outside.
             let masked = match mask {
                 Some(m) => {
-                    let (mx, my) = (cx - m.left, cy - m.top);
-                    let mw = (m.right - m.left).max(0);
-                    let inside = mx >= 0 && my >= 0 && mx < mw && cy < m.bottom;
+                    let (mx, my) = (cx as i64 - i64::from(m.left), cy as i64 - i64::from(m.top));
+                    let mw = (i64::from(m.right) - i64::from(m.left)).max(0);
+                    let inside = mx >= 0 && my >= 0 && mx < mw && (cy as i64) < i64::from(m.bottom);
                     match plane(m.channel) {
                         Some(p) if inside => u32::from(sample(p, (my * mw + mx) as usize)),
                         _ => u32::from(m.outside) * 257,
@@ -652,7 +679,7 @@ pub fn psd_layer(d: &[u8], index: usize) -> Result<Picture> {
             };
             let alpha =
                 (u64::from(alpha) * u64::from(masked) / 65535 * u64::from(opacity) / 255) as u16;
-            let o = (cy as usize * w + cx as usize) * 4;
+            let o = (cy * w + cx) * 4;
             rgba[o..o + 4].copy_from_slice(&[red, green, blue, alpha]);
         }
     }
@@ -945,6 +972,137 @@ mod tests {
         let out = super::unzip(&z, true, 8, 1, 32).unwrap();
         assert_eq!(f32::from_be_bytes(out[..4].try_into().unwrap()), 1.0);
         assert_eq!(f32::from_be_bytes(out[4..].try_into().unwrap()), -2.0);
+    }
+
+    /// A 2×2 RGB document of 8 bits whose file ends in its one layer's
+    /// record: the layer's rectangle (top, left, bottom, right), its
+    /// channels (id, length of its data), the length its extra data
+    /// declares and that data; then `after` (the channels' data).
+    fn one_record(
+        rect: [i32; 4],
+        channels: &[(i16, u32)],
+        extra_len: u32,
+        extra: &[u8],
+        after: &[u8],
+    ) -> Vec<u8> {
+        let mut d = document(3, 3, &[]);
+        // Up to the layer and mask section, which goes on to the end.
+        d.truncate(34);
+        d.extend_from_slice(&u32::MAX.to_be_bytes());
+        d.extend_from_slice(&u32::MAX.to_be_bytes());
+        d.extend_from_slice(&1i16.to_be_bytes());
+        for v in rect {
+            d.extend_from_slice(&v.to_be_bytes());
+        }
+        d.extend_from_slice(&(channels.len() as u16).to_be_bytes());
+        for (id, len) in channels {
+            d.extend_from_slice(&id.to_be_bytes());
+            d.extend_from_slice(&len.to_be_bytes());
+        }
+        d.extend_from_slice(b"8BIMnorm");
+        d.extend_from_slice(&[255, 0, 0, 0]);
+        d.extend_from_slice(&extra_len.to_be_bytes());
+        d.extend_from_slice(extra);
+        d.extend_from_slice(after);
+        d
+    }
+
+    /// A record's extra data with no mask, no blending ranges and no name,
+    /// then `blocks`.
+    fn extra(blocks: &[u8]) -> Vec<u8> {
+        let mut e = vec![0u8; 12];
+        e.extend_from_slice(blocks);
+        e
+    }
+
+    #[test]
+    fn a_document_with_fewer_channels_than_its_colors_is_refused() {
+        // RGB with one channel, CMYK with three.
+        for (mode, colors, channels) in [(3, 3, 1u16), (4, 4, 3)] {
+            let mut d = document(mode, colors, &[]);
+            d[12..14].copy_from_slice(&channels.to_be_bytes());
+            assert!(matches!(
+                super::read(&d),
+                Err(crate::read::ReadError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_layer_record_running_past_the_file_is_read_to_its_end() {
+        // Its extra data says 65535 bytes; the file ends in the first four
+        // of a block.
+        let d = one_record([0, 0, 2, 2], &[], 0xffff, &extra(b"8BIM"), &[]);
+        assert_eq!(super::psd_layer_names(&d).unwrap(), [""]);
+    }
+
+    #[test]
+    fn a_layer_name_has_the_letters_its_block_holds() {
+        // A Unicode name of 4,294,967,295 letters, two of them there.
+        let mut block = b"8BIMluni".to_vec();
+        block.extend_from_slice(&8u32.to_be_bytes());
+        block.extend_from_slice(&u32::MAX.to_be_bytes());
+        block.extend_from_slice(&[0, b'H', 0, b'i']);
+        let e = extra(&block);
+        let d = one_record([0, 0, 2, 2], &[], e.len() as u32, &e, &[]);
+        assert_eq!(super::psd_layer_names(&d).unwrap(), ["Hi"]);
+    }
+
+    #[test]
+    fn a_layer_far_larger_than_the_canvas_is_walked_inside_it() {
+        // A rectangle of 2^31 − 1 each way, without channels: black over
+        // the 2×2 canvas, and no walk over what lies outside.
+        let e = extra(&[]);
+        let d = one_record([0, 0, i32::MAX, i32::MAX], &[], 12, &e, &[]);
+        let p = super::psd_layer(&d, 0).unwrap();
+        assert_eq!(p.data, PictureData::Rgba8([0, 0, 0, 255].repeat(4)));
+        // From the least number to the greatest: the same.
+        let d = one_record([i32::MIN, i32::MIN, i32::MAX, i32::MAX], &[], 12, &e, &[]);
+        assert!(super::psd_layer(&d, 0).is_ok());
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // A layer of 2^31 − 1 each way with a run-length encoded channel.
+        let e = extra(&[]);
+        let d = one_record(
+            [0, 0, i32::MAX, i32::MAX],
+            &[(0, 2)],
+            12,
+            &e,
+            &1u16.to_be_bytes(),
+        );
+        assert!(matches!(
+            super::psd_layer(&d, 0),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+        // A document of 131072 × 131072, run-length encoded; and a layer
+        // of 2×2 on such a canvas.
+        let mut d = document(3, 3, &[]);
+        d[14..18].copy_from_slice(&(1u32 << 17).to_be_bytes());
+        d[18..22].copy_from_slice(&(1u32 << 17).to_be_bytes());
+        let at = d.len() - 14;
+        d[at..at + 2].copy_from_slice(&1u16.to_be_bytes());
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+        let mut d = one_record([0, 0, 2, 2], &[], 12, &e, &[]);
+        d[14..18].copy_from_slice(&u32::MAX.to_be_bytes());
+        d[18..22].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            super::psd_layer(&d, 0),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn zip_data_that_unpacks_past_its_rows_is_refused() {
+        // A row of one byte, and 16 MB.
+        let bomb = bv_deflate::zlib_compress(&vec![255; 16 << 20], 6);
+        assert!(super::unzip(&bomb, false, 1, 1, 8).is_err());
+        let one = bv_deflate::zlib_compress(&[255], 6);
+        assert_eq!(super::unzip(&one, false, 1, 1, 8).unwrap(), [255]);
     }
 
     /// A 2×1 RGB document, raw, with a negative layer count and an alpha

@@ -72,9 +72,10 @@ fn open_in_editor(editor: Option<&Path>, path: &Path) -> std::io::Result<()> {
 pub(crate) fn open_externally(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
+        use std::os::windows::process::CommandExt as _;
+        // Between quotes: Explorer parts what it gets at commas.
+        std::process::Command::new("explorer")
+            .raw_arg(format!("\"{}\"", explorer_path(path)))
             .spawn()
             .map(|_| ())
     }
@@ -99,8 +100,9 @@ pub(crate) fn open_externally(path: &Path) -> std::io::Result<()> {
 pub(crate) fn reveal_in_folder(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
+            .raw_arg(select_argument(path))
             .spawn()
             .map(|_| ())
     }
@@ -116,6 +118,27 @@ pub(crate) fn reveal_in_folder(path: &Path) -> std::io::Result<()> {
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         open_externally(path.parent().unwrap_or(path))
+    }
+}
+
+/// What tells Windows Explorer to show `path`'s folder with it picked: the
+/// path alone between quotes (given as an ordinary argument, one with
+/// spaces was quoted whole, switch and all, and Explorer opened the user's
+/// Documents instead), whole and with the system's own separators, the only
+/// ones it takes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_argument(path: &Path) -> std::ffi::OsString {
+    format!("/select,\"{}\"", explorer_path(path)).into()
+}
+
+/// `path` as Windows Explorer takes it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn explorer_path(path: &Path) -> String {
+    let whole = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = whole.to_string_lossy().replace('/', "\\");
+    match text.strip_prefix("\\\\?\\") {
+        Some(rest) => rest.to_string(),
+        None => text,
     }
 }
 
@@ -701,7 +724,7 @@ impl BananaApp {
             return;
         };
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Save Snapshot to File"))
+            .set_title(crate::i18n::os_text(tr("Save Snapshot to File")))
             .add_filter("PNG", &["png"])
             .set_file_name(trf!("{} snapshot.png", crate::i18n::media_name(info)))
             .save_file()
@@ -770,7 +793,9 @@ impl BananaApp {
     /// saves the project there, pointing at the copies.
     pub(crate) fn advanced_save(&mut self) {
         let Some(dir) = rfd::FileDialog::new()
-            .set_title(tr("Advanced Save: folder for the project and media"))
+            .set_title(crate::i18n::os_text(tr(
+                "Advanced Save: folder for the project and media",
+            )))
             .pick_folder()
         else {
             return;
@@ -963,8 +988,8 @@ impl BananaApp {
             (tr("Export Chapters"), tr("Text"), "txt")
         };
         let Some(path) = rfd::FileDialog::new()
-            .set_title(title)
-            .add_filter(filter, &[ext])
+            .set_title(crate::i18n::os_text(title))
+            .add_filter(crate::i18n::os_text(filter), &[ext])
             .set_file_name(trf!("Chapters.{}", ext))
             .save_file()
         else {
@@ -1020,5 +1045,22 @@ mod tests {
     #[test]
     fn srt_times() {
         assert_eq!(srt_time(Tick::from_seconds_f64(3723.456)), "01:02:03,456");
+    }
+
+    /// Only the path is between quotes, its spaces and commas in them, and
+    /// its separators are the system's.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_is_told_the_file_it_picks() {
+        for (path, told) in [
+            (
+                r"C:\Meus vídeos\Final, 2 (1).mp4",
+                r#"/select,"C:\Meus vídeos\Final, 2 (1).mp4""#,
+            ),
+            (r"D:/renders/a.mp4", r#"/select,"D:\renders\a.mp4""#),
+            (r"\\?\D:\r\a.mp4", r#"/select,"D:\r\a.mp4""#),
+        ] {
+            assert_eq!(select_argument(Path::new(path)), *told);
+        }
     }
 }

@@ -42,9 +42,12 @@ pub struct ImageSequenceDialog {
 /// has no number).
 pub fn open(app: &mut BananaApp) {
     let Some(first) = rfd::FileDialog::new()
-        .set_title(tr("Import Image Sequence"))
-        .add_filter(tr("Image Files"), IMAGE_EXTENSIONS)
-        .add_filter(tr("All Files"), &["*"])
+        .set_title(crate::i18n::os_text(tr("Import Image Sequence")))
+        .add_filter(
+            crate::i18n::os_text(tr("Image Files")),
+            &crate::media_files::cased(IMAGE_EXTENSIONS),
+        )
+        .add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
         .pick_file()
     else {
         return;

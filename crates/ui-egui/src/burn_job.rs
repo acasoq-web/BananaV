@@ -271,6 +271,7 @@ impl BurnJob {
         let (work, task, drive) = (self.work.clone(), self.task.clone(), self.drive.id.clone());
         let (cancel, shared) = (self.cancel.clone(), self.shared.clone());
         std::thread::spawn(move || {
+            let _awake = bv_platform::KeepAwake::new("Burning a disc");
             let result = make(&work, &task, &drive, &cancel, &shared);
             let mut s = shared.lock().expect("burn");
             s.step = match result {

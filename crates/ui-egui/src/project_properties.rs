@@ -210,7 +210,8 @@ fn folder_box(
             .clicked()
         {
             let start = PathBuf::from(folder.trim());
-            let mut dialog = rfd::FileDialog::new().set_title(label.trim_end_matches(':'));
+            let mut dialog =
+                rfd::FileDialog::new().set_title(crate::i18n::os_text(label.trim_end_matches(':')));
             if start.is_dir() {
                 dialog = dialog.set_directory(&start);
             }
@@ -732,7 +733,7 @@ impl ProjectPropertiesDialog {
     /// Sets the frame size and rate from a media file the user picks.
     fn match_media(&mut self, app: &mut BananaApp) {
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Match Media Video Settings"))
+            .set_title(crate::i18n::os_text(tr("Match Media Video Settings")))
             .pick_file()
         else {
             return;

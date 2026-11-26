@@ -122,7 +122,7 @@ pub struct PreviewState {
     /// The image the texture was last given (its pixels used again for
     /// the next frame of its size).
     image: Option<std::sync::Arc<ColorImage>>,
-    pub(crate) shown: Option<(u64, Tick, u32, u32)>,
+    pub(crate) shown: Option<bv_engine::FrameKey>,
     /// Overlays (the # button), and which: the grid, the safe areas, the
     /// closed captioning channels (CC1 to CC4), one channel of the picture.
     pub(crate) overlays: bool,
@@ -170,7 +170,7 @@ pub struct PreviewState {
     /// Expanded Edit Mode's split screen: the frames on either side of the
     /// edit point.
     sides: [Option<TextureHandle>; 2],
-    sides_shown: [Option<(u64, Tick, u32, u32)>; 2],
+    sides_shown: [Option<bv_engine::FrameKey>; 2],
     /// Where the frame was last drawn (the window less its bars).
     area: Rect,
     /// The frame itself, as last drawn.
@@ -298,7 +298,7 @@ fn paint_split(
         if let (Some(f), Some((_, t))) = (f, wanted)
             && f.time == app.frame_rate().snap_floor(t)
         {
-            let key = (f.generation, f.time, f.width, f.height);
+            let key = f.key();
             if app.preview.sides_shown[i] != Some(key) {
                 let image = frame_image([f.width as usize, f.height as usize], &f.rgba);
                 match &mut app.preview.sides[i] {
@@ -470,7 +470,7 @@ impl std::fmt::Debug for PreviewState {
 fn save_snapshot(app: &mut BananaApp) {
     let t = app.display_time();
     if let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Save Snapshot"))
+        .set_title(crate::i18n::os_text(tr("Save Snapshot")))
         .add_filter("PNG", &["png"])
         .set_file_name(format!("snapshot_{}.png", app.frame_rate().frame_at(t)))
         .save_file()
@@ -510,16 +510,19 @@ fn place_frame(area: Rect, size: egui::Vec2, center: Pos2) -> (Rect, Pos2) {
 /// The frame's navigation, as VEGAS's: the mouse wheel zooms toward the
 /// pointer (10 % a notch, 1 % with Ctrl), dragging with the wheel held
 /// pans, and a double-click with it (or the left button, outside
-/// Split-Screen View) shows the whole frame at 100 % again.
+/// Split-Screen View) shows the whole frame at 100 % again. Read from the
+/// mouse itself: what is drawn over the frame (the Transform mode's box,
+/// a plug-in's controls) takes the left button only.
 fn navigate(ui: &egui::Ui, app: &mut BananaApp, nav: &egui::Response, area: Rect, fit: egui::Vec2) {
     let p = &mut app.preview;
-    if nav.hovered() {
+    let middle = egui::PointerButton::Middle;
+    if ui.rect_contains_pointer(nav.rect) {
         let (notches, fine) = ui.input(|i| crate::widgets::wheel_notches(&i.events));
         p.wheel_rest += notches;
         let whole = p.wheel_rest.trunc();
         p.wheel_rest -= whole;
         if whole != 0.0
-            && let Some(at) = nav.hover_pos()
+            && let Some(at) = ui.input(|i| i.pointer.hover_pos())
         {
             let from = p.shown_zoom();
             let to = clamp_zoom(from as f32 + whole * if fine { 1.0 } else { 10.0 });
@@ -537,18 +540,21 @@ fn navigate(ui: &egui::Ui, app: &mut BananaApp, nav: &egui::Response, area: Rect
     } else {
         p.wheel_rest = 0.0;
     }
-    let dragging = nav.dragged_by(egui::PointerButton::Middle);
+    let (dragging, d) = ui.input(|i| {
+        let held = i.pointer.button_down(middle)
+            && i.pointer.press_origin().is_some_and(|o| area.contains(o));
+        (held, i.pointer.delta())
+    });
     if dragging {
         let size = fit * p.shown_zoom() as f32 / 100.0;
-        let d = nav.drag_delta();
         p.center -= vec2(d.x / size.x.max(1.0), d.y / size.y.max(1.0));
     }
     // A double click a plug-in's overlay took is its own (a point put
     // back), not the zoom's; nor is a Color Grading picker's click.
     let overlay = app.ofx.overlay_took_press() || app.color_panel.picking.is_some();
-    if nav.double_clicked_by(egui::PointerButton::Middle)
-        || (nav.double_clicked() && !p.split.on && !overlay)
-    {
+    let wheel_twice =
+        ui.rect_contains_pointer(nav.rect) && ui.input(|i| i.pointer.button_double_clicked(middle));
+    if wheel_twice || (nav.double_clicked() && !p.split.on && !overlay) {
         p.reset_zoom();
     }
     // The pointer over the picture as it is now (`view_cursor`).
@@ -740,7 +746,7 @@ fn triangle(ui: &egui::Ui, c: Pos2) {
 }
 
 /// A flat button with `text` and a ▾, opening a menu (the quality's).
-fn text_arrow(ui: &mut egui::Ui, text: &str, tip: &str) -> egui::Response {
+pub(crate) fn text_arrow(ui: &mut egui::Ui, text: &str, tip: &str) -> egui::Response {
     let font = egui::FontId::proportional(13.0);
     let galley = ui
         .painter()
@@ -1018,6 +1024,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             }
             split_changed = split_menu(ui, app);
             quality_menu(ui, app);
+            crate::speed::menu(ui, app);
             zoom_box(ui, app);
             overlays_menu(ui, app);
             crate::transform_ui::toolbar_button(ui, app);
@@ -1290,7 +1297,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         app.engine.preview_frame()
     };
     if let Some(f) = rendered.or(frame).filter(|_| !hold) {
-        let key = (f.generation, f.time, f.width, f.height);
+        let key = f.key();
         if app.preview.shown != Some(key) || app.preview.repeats != view_360 {
             let image = frame_image_reusing(
                 [f.width as usize, f.height as usize],
@@ -1725,10 +1732,31 @@ mod tests {
 
     #[test]
     fn the_wheel_zooms_and_dragging_with_it_held_pans() {
+        wheel_zooms_and_pans(false);
+    }
+
+    /// The Transform mode's box over the frame (the mod's) leaves the
+    /// wheel's zoom and pan to the preview (the user's).
+    #[test]
+    fn the_wheel_zooms_and_pans_in_transform_mode() {
+        wheel_zooms_and_pans(true);
+    }
+
+    fn wheel_zooms_and_pans(transform: bool) {
         use egui_kittest::Harness;
         crate::i18n::set_language(crate::i18n::Language::English);
         let mut app = BananaApp::new(egui::Context::default());
         app.load_demo();
+        if transform {
+            app.settings = app.settings.unsaved();
+            app.set_mods(crate::mods::Mods {
+                transform: true,
+                ..Default::default()
+            });
+            let clip = app.project().tracks[0].clips[0].id;
+            app.select_clip(clip, false);
+            app.preview.transform = true;
+        }
         let mut h = Harness::builder()
             .with_size(egui::vec2(1600.0, 900.0))
             .with_step_dt(1.0 / 60.0)
@@ -1777,6 +1805,7 @@ mod tests {
             after.x < before.x,
             "dragged right, the frame shows more of its left: {before:?} → {after:?}"
         );
+        assert_eq!(h.state().preview.transform, transform);
     }
 
     #[test]

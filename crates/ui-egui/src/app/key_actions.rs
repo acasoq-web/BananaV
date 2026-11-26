@@ -265,22 +265,32 @@ impl BananaApp {
             Extra::PlayFromStart => self.play_from_start(),
             Extra::StepForward => self.step_frames(1),
             Extra::StepBack => self.step_frames(-1),
-            // L plays; pressing it again doubles the speed (up to 4×).
-            // L: plays, then faster at each press; how fast, Options ›
-            // Preferences › Editing: "JKL / shuttle speed".
+            // L: plays, at the speed picked or (Options › Preferences ›
+            // Editing: "JKL / shuttle speed") the one it starts at; then
+            // faster at each press, as it plays.
             Extra::ScrubRight => {
                 // From shuttling backwards: playing on.
                 self.scrub_rate = 0.0;
-                let speed = self.settings.prefs.jkl_speed;
+                let (first, last) = self.settings.prefs.jkl_speed.rates();
                 if self.is_playing() {
-                    self.play_rate = speed.next_rate(Some(self.play_rate));
-                    self.restart_if_playing();
+                    let rate = crate::speed::faster(self.play_rate);
+                    self.set_play_rate(rate.min(last.max(self.play_rate)));
                 } else {
-                    self.play_rate = speed.next_rate(None);
+                    if self.play_rate == 1.0 {
+                        self.set_play_rate(first);
+                    }
                     self.toggle_play();
                 }
             }
-            // K pauses and resets the speed.
+            // K: slower at each press, as it plays (the user's: L and K
+            // raise and lower the speed); shuttling backwards stops.
+            Extra::Slower => {
+                if self.scrub_rate != 0.0 {
+                    self.scrub_rate = 0.0;
+                } else {
+                    self.set_play_rate(crate::speed::slower(self.play_rate));
+                }
+            }
             Extra::ScrubPause => {
                 if self.is_playing() {
                     self.toggle_pause();
@@ -386,6 +396,12 @@ impl BananaApp {
             Extra::PreviewZoom(dir) => self.preview.zoom_by(5 * dir as i32),
             Extra::PreviewZoomDefault => self.preview.zoom_by(0),
             Extra::PreviewBypassZoom => self.preview.toggle_bypass_zoom(),
+            // As ↑ and ↓ (`shortcuts`).
+            Extra::TimelineZoom(dir) => {
+                let at = self.display_time();
+                self.timeline
+                    .zoom_around(if dir > 0 { 0.8 } else { 1.25 }, at);
+            }
         }
     }
 
@@ -554,5 +570,41 @@ impl BananaApp {
             }
             Ok(())
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// K slows the preview down and L speeds it up, a step at a time; L
+    /// also starts it, at the speed picked.
+    #[test]
+    fn k_and_l_step_through_the_speeds() {
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        for want in [0.5, 0.25, 0.25] {
+            app.run_extra(Extra::Slower);
+            assert_eq!(app.play_rate, want);
+        }
+        app.set_play_rate(1.5);
+        app.run_extra(Extra::ScrubRight);
+        assert_eq!(app.play_rate, 1.5, "played at the speed picked");
+        if app.is_playing() {
+            for want in [2.0, 3.0, 4.0, 4.0] {
+                app.run_extra(Extra::ScrubRight);
+                assert_eq!(app.play_rate, want);
+            }
+            app.run_extra(Extra::Slower);
+            assert_eq!(app.play_rate, 3.0);
+            assert!(app.is_playing(), "it goes on");
+        }
+        app.stop();
+        // Backwards (J): K stops.
+        app.run_extra(Extra::ScrubLeft);
+        assert!(app.scrub_rate < 0.0);
+        app.run_extra(Extra::Slower);
+        assert_eq!(app.scrub_rate, 0.0);
     }
 }

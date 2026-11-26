@@ -3,7 +3,7 @@
 //! factors and restart intervals; the EXIF orientation applied. Damaged or
 //! cut files show what was read (the rest gray), as cameras' files can be.
 
-use super::{Picture, ReadError, Result, corrupt, unsupported};
+use super::{Picture, ReadError, Result, checked_size, corrupt, pixel_count, unsupported};
 
 const ZIGZAG: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
@@ -40,6 +40,11 @@ impl Huffman {
                 let Some(&v) = values.get(k) else {
                     return corrupt("JPEG Huffman table");
                 };
+                // More codes of a length than its bits tell apart: not a
+                // table (its lookup would be written past its end).
+                if code >= 1 << len {
+                    return corrupt("JPEG Huffman table");
+                }
                 if len as u32 <= FAST_BITS {
                     let shift = FAST_BITS - len as u32;
                     let first = (code as usize) << shift;
@@ -306,6 +311,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                 if width == 0 || height == 0 {
                     return unsupported("JPEG whose height comes later (DNL)");
                 }
+                pixel_count(width, height)?;
                 let mut comps = Vec::new();
                 for c in 0..n {
                     let at = 6 + c * 3;
@@ -332,12 +338,18 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                 }
                 let hmax = comps.iter().map(|c| c.h).max().unwrap_or(1);
                 let vmax = comps.iter().map(|c| c.v).max().unwrap_or(1);
+                // Each component's factors divide the largest: with any
+                // other ratio (3 to 2) a plane would be asked for samples
+                // it does not have.
+                if comps.iter().any(|c| hmax % c.h != 0 || vmax % c.v != 0) {
+                    return unsupported("JPEG with sampling ratios that are not whole");
+                }
                 let mcus_x = width.div_ceil(8 * hmax);
                 let mcus_y = height.div_ceil(8 * vmax);
                 for c in &mut comps {
                     c.bw = mcus_x * c.h;
                     c.bh = mcus_y * c.v;
-                    c.coefs = vec![0; c.bw * c.bh * 64];
+                    c.coefs = vec![0; checked_size(checked_size(c.bw, c.bh)?, 64)?];
                 }
                 frame = Some(Frame {
                     width,
@@ -908,5 +920,73 @@ mod tests {
                 / got.len() as f64;
             assert!(err < 4.0, "quality {quality}: mean error {err}");
         }
+    }
+
+    /// A JPEG of one segment: its marker and its bytes.
+    fn one_segment(marker: u8, body: &[u8]) -> Vec<u8> {
+        let mut d = vec![0xff, 0xd8, 0xff, marker];
+        d.extend((body.len() as u16 + 2).to_be_bytes());
+        d.extend(body);
+        d.extend([0xff, 0xd9]);
+        d
+    }
+
+    /// A frame header: the picture's size and each component's sampling
+    /// factors (across, down).
+    fn frame_header(width: u16, height: u16, factors: &[(u8, u8)]) -> Vec<u8> {
+        let mut body = vec![8];
+        body.extend(height.to_be_bytes());
+        body.extend(width.to_be_bytes());
+        body.push(factors.len() as u8);
+        for (i, (h, v)) in factors.iter().enumerate() {
+            body.extend([i as u8 + 1, h << 4 | v, 0]);
+        }
+        one_segment(0xc0, &body)
+    }
+
+    #[test]
+    fn a_huffman_table_with_too_many_codes_is_refused() {
+        // Three codes of one bit, where one bit tells two apart.
+        let mut counts = [0u8; 16];
+        counts[0] = 3;
+        assert!(super::Huffman::new(&counts, &[0, 1, 2]).is_err());
+        let mut table = vec![0];
+        table.extend(counts);
+        table.extend([0, 1, 2]);
+        assert!(matches!(
+            super::read(&one_segment(0xc4, &table)),
+            Err(crate::read::ReadError::Corrupt(_))
+        ));
+        // Two of them are a table.
+        counts[0] = 2;
+        assert!(super::Huffman::new(&counts, &[0, 1]).is_ok());
+    }
+
+    #[test]
+    fn sampling_factors_that_do_not_divide_the_largest_are_refused() {
+        // Luma three times across where chroma is twice: one and a half
+        // luma samples to a chroma one.
+        for factors in [[(3, 1), (2, 1), (2, 1)], [(1, 3), (1, 2), (1, 2)]] {
+            assert!(
+                matches!(
+                    super::read(&frame_header(24, 24, &factors)),
+                    Err(crate::read::ReadError::Unsupported(_))
+                ),
+                "{factors:?}"
+            );
+        }
+        // Whole ratios read (no scan: a gray picture).
+        let p = super::read(&frame_header(24, 8, &[(4, 1), (2, 1), (1, 1)])).unwrap();
+        assert_eq!((p.width, p.height), (24, 8));
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // 65535 × 65535 in a file of 23 bytes.
+        let d = frame_header(65_535, 65_535, &[(1, 1), (1, 1), (1, 1)]);
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
     }
 }

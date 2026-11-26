@@ -206,7 +206,11 @@ unsafe extern "C" fn memory_alloc(
     if data.is_null() {
         return kOfxStatErrValue;
     }
-    let Ok(layout) = Layout::from_size_align(n_bytes + HEADER, HEADER) else {
+    // A size that wraps around with the header is no block's.
+    let Some(size) = n_bytes.checked_add(HEADER) else {
+        return kOfxStatErrMemory;
+    };
+    let Ok(layout) = Layout::from_size_align(size, HEADER) else {
         return kOfxStatErrMemory;
     };
     // SAFETY: a layout of non-zero size.
@@ -796,6 +800,50 @@ mod tests {
             );
             std::ptr::write_bytes(p as *mut u8, 7, 100);
             assert_eq!((s.memory_free)(p), kOfxStatOK);
+        }
+    }
+
+    /// A size no block can have (with the block's own header it would wrap
+    /// around to a tiny one) is refused, not answered with a pointer.
+    #[test]
+    fn a_memory_block_too_large_is_refused() {
+        // SAFETY: the host's suite.
+        let s: &OfxMemorySuiteV1 = unsafe { suite(kOfxMemorySuite, 1) };
+        for n_bytes in [usize::MAX, usize::MAX - 8, isize::MAX as usize] {
+            let mut p: *mut c_void = std::ptr::null_mut();
+            // SAFETY: the suite's own function, a pointer to fill.
+            let status = unsafe { (s.memory_alloc)(std::ptr::null_mut(), n_bytes, &mut p) };
+            assert_eq!(status, kOfxStatErrMemory, "{n_bytes:#x}");
+            assert!(p.is_null());
+        }
+    }
+
+    /// The image effect suite's memory of a size the system cannot give is
+    /// refused with the memory error, the program going on.
+    #[test]
+    fn image_memory_too_large_is_refused() {
+        // SAFETY: the host's suite.
+        let s: &OfxImageEffectSuiteV1 = unsafe { suite(kOfxImageEffectSuite, 1) };
+        for n_bytes in [usize::MAX, isize::MAX as usize - 63] {
+            let mut h: OfxImageMemoryHandle = std::ptr::null_mut();
+            // SAFETY: the suite's own function, a handle to fill.
+            let status = unsafe { (s.image_memory_alloc)(std::ptr::null_mut(), n_bytes, &mut h) };
+            assert_eq!(status, kOfxStatErrMemory, "{n_bytes:#x}");
+            assert!(h.is_null());
+        }
+        // One it can give still comes.
+        let mut h: OfxImageMemoryHandle = std::ptr::null_mut();
+        // SAFETY: the suite's own functions, on memory of its own.
+        unsafe {
+            assert_eq!(
+                (s.image_memory_alloc)(std::ptr::null_mut(), 100, &mut h),
+                kOfxStatOK
+            );
+            let mut p: *mut c_void = std::ptr::null_mut();
+            assert_eq!((s.image_memory_lock)(h, &mut p), kOfxStatOK);
+            std::ptr::write_bytes(p as *mut u8, 7, 100);
+            assert_eq!((s.image_memory_unlock)(h), kOfxStatOK);
+            assert_eq!((s.image_memory_free)(h), kOfxStatOK);
         }
     }
 }

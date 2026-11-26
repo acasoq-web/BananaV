@@ -371,6 +371,9 @@ impl Worker {
             std::thread::Builder::new()
                 .name("bv-capture".into())
                 .spawn(move || {
+                    let _awake = record
+                        .is_some()
+                        .then(|| bv_platform::KeepAwake::new("Recording"));
                     if source.kind.is_video() {
                         video(&source, record, &live, &stop)
                     } else {

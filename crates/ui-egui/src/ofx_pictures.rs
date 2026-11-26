@@ -95,7 +95,10 @@ impl Sources {
             Kind::Input => input.map(Some).ok_or(kind.missing()),
             Kind::File => {
                 let picked = rfd::FileDialog::new()
-                    .add_filter(tr("Pictures"), bv_engine::IMAGE_EXTENSIONS)
+                    .add_filter(
+                        crate::i18n::os_text(tr("Pictures")),
+                        bv_engine::IMAGE_EXTENSIONS,
+                    )
                     .pick_file();
                 let Some(path) = picked else {
                     return Ok(None);

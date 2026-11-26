@@ -3,7 +3,7 @@
 //! (transparency, the three disposal methods, frames of 0 or 1 hundredth
 //! shown for 10).
 
-use super::{ReadError, Result, corrupt};
+use super::{ReadError, Result, corrupt, pixel_count};
 
 /// One image of the file, as stored: a rectangle of palette indices.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,8 +30,18 @@ pub struct Gif {
     pub frames: Vec<GifFrame>,
 }
 
+/// The most pixels the frames of an animation may add up to: they are kept
+/// whole, and those past this are left out.
+const MAX_ANIMATION_PIXELS: u64 = 1 << 31;
+
 impl Gif {
     pub fn parse(d: &[u8]) -> Result<Gif> {
+        Gif::parse_within(d, MAX_ANIMATION_PIXELS)
+    }
+
+    /// [`Gif::parse`], reading frames while their pixels add up to `budget`
+    /// at most.
+    fn parse_within(d: &[u8], budget: u64) -> Result<Gif> {
         if d.len() < 13 || !(d.starts_with(b"GIF87a") || d.starts_with(b"GIF89a")) {
             return corrupt("not a GIF");
         }
@@ -48,6 +58,8 @@ impl Gif {
             Vec::new()
         };
         let mut frames = Vec::new();
+        // The pixels of the frames read so far.
+        let mut total = 0u64;
         // The graphic control extension applies to the next image.
         let mut delay = 0u32;
         let mut disposal = 0u8;
@@ -86,7 +98,12 @@ impl Gif {
                     pos += 1;
                     let (data, next) = sub_blocks(d, pos);
                     pos = next;
-                    let n = fw as usize * fh as usize;
+                    let n = pixel_count(fw as usize, fh as usize)?;
+                    // The frames past the animation's budget are left out.
+                    total += n as u64;
+                    if total > budget {
+                        break;
+                    }
                     let mut indices = lzw(&data, min_code, n);
                     // A short image (a damaged file) ends in index 0.
                     indices.resize(n, 0);
@@ -126,6 +143,8 @@ impl Gif {
         } else {
             (width, height)
         };
+        // The canvas the frames are laid on is within the budget too.
+        pixel_count(width as usize, height as usize)?;
         Ok(Gif {
             width,
             height,
@@ -221,6 +240,12 @@ fn lzw(data: &[u8], min_code: u8, max: usize) -> Vec<u8> {
                 }
                 continue;
             };
+            // A code past the next one free is not of the table: the data
+            // is damaged, and the picture ends there (taken for a string,
+            // it would come to point at itself and be followed for ever).
+            if code > next {
+                return out;
+            }
             // The string of `code`, or (the KwKwK case) of `prev` plus its
             // own first byte.
             let known = code < next;
@@ -454,5 +479,44 @@ mod tests {
         );
         // Back to the first frame.
         assert_eq!(p.frame(&gif, 0), &[255, 0, 0, 255].repeat(4)[..]);
+    }
+
+    #[test]
+    fn a_code_past_the_table_ends_the_picture() {
+        // A 0, then code 7 while 6 is the next one free: taken for a string
+        // of the table, it came to point at itself and was followed for
+        // ever.
+        assert_eq!(lzw(&[0x38, 0x0e], 2, 9), [0]);
+        // The next code free is the one a string may be new with: clear,
+        // 1, 6 (1 and 1 again), end.
+        assert_eq!(lzw(&[0x8c, 0x0b], 2, 9), [1, 1, 1]);
+        // The same in a file: a 3×3 image, the rest of it index 0.
+        let mut v = b"GIF89a".to_vec();
+        v.extend_from_slice(&[3, 0, 3, 0, 0x80 | 1, 0, 0]);
+        v.extend_from_slice(&[0; 12]);
+        v.extend_from_slice(&[0x2c, 0, 0, 0, 0, 3, 0, 3, 0, 0]);
+        v.extend_from_slice(&[2, 2, 0x38, 0x0e, 0, 0x3b]);
+        let gif = Gif::parse(&v).unwrap();
+        assert_eq!(gif.frames[0].indices, [0; 9]);
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // A screen of 65535 × 65535 around the 2×2 images.
+        let mut v = two_frames();
+        v[6..10].fill(0xff);
+        assert!(matches!(Gif::parse(&v), Err(ReadError::Unsupported(_))));
+        // The first image 65535 × 65535, with its few bytes of data.
+        let mut v = two_frames();
+        assert_eq!(v[33], 0x2c);
+        v[38..42].fill(0xff);
+        assert!(matches!(Gif::parse(&v), Err(ReadError::Unsupported(_))));
+    }
+
+    #[test]
+    fn frames_past_the_animations_budget_are_left_out() {
+        // Two frames of 4 pixels each.
+        assert_eq!(Gif::parse_within(&two_frames(), 8).unwrap().frames.len(), 2);
+        assert_eq!(Gif::parse_within(&two_frames(), 7).unwrap().frames.len(), 1);
     }
 }

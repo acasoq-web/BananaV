@@ -92,8 +92,12 @@ pub fn spi1d(text: &str) -> std::result::Result<bv_lut::Table1, String> {
     if components != 1 && components != 3 {
         return Err(format!("{components} components"));
     }
-    let entries: Vec<[f32; 3]> = values
-        .chunks(components)
+    // Whole entries only: one cut short has no green or blue to read.
+    let whole = values.chunks_exact(components);
+    if !whole.remainder().is_empty() {
+        return Err("an entry is missing a value".into());
+    }
+    let entries: Vec<[f32; 3]> = whole
         .map(|c| {
             if components == 1 {
                 [c[0] as f32; 3]
@@ -123,6 +127,12 @@ pub fn spi3d(text: &str) -> std::result::Result<bv_lut::Table3, String> {
     let sizes = numbers(lines.next().ok_or("no sizes")?)?;
     if sizes.len() != 3 || sizes[0] != sizes[1] || sizes[1] != sizes[2] {
         return Err("a lattice as long every way".into());
+    }
+    // 2 to 256 points each way, as `.cube` lattices: fewer are no lattice,
+    // and a size of thousands would ask for gigabytes before an entry is
+    // read.
+    if !(2.0..=256.0).contains(&sizes[0]) || sizes[0].fract() != 0.0 {
+        return Err(format!("a lattice of {} points each way", sizes[0]));
     }
     let n = sizes[0] as usize;
     let mut entries = vec![[0f32; 3]; n * n * n];
@@ -189,5 +199,32 @@ mod tests {
             panic!()
         };
         assert_eq!((m[0][0], o[1]), (2.0, 1.0));
+    }
+
+    #[test]
+    fn a_curve_with_a_value_missing_is_refused() {
+        assert!(spi1d("Components 3\n{\n 0 0 0\n 0.5 0.5\n}\n").is_err());
+        assert!(spi1d("Components 3\n{\n 0 0 0\n 1 1 1\n}\n").is_ok());
+    }
+
+    #[test]
+    fn lattices_out_of_the_formats_sizes_are_refused() {
+        for sizes in [
+            "0 0 0",
+            "1 1 1",
+            "2.5 2.5 2.5",
+            "-2 -2 -2",
+            "1e30 1e30 1e30",
+            "inf inf inf",
+            "257 257 257",
+            "2000 2000 2000",
+        ] {
+            let text = format!("SPILUT 1.0\n3 3\n{sizes}\n0 0 0 0 0 0\n");
+            assert!(spi3d(&text).is_err(), "{sizes}");
+        }
+        assert_eq!(
+            spi3d("SPILUT 1.0\n3 3\n2 2 2\n").map(|t| t.entries.len()),
+            Ok(8)
+        );
     }
 }

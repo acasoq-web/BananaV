@@ -283,9 +283,10 @@ pub struct AudioPool {
     /// Counts blocks mixed: a reader used in this block is not given to
     /// another event.
     block: u64,
-    /// Cadeia de efeitos e a próxima amostra esperada (se a leitura pular,
-    /// o estado é zerado).
-    fx: HashMap<FxKey, (dsp::Chain, i64)>,
+    /// Each effects chain, the next sample it expects (a read that jumps
+    /// clears what it holds) and the block it was last used in (an
+    /// event's goes once idle for long).
+    fx: HashMap<FxKey, (dsp::Chain, i64, u64)>,
     /// LFE low-pass of 5.1 projects: its settings (rate, cutoff, quality),
     /// the filter and the next sample expected.
     lfe: Option<((u32, u32, AudioQuality), dsp::LowPass, i64)>,
@@ -310,6 +311,9 @@ pub struct AudioPool {
     lines: HashMap<DelayKey, DelayLine>,
     /// The project's tempo, for the effects with tempo sync.
     tempo: bv_timeline::Tempo,
+    /// Where the last block finished ([`finish_mix`]) ended: the start
+    /// [`delays`] takes for the next one.
+    next_block: Option<i64>,
     /// The sounds of events whose effects change the sound's length, made
     /// through their chains ([`prerender`]).
     prerenders: prerender::Prerenders,
@@ -343,9 +347,21 @@ impl Delays {
     }
 }
 
-/// `project`'s [`Delays`], its busses' and chains' effects' latencies
-/// asked of `pool` (where [`finish_mix`] runs them).
+/// [`delays_at`] for a caller that does not say where its block starts:
+/// where the last block `pool` finished ended ([`finish_mix`]) — the
+/// block's start but right after a seek —, the project's start for a pool
+/// that has finished none.
 pub fn delays(project: &Project, pool: &mut AudioPool) -> Delays {
+    let start = pool.next_block.unwrap_or(0);
+    delays_at(project, start, pool)
+}
+
+/// `project`'s [`Delays`] for the block that starts at sample `start`,
+/// its busses' and chains' effects' latencies asked of `pool` (where
+/// [`finish_mix`] runs them): the effects as FX automation has them
+/// there, the values [`finish_mix`] plays the block with, so that asking
+/// does not move a running chain to other values and back.
+pub fn delays_at(project: &Project, start: i64, pool: &mut AudioPool) -> Delays {
     pool.tempo = project.settings.tempo;
     let rate = project.settings.sample_rate;
     let channels = project.settings.channels.channel_count();
@@ -355,8 +371,11 @@ pub fn delays(project: &Project, pool: &mut AudioPool) -> Delays {
         let Some(ch) = project.strip_channel(s) else {
             continue;
         };
-        let automated =
-            bv_timeline::fx_automation::automated(&ch.effects, &ch.envelopes, rate.sample_start(0));
+        let automated = bv_timeline::fx_automation::automated(
+            &ch.effects,
+            &ch.envelopes,
+            rate.sample_start(start),
+        );
         let effects: Vec<&Effect> = if project.bypass_audio_fx {
             Vec::new()
         } else {
@@ -494,11 +513,16 @@ impl AudioPool {
     }
 
     /// Starts a block: readers unused for long close (and the stretch
-    /// shifts of events no reader reads any more).
+    /// shifts of events no reader reads any more), and the effects chains
+    /// of events that have not played for as long go, with the delay
+    /// lines and plug-ins they hold.
     fn begin_block(&mut self) {
         self.block += 1;
         let block = self.block;
         self.readers.retain(|s| block - s.used <= IDLE_BLOCKS);
+        self.fx.retain(|key, (_, _, used)| {
+            !matches!(key, FxKey::Clip(_)) || block - *used <= IDLE_BLOCKS
+        });
         self.prerenders.forget_old(block);
         if !self.stretch.is_empty() {
             let readers = &self.readers;
@@ -517,6 +541,7 @@ impl AudioPool {
         self.meters.clear();
         self.stretch.clear();
         self.lines.clear();
+        self.next_block = None;
         self.prerenders.clear();
     }
 
@@ -714,13 +739,44 @@ impl AudioPool {
         {
             return 0;
         }
+        let block = self.block;
         let entry = self
             .fx
             .entry(key)
-            .or_insert_with(|| (dsp::Chain::default(), i64::MIN));
+            .or_insert_with(|| (dsp::Chain::default(), i64::MIN, block));
+        entry.2 = block;
         entry.0.set_tempo(self.tempo);
         entry.0.sync(effects, rate, channels, keep);
         entry.0.latency()
+    }
+
+    /// Every chain, the LFE filter and the delay lines start again at the
+    /// next block: after sound that is not a number, which would stay in
+    /// what they hold.
+    fn start_again(&mut self) {
+        for (chain, ..) in self.fx.values_mut() {
+            chain.reset();
+        }
+        self.lfe = None;
+        self.lines.clear();
+    }
+
+    /// What leaves the mix — `out`, the hardware outputs' sound and the
+    /// busses' kept — never has sound that is not a number (a NaN or an
+    /// infinity, out of an effect or a file): silence instead of such a
+    /// block, and everything that holds sound starts again
+    /// ([`Self::start_again`]).
+    fn keep_finite(&mut self, out: &mut AudioBuffer) {
+        let mut finite = silence_unless_finite(&mut out.channels);
+        for (_, buf) in &mut self.hardware {
+            finite &= silence_unless_finite(&mut buf.channels);
+        }
+        for (_, buf) in self.bus_outputs.iter_mut().flatten() {
+            finite &= silence_unless_finite(&mut buf.channels);
+        }
+        if !finite {
+            self.start_again();
+        }
     }
 
     /// Runs chain `key` (`effects`, FX automation's `envelopes`) on
@@ -744,10 +800,12 @@ impl AudioPool {
             self.fx.remove(&key);
             return;
         }
+        let block = self.block;
         let entry = self
             .fx
             .entry(key)
-            .or_insert_with(|| (dsp::Chain::default(), s0));
+            .or_insert_with(|| (dsp::Chain::default(), s0, block));
+        entry.2 = block;
         if entry.1 != s0 {
             entry.0.reset();
         }
@@ -768,8 +826,28 @@ impl AudioPool {
         entry
             .0
             .process_watching(channels, modern_eq::watched_in(owner));
+        // Sound that is not a number would stay in every filter it went
+        // through (and in those after the chain): silence for this block,
+        // and the chain starts again.
+        if !silence_unless_finite(channels) {
+            entry.0.reset();
+        }
         entry.1 = s1;
     }
+}
+
+/// Whether `channels` hold numbers alone; when not (a NaN or an infinity
+/// among them), they are silenced.
+fn silence_unless_finite(channels: &mut [Vec<f32>]) -> bool {
+    let finite = channels
+        .iter()
+        .all(|ch| ch.iter().fold(true, |ok, s| ok & s.is_finite()));
+    if !finite {
+        for ch in channels.iter_mut() {
+            ch.fill(0.0);
+        }
+    }
+    finite
 }
 
 /// Bypassed audio effects keep running, unheard, so that turning them on
@@ -887,7 +965,7 @@ pub fn mix(project: &Project, start: i64, frames: usize, pool: &mut AudioPool) -
     pool.track_peaks.clear();
     pool.meters.readings.clear();
     pool.begin_block();
-    let delays = delays(project, pool);
+    let delays = delays_at(project, start, pool);
     for track in mixed_tracks(project) {
         if let Some(peaks) = add_track(project, track, start, frames, &delays, pool, &mut sums) {
             pool.track_peaks.push((track.id, peaks));
@@ -902,8 +980,8 @@ pub fn mix(project: &Project, start: i64, frames: usize, pool: &mut AudioPool) -
 /// its peaks. `None` when it is not heard or adds nothing. Summing the
 /// tracks of [`mixed_tracks`] ([`Sums::add`]) and then
 /// [`finish_mix`] gives what [`mix`] gives, each track on a thread of its
-/// own if need be — `delays` the project's [`Delays`], worked out with the
-/// pool the busses mix in.
+/// own if need be — `delays` the project's [`Delays`] for the block
+/// ([`delays_at`]), worked out with the pool the busses mix in.
 pub fn mix_track(
     project: &Project,
     track: TrackId,
@@ -929,6 +1007,9 @@ pub fn mix_track(
 /// through its effects (before or after its volume), pan and volume, muted
 /// or soloed, a chain at its input level; the Master's effects and volume,
 /// and in 5.1 the LFE low-pass (with `pool`'s effects and filter states).
+/// A block with sound that is not a number (a NaN or an infinity out of
+/// an effect or a file) comes out silent, and `pool`'s effects and filter
+/// start again.
 pub fn finish_mix(
     project: &Project,
     start: i64,
@@ -937,10 +1018,11 @@ pub fn finish_mix(
 ) -> AudioBuffer {
     let frames = sums.master.channels.first().map_or(0, Vec::len);
     let end = start + frames as i64;
+    pool.next_block = Some(end);
     if let Some(kept) = &mut pool.bus_outputs {
         kept.clear();
     }
-    let delays = delays(project, pool);
+    let delays = delays_at(project, start, pool);
     // A soloed bus mutes the busses not soloed; a soloed chain, the chains
     // and the busses not soloed.
     let chain_solo = project.fx_chains.iter().any(|c| c.channel.solo);
@@ -1043,7 +1125,9 @@ pub fn finish_mix(
     pool.hardware = std::mem::take(&mut sums.hardware);
     if project.master.muted {
         let rate = project.settings.sample_rate;
-        return AudioBuffer::silent(rate, project.settings.channels, frames);
+        let mut out = AudioBuffer::silent(rate, project.settings.channels, frames);
+        pool.keep_finite(&mut out);
+        return out;
     }
     let mut out = sums.master;
     let fx: Vec<&Effect> = if project.bypass_audio_fx {
@@ -1069,6 +1153,7 @@ pub fn finish_mix(
         pool.run_fx(FxKey::Master, &fx, &[], rate, start, end, &mut out.channels);
     }
     pool.lfe_lowpass(project, start, end, &mut out);
+    pool.keep_finite(&mut out);
     pool.meters.measure(meters::MeterOf::Master, start, &out);
     out
 }
@@ -1123,6 +1208,10 @@ fn add_track(
         .map(|s| delays.send(s.to))
         .fold(main_ahead, i64::max);
     let block_start = start;
+    // Where the track's sound lies once through its effects, which give
+    // it back `late` samples after they took it: its envelopes and Auto
+    // Ducking follow it there.
+    let after_fx = start + ahead;
     let start = start + late as i64 + ahead;
     let block_end = start + frames as i64;
     let block =
@@ -1164,7 +1253,9 @@ fn add_track(
             } else {
                 info.effects.iter().chain(&clip.effects).collect()
             };
-            let channels = info.audio.map_or(0, |a| usize::from(a.channels));
+            // The stream it plays (another one may have other channels).
+            let stream = info.audio_stream(clip.audio_stream);
+            let channels = stream.map_or(0, |a| usize::from(a.channels));
             // Effects that change its length: it plays its sound made
             // through its whole chain (see `prerender`), once made.
             let made = if effects.iter().any(|e| e.enabled && e.kind.works_offline()) {
@@ -1282,7 +1373,7 @@ fn add_track(
             // Auto Ducking: a listener goes down while its controllers
             // sound.
             if track.duck_listener && project.has_ducking() {
-                duck(project, track, start, &mut bus);
+                duck(project, track, after_fx, &mut bus);
             }
             // Its sends: from before its volume and mute (and their
             // envelopes), or after them; panned as the track, or from the
@@ -1319,7 +1410,7 @@ fn add_track(
                     panned: send.link_pan,
                 };
                 if track.has_automation() {
-                    mix_with_envelopes(track, rate, start, &bus, dst, tap, envelope, None);
+                    mix_with_envelopes(track, rate, after_fx, &bus, dst, tap, envelope, None);
                 } else {
                     let pan = if send.link_pan { track.pan } else { 0.0 };
                     add_panned(track.pan_mode, pan, tap.level, &bus, dst);
@@ -1357,7 +1448,7 @@ fn add_track(
                     mute: true,
                     panned: true,
                 };
-                mix_with_envelopes(track, rate, start, &bus, out, tap, None, surround)
+                mix_with_envelopes(track, rate, after_fx, &bus, out, tap, None, surround)
             };
             if let Some(own) = own {
                 if lag > 0 {
@@ -3255,5 +3346,262 @@ mod tests {
         t.automation.mode = bv_timeline::AutomationMode::Off;
         t.automation.volume = 0.25;
         assert!((peak(&p) - full * 0.25).abs() < 1e-3);
+    }
+
+    /// FX automation on a bus: asking its chain's latency leaves the chain
+    /// with the values it plays with, not those of the project's start. An
+    /// echo whose time is automated (10 ms at first, 100 ms from 1 s on)
+    /// repeats a burst as one set to 100 ms does, block after block —
+    /// mixed in one pool, or the tracks apart as the playback mixes them.
+    #[test]
+    fn an_automated_bus_effect_keeps_its_state_between_blocks() {
+        use bv_timeline::{Effect, EffectKind, EnvelopeKind, EnvelopeOwner, EnvelopePoint};
+        use bv_timeline::{KeyCurve, Output, Strip};
+        let mut p = Project::new(ProjectSettings::default());
+        p.quick_fades = false;
+        let t = p.tracks[1].id;
+        let m = tone(&mut p, 440.0, -6.0);
+        // A burst 40 ms long at 2 s.
+        let c = p
+            .insert_media(m, Tick::from_seconds(2), None, Some(t))
+            .unwrap()[0];
+        p.trim_end(c, Tick::from_seconds_f64(2.04)).unwrap();
+        let bus = p.add_bus().unwrap();
+        p.set_track_output(t, Output::Bus(bus));
+        let time = EffectKind::Delay.params()[0];
+        let long = time.to_unit(100.0);
+        let mut echo = Effect::new(EffectKind::Delay);
+        echo.set_param(0, time.from_unit(long));
+        echo.set_param(1, 0.0);
+        echo.set_param(2, 1.0);
+        p.bus_mut(bus).unwrap().channel.effects.push(echo);
+        let rate = p.settings.sample_rate;
+        let at = rate.sample_at(Tick::from_seconds(2));
+        // Blocks of 20 ms from the burst on.
+        let whole = |p: &Project| {
+            let mut pool = AudioPool::new();
+            let mut out = Vec::new();
+            for k in 0..8 {
+                let b = mix(p, at + k * 960, 960, &mut pool);
+                out.extend(b.channels[0].iter().copied());
+            }
+            out
+        };
+        let apart = |p: &Project| {
+            let (mut track, mut master) = (AudioPool::new(), AudioPool::new());
+            let mut out = Vec::new();
+            for k in 0..8 {
+                let start = at + k * 960;
+                let delays = delays(p, &mut master);
+                let mut sums = Sums::silent(p, 960);
+                if let Some((own, _)) = mix_track(p, t, start, 960, &delays, &mut track) {
+                    sums.add(&own);
+                }
+                let b = finish_mix(p, start, &mut master, sums);
+                out.extend(b.channels[0].iter().copied());
+            }
+            out
+        };
+        let fixed = whole(&p);
+        let peak = |s: &[f32]| s.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak(&fixed[4800..6700]) > 0.4, "the echo");
+        assert!(peak(&fixed[2000..4700]) < 1e-6, "nothing before it");
+        let owner = EnvelopeOwner::Strip(Strip::Bus(bus));
+        assert!(p.set_fx_automation(owner, 0, &[Some(0)], KeyCurve::Hold));
+        let env = p
+            .bus_mut(bus)
+            .unwrap()
+            .channel
+            .envelopes
+            .iter_mut()
+            .find(|e| matches!(e.kind, EnvelopeKind::FxParam { param: 0, .. }))
+            .unwrap();
+        env.points[0].value = 0.0;
+        env.points.push(EnvelopePoint {
+            at: Tick::from_seconds(1),
+            value: long,
+            curve: KeyCurve::Hold,
+        });
+        assert_eq!(whole(&p), fixed);
+        assert_eq!(apart(&p), fixed);
+    }
+
+    /// An event's effects' chain goes once the event has not played for
+    /// as long as an idle reader is kept, so a pool that lives through a
+    /// whole render does not hold every event's delay lines and plug-ins
+    /// to the end.
+    #[test]
+    fn idle_event_chains_are_dropped() {
+        let mut p = Project::new(ProjectSettings::default());
+        let a = p.tracks[1].id;
+        let m = tone(&mut p, 440.0, -6.0);
+        let c = p.insert_media(m, Tick::ZERO, None, Some(a)).unwrap()[0];
+        p.trim_end(c, Tick::from_seconds(1)).unwrap();
+        p.clip_mut(c)
+            .unwrap()
+            .effects
+            .push(Effect::new(bv_timeline::EffectKind::Delay));
+        let key = FxKey::Clip(c);
+        let mut pool = AudioPool::new();
+        mix(&p, 0, 480, &mut pool);
+        assert!(pool.fx.contains_key(&key));
+        // Ten seconds on, where it does not play.
+        let far = 480_000;
+        for k in 0..IDLE_BLOCKS as i64 {
+            mix(&p, far + k, 1, &mut pool);
+        }
+        assert!(pool.fx.contains_key(&key), "kept as long as a reader");
+        mix(&p, far + IDLE_BLOCKS as i64, 1, &mut pool);
+        assert!(!pool.fx.contains_key(&key));
+    }
+
+    /// Sound that is not a number (a NaN out of an effect: here a Gain
+    /// whose value is one, for a block) does not stay in the filters
+    /// after it: that block is silent and the next ones play again — the
+    /// track mixed in a pool of its own, as the playback mixes it, too.
+    #[test]
+    fn a_chain_starts_again_after_sound_that_is_not_a_number() {
+        use bv_timeline::{Effect, EffectKind};
+        let mut p = Project::new(ProjectSettings::default());
+        p.quick_fades = false;
+        let t = p.tracks[1].id;
+        let m = tone(&mut p, 440.0, -6.0);
+        p.insert_media(m, Tick::ZERO, None, Some(t)).unwrap();
+        let mut low = Effect::new(EffectKind::LowPass);
+        low.set_param(0, 5000.0);
+        let track = p.track_by_id_mut(t).unwrap();
+        track.effects.push(Effect::new(EffectKind::Gain));
+        track.effects.push(low);
+        let mut broken = p.clone();
+        broken.track_by_id_mut(t).unwrap().effects[0].params[0] = f32::NAN;
+        let peak = |b: &AudioBuffer| b.channels[0].iter().fold(0f32, |m, s| m.max(s.abs()));
+        let finite = |b: &AudioBuffer| b.channels.iter().flatten().all(|s| s.is_finite());
+        // In one pool.
+        let mut pool = AudioPool::new();
+        let first = mix(&broken, 0, 4800, &mut pool);
+        assert!(first.channels.iter().flatten().all(|s| *s == 0.0));
+        let next = mix(&p, 4800, 4800, &mut pool);
+        assert!(finite(&next));
+        assert!(peak(&next) > 0.4, "{}", peak(&next));
+        // The track apart: its pool is not the one the mix is finished in.
+        let (mut own, mut master) = (AudioPool::new(), AudioPool::new());
+        let mut block = |p: &Project, start: i64| {
+            let delays = delays(p, &mut master);
+            let mut sums = Sums::silent(p, 4800);
+            if let Some((track, _)) = mix_track(p, t, start, 4800, &delays, &mut own) {
+                sums.add(&track);
+            }
+            finish_mix(p, start, &mut master, sums)
+        };
+        let first = block(&broken, 0);
+        assert!(first.channels.iter().flatten().all(|s| *s == 0.0));
+        let next = block(&p, 4800);
+        assert!(finite(&next));
+        assert!(peak(&next) > 0.4, "{}", peak(&next));
+    }
+
+    /// Sound that is not a number reaching the Master with no effect on
+    /// its way (an event's, for a block: its normalize gain) is silence
+    /// there, and the 5.1 Master's LFE low-pass starts again instead of
+    /// holding it.
+    #[test]
+    fn the_master_silences_sound_that_is_not_a_number() {
+        let mut p = Project::new(ProjectSettings::default());
+        p.quick_fades = false;
+        p.settings.channels = ChannelLayout::Surround51;
+        p.settings.lfe_lowpass = true;
+        let t = p.tracks[1].id;
+        let m = tone(&mut p, 60.0, -6.0);
+        let c = p.insert_media(m, Tick::ZERO, None, Some(t)).unwrap()[0];
+        let mut broken = p.clone();
+        broken.clip_mut(c).unwrap().normalize = Some(f32::NAN);
+        let mut pool = AudioPool::new();
+        let first = mix(&broken, 0, 4800, &mut pool);
+        assert!(first.channels.iter().flatten().all(|s| *s == 0.0));
+        let mut lfe = 0f32;
+        for k in 1..6 {
+            let next = mix(&p, k * 4800, 4800, &mut pool);
+            assert!(next.channels.iter().flatten().all(|s| s.is_finite()));
+            lfe = next.channels[3].iter().fold(0f32, |m, s| m.max(s.abs()));
+        }
+        assert!(lfe > 0.1, "{lfe}");
+    }
+
+    /// An event that plays its media's second audio stream — mono, the
+    /// first one stereo — keeps what its effects hold from block to block:
+    /// its chain is asked its latency for the stream it plays.
+    #[test]
+    fn event_effects_keep_their_state_on_another_audio_stream() {
+        use bv_timeline::{AudioStreamInfo, Effect, EffectKind};
+        let mut p = Project::new(ProjectSettings::default());
+        p.quick_fades = false;
+        let a = p.tracks[1].id;
+        let mut info = MediaInfo::generated(
+            Generator::TestTone {
+                frequency_hz: 440.0,
+                level_db: -6.0,
+            },
+            &p.settings,
+        );
+        let first = info.audio.unwrap();
+        assert_eq!(first.channels, 2);
+        info.extra_audio.push(AudioStreamInfo {
+            channels: 1,
+            ..first
+        });
+        let m = p.add_media(info);
+        // An event a stream: the first one's silent, the second's 50 ms
+        // long with an echo.
+        let ids = p.insert_media(m, Tick::ZERO, None, Some(a)).unwrap();
+        assert_eq!(ids.len(), 2);
+        p.clip_mut(ids[0]).unwrap().muted = true;
+        p.trim_end(ids[1], Tick::from_seconds_f64(0.05)).unwrap();
+        let second = p.clip_mut(ids[1]).unwrap();
+        assert_eq!(second.audio_stream, 1);
+        let mut echo = Effect::new(EffectKind::Delay);
+        echo.set_param(0, 20.0);
+        second.effects.push(echo);
+        let whole = mix(&p, 0, 2400, &mut AudioPool::new());
+        let mut pool = AudioPool::new();
+        let mut parts = Vec::new();
+        for k in 0..10 {
+            let b = mix(&p, k * 240, 240, &mut pool);
+            parts.extend(b.channels[0].iter().copied());
+        }
+        assert_eq!(parts, whole.channels[0]);
+    }
+
+    /// A track whose effects answer late is read ahead, and its envelopes
+    /// follow its sound: a mute envelope silences it from the sample its
+    /// point is at, as on a track without effects.
+    #[test]
+    fn a_late_chain_leaves_the_tracks_envelopes_in_place() {
+        use bv_timeline::{Effect, EffectKind, EnvelopeKind};
+        let mut p = Project::new(ProjectSettings::default());
+        p.quick_fades = false;
+        let t = p.tracks[1].id;
+        let m = tone(&mut p, 440.0, -6.0);
+        p.insert_media(m, Tick::ZERO, None, Some(t)).unwrap();
+        // Muted from sample 24 000 on.
+        p.toggle_envelope(t, EnvelopeKind::Mute).unwrap();
+        let off = p.settings.sample_rate.sample_start(24_000);
+        p.set_envelope_point(t, EnvelopeKind::Mute, off, 0.0)
+            .unwrap();
+        // The last sample that sounds, and how late the track's chain is.
+        let last = |p: &Project| {
+            let mut pool = AudioPool::new();
+            let b = mix(p, 0, 48_000, &mut pool);
+            let late = pool.fx.get(&FxKey::Track(t)).map_or(0, |e| e.0.latency());
+            (b.channels[0].iter().rposition(|s| s.abs() > 1e-4), late)
+        };
+        assert_eq!(last(&p), (Some(23_999), 0));
+        // A Graphic EQ: a filter through FFTs, hundreds of samples late.
+        p.track_by_id_mut(t)
+            .unwrap()
+            .effects
+            .push(Effect::new(EffectKind::GraphicEq));
+        let (heard, late) = last(&p);
+        assert!(late > 100, "{late}");
+        assert_eq!(heard, Some(23_999));
     }
 }

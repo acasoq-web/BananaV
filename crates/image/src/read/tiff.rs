@@ -3,7 +3,9 @@
 //! floating-point predictors; gray, RGB, palette and CMYK of 1 to 16 bits,
 //! 32-bit floats; associated or unassociated alpha; the orientation tag.
 
-use super::{Picture, PictureData, ReadError, Result, corrupt, unsupported};
+use super::{
+    Picture, PictureData, ReadError, Result, checked_size, corrupt, pixel_count, unsupported,
+};
 
 struct Reader<'a> {
     d: &'a [u8],
@@ -87,6 +89,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     if width == 0 || height == 0 || width > 1 << 16 || height > 1 << 16 {
         return corrupt("TIFF size");
     }
+    let pixels = pixel_count(width, height)?;
     let spp = one(277, 1) as usize;
     let bits = one(258, 1) as usize;
     let compression = one(259, 1);
@@ -111,6 +114,16 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     }
     if !matches!(photometric, 0..=3 | 5 | 6) {
         return unsupported(format!("TIFF color space {photometric}"));
+    }
+    // One to eight samples a pixel, and those its color space is made of:
+    // with none, or fewer, there is no color to read.
+    let needed = match photometric {
+        2 => 3,
+        5 => 4,
+        _ => 1,
+    };
+    if !(needed..=8).contains(&spp) {
+        return corrupt("TIFF samples per pixel");
     }
     // Y′CbCr (photometric 6): blocks of h×v luma samples and their two
     // chroma ones, made RGB as they are read.
@@ -142,6 +155,9 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     if tw == 0 || th == 0 {
         return corrupt("TIFF tile size");
     }
+    // A tile is unpacked whole, however small the picture: within the
+    // budget too.
+    pixel_count(tw, th)?;
     let offsets = tag
         .get(&if tiled { 324 } else { 273 })
         .cloned()
@@ -154,9 +170,16 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let down = height.div_ceil(th);
     let planes = if planar { spp } else { 1 };
     let per_pixel = if planar { 1 } else { spp };
-    let row_bytes = (tw * per_pixel * bits).div_ceil(8);
+    let row_bytes = checked_size(checked_size(tw, per_pixel)?, bits)?.div_ceil(8);
+    // A tile's bytes: what its data unpacks to at most (a little left over
+    // is let through; a few bytes can be made to unpack into gigabytes).
+    let tile_bytes = match &ycbcr {
+        Some(y) => y.bytes(tw, th),
+        None => checked_size(row_bytes, th)?,
+    };
+    let limit = tile_bytes.saturating_mul(2);
     // Samples as f32 in 0–1 (floats as they are), all planes interleaved.
-    let mut samples = vec![0f32; width * height * spp];
+    let mut samples = vec![0f32; checked_size(pixels, spp)?];
     for plane in 0..planes {
         for ty in 0..down {
             for tx in 0..across {
@@ -170,15 +193,11 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                 let rows = th;
                 let mut data = match compression {
                     1 => raw.to_vec(),
-                    5 => lzw(raw, row_bytes * rows * 2),
-                    32773 => packbits(raw, row_bytes * rows * 2),
-                    _ => bv_deflate::zlib_decompress(raw).unwrap_or_default(),
+                    5 => lzw(raw, limit),
+                    32773 => packbits(raw, limit),
+                    _ => bv_deflate::zlib_decompress_limited(raw, limit).unwrap_or_default(),
                 };
-                let need = match &ycbcr {
-                    Some(y) => y.bytes(tw, rows),
-                    None => row_bytes * rows,
-                };
-                data.resize(need, 0);
+                data.resize(tile_bytes, 0);
                 if let Some(y) = &ycbcr {
                     y.unpack(
                         &data,
@@ -214,8 +233,8 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         _ => None,
     };
     let premultiplied = extra == 1 && alpha_at.is_some();
-    let mut rgba = vec![0f32; width * height * 4];
-    for p in 0..width * height {
+    let mut rgba = vec![0f32; checked_size(pixels, 4)?];
+    for p in 0..pixels {
         let s = &samples[p * spp..p * spp + spp];
         let a = alpha_at.map_or(1.0, |i| s[i]);
         let [r, g, b] = match photometric {
@@ -401,7 +420,9 @@ fn unpack(
 
 /// TIFF's LZW: codes MSB first, 9 to 12 bits, one code early.
 fn lzw(data: &[u8], max: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(max);
+    // Room for the whole strip at once up to 16 MB; past that it grows as
+    // the data comes (`max` is the header's word).
+    let mut out = Vec::with_capacity(max.min(1 << 24));
     let mut table: Vec<(u16, u8, u16)> = Vec::with_capacity(4096); // (prefix, byte, length)
     let reset = |t: &mut Vec<(u16, u8, u16)>| {
         t.clear();
@@ -454,8 +475,10 @@ fn lzw(data: &[u8], max: usize) -> Vec<u8> {
             let first = string(&table, code, &mut stack);
             out.extend(stack.iter().rev());
             first
-        } else if let Some(p) = prev {
-            // The KwKwK case: the previous string plus its first byte.
+        } else if let Some(p) = prev.filter(|_| code as usize == table.len()) {
+            // The KwKwK case: the previous string plus its first byte. Only
+            // the next code free may be new so; any other past the table
+            // is damage, and the strip ends there.
             let first = string(&table, p, &mut stack);
             out.extend(stack.iter().rev());
             out.push(first);
@@ -482,7 +505,7 @@ fn lzw(data: &[u8], max: usize) -> Vec<u8> {
 }
 
 fn packbits(data: &[u8], max: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(max);
+    let mut out = Vec::with_capacity(max.min(1 << 24));
     let mut i = 0;
     while i < data.len() && out.len() < max {
         let n = data[i] as i8;
@@ -572,6 +595,91 @@ mod tests {
             };
             assert_eq!(got, px, "deflate {deflate}");
         }
+    }
+
+    /// A little-endian TIFF of one strip: its tags (each one LONG) besides
+    /// the strip's place, and the strip's bytes.
+    fn file(tags: &[(u16, u32)], strip: &[u8]) -> Vec<u8> {
+        let mut d = b"II*\0".to_vec();
+        d.extend((8 + strip.len() as u32).to_le_bytes());
+        d.extend(strip);
+        let place = [(273, 8), (279, strip.len() as u32)];
+        d.extend((tags.len() as u16 + 2).to_le_bytes());
+        for (tag, value) in tags.iter().chain(&place) {
+            d.extend(tag.to_le_bytes());
+            d.extend(4u16.to_le_bytes());
+            d.extend(1u32.to_le_bytes());
+            d.extend(value.to_le_bytes());
+        }
+        d.extend(0u32.to_le_bytes());
+        d
+    }
+
+    /// The tags of a 1×1 picture of 8 bits.
+    const ONE: [(u16, u32); 3] = [(256, 1), (257, 1), (258, 8)];
+
+    #[test]
+    fn a_code_past_the_lzw_table_ends_the_strip() {
+        // 65, 400 (not the next one free), 66: taken for a string made of
+        // the one before, 400 was looked up in the table after it.
+        assert_eq!(super::lzw(&[0x20, 0xe4, 0x08, 0x40], 100), [65]);
+        // 65, then 258, the next one free: 65 and its first byte again.
+        assert_eq!(super::lzw(&[0x20, 0xc0, 0x80], 100), [65, 65, 65]);
+    }
+
+    #[test]
+    fn sample_counts_the_color_space_cannot_use_are_refused() {
+        // No samples (with the horizontal predictor too), nine; RGB of one
+        // sample, CMYK of one and of three.
+        for more in [
+            &[(277, 0)][..],
+            &[(277, 0), (317, 2)],
+            &[(277, 9)],
+            &[(277, 1), (262, 2)],
+            &[(277, 1), (262, 5)],
+            &[(277, 3), (262, 5)],
+        ] {
+            let tags = [&ONE[..], more].concat();
+            assert!(
+                matches!(
+                    super::read(&file(&tags, &[0; 16])),
+                    Err(crate::read::ReadError::Corrupt(_))
+                ),
+                "{more:?}"
+            );
+        }
+        // CMYK of four: no ink is white.
+        let tags = [&ONE[..], &[(277, 4), (262, 5)]].concat();
+        let p = super::read(&file(&tags, &[0; 4])).unwrap();
+        assert_eq!(p.data, PictureData::Rgba8(vec![255; 4]));
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // 65536 × 65536 pixels, then a tile of 2^20 × 2^20 in a picture of
+        // one pixel: both in files of a hundred bytes.
+        let huge = [(256, 65_536), (257, 65_536), (258, 8)];
+        let tile = [(322, 1 << 20), (323, 1 << 20), (324, 8), (325, 1)];
+        let tiled = [&ONE[..], &tile[..]].concat();
+        for tags in [&huge[..], &tiled[..]] {
+            assert!(matches!(
+                super::read(&file(tags, &[0])),
+                Err(crate::read::ReadError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_strip_that_unpacks_far_past_its_rows_is_left_blank() {
+        // One white pixel, deflated; then 16 MB of white where the strip
+        // has room for one pixel.
+        let one = bv_deflate::zlib_compress(&[255], 6);
+        let tags = [&ONE[..], &[(259, 8)]].concat();
+        let p = super::read(&file(&tags, &one)).unwrap();
+        assert_eq!(p.data, PictureData::Rgba8(vec![255; 4]));
+        let bomb = bv_deflate::zlib_compress(&vec![255; 16 << 20], 6);
+        let p = super::read(&file(&tags, &bomb)).unwrap();
+        assert_eq!(p.data, PictureData::Rgba8(vec![0, 0, 0, 255]));
     }
 
     #[test]

@@ -565,7 +565,9 @@ pub fn controller(
 
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, height.max(MIN_HEIGHT)), Sense::hover());
-    let names_w = (width * 0.2).clamp(96.0, 150.0);
+    // Room for a parameter's name beside its triangle ("Text color",
+    // whole, as VEGAS shows it).
+    let names_w = (width * 0.26).clamp(124.0, 170.0);
     let vbar_w = 14.0;
     let body_bottom = rect.bottom() - BAR;
     let lanes = Rect::from_min_max(
@@ -926,6 +928,27 @@ pub fn controller(
             // A parameter of several numbers (or of text): its keyframes.
             (Some(p), None) => {
                 let r = &rows[p];
+                // A color's row shows the color it is along the time, as
+                // VEGAS's (Titles & Text's Text color: a red bar).
+                if matches!(r.ty, ParamType::Rgb | ParamType::Rgba) {
+                    let anim = animation(r.param, rate);
+                    let (top, bottom) = (lane.top() + 2.0, lane.bottom() - 2.0);
+                    const STEP: f32 = 4.0;
+                    let mut x = graph.left();
+                    while x < graph.right() {
+                        let v = anim.at(frames(raw_t(x + STEP / 2.0), rate), r.ty);
+                        let c = |d: usize| (v.num(d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                        graph_p.rect_filled(
+                            Rect::from_min_max(
+                                pos2(x, top),
+                                pos2((x + STEP).min(graph.right()), bottom),
+                            ),
+                            0.0,
+                            Color32::from_rgb(c(0), c(1), c(2)),
+                        );
+                        x += STEP;
+                    }
+                }
                 for k in &r.param.keys {
                     marks.push(Mark {
                         line: i,
@@ -1331,7 +1354,7 @@ pub fn controller(
         |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space((names_w - 60.0).max(4.0));
+                ui.add_space((names_w - 90.0).max(4.0));
                 let button = |ui: &mut Ui, icon, on, enabled, tip: &str| {
                     crate::widgets::icon_button_ex(ui, icon, tip, on, enabled).clicked()
                 };

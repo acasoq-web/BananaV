@@ -597,8 +597,10 @@ pub fn build(
             } else {
                 e.level
             };
+            // Together no longer than the event, whose length is rounded
+            // to the project's frames.
             c.fade_in = ticks(e.fade_in.max(0)).min(duration);
-            c.fade_out = ticks(e.fade_out.max(0)).min(duration);
+            c.fade_out = ticks(e.fade_out.max(0)).min(duration - c.fade_in);
             c.fade_in_curve = fade_curve(e.curves[0]);
             c.fade_out_curve = fade_curve(e.curves[1]);
             c.fade_in_reciprocal = Some(fade_curve(e.curves[2]));

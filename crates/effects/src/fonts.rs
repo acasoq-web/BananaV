@@ -454,6 +454,16 @@ pub fn interface_fallbacks(first: Cjk) -> Vec<(PathBuf, u32)> {
         "Loma",
         "Garuda",
     ]);
+    // Arabic: faces whose own rules join its letters (the interface's
+    // text shaping uses them).
+    add(&[
+        "Tahoma",
+        "Arial",
+        "Geeza Pro",
+        "Noto Sans Arabic UI",
+        "Noto Sans Arabic",
+        "DejaVu Sans",
+    ]);
     out
 }
 

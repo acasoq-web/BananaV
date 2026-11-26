@@ -12,7 +12,7 @@ mod read;
 mod w64;
 
 pub use aiff::AiffWriter;
-pub use read::{Container, WavInfo, WavReader, read_info};
+pub use read::{Container, WavInfo, WavReader, alaw, ima4_packet, mulaw, read_info};
 pub use w64::W64Writer;
 
 #[derive(Debug)]
@@ -294,7 +294,8 @@ fn chunks<R: Read + Seek>(r: &mut R) -> Result<(Vec<Chunk>, bool)> {
         r.read_exact(&mut ch[..8])?;
         let id: [u8; 4] = ch[..4].try_into().expect("4 bytes");
         let mut size = u32le(&ch[4..8]) as u64;
-        if &id == b"ds64" && size >= 16 {
+        // Only RF64 files give 64-bit sizes in a `ds64` chunk.
+        if rf64 && &id == b"ds64" && size >= 16 {
             let mut b = [0u8; 16];
             r.read_exact(&mut b)?;
             data64 = Some(u64le(&b[8..]));
@@ -303,6 +304,9 @@ fn chunks<R: Read + Seek>(r: &mut R) -> Result<(Vec<Chunk>, bool)> {
         if &id == b"data" && size == 0xFFFF_FFFF {
             size = data64.unwrap_or(len - at - 8);
         }
+        // A chunk ends where the file does, whatever its size says: one
+        // running past it would wrap the walk around and never end it.
+        let size = size.min(len - at - 8);
         let list = if &id == b"LIST" && size >= 4 {
             r.read_exact(&mut ch[8..12])?;
             Some(ch[8..12].try_into().expect("4 bytes"))
@@ -310,8 +314,12 @@ fn chunks<R: Read + Seek>(r: &mut R) -> Result<(Vec<Chunk>, bool)> {
             None
         };
         let c = Chunk { id, at, size, list };
-        at = c.end();
+        let next = c.end();
         out.push(c);
+        if next <= at {
+            break;
+        }
+        at = next;
     }
     Ok((out, rf64))
 }
@@ -330,7 +338,9 @@ pub fn read_cues<R: Read + Seek>(r: &mut R) -> Result<Vec<Cue>> {
         r.read_exact(&mut body)?;
         if &c.id == b"cue " {
             let n = body.get(..4).map_or(0, u32le) as usize;
-            for p in body[4..].as_chunks::<24>().0.iter().take(n) {
+            // A chunk too short for its count has no points.
+            let points_data = body.get(4..).unwrap_or(&[]);
+            for p in points_data.as_chunks::<24>().0.iter().take(n) {
                 let id = u32le(&p[..4]);
                 // The sample offset, as written by editors (the position
                 // is the same for plain PCM).
@@ -786,6 +796,52 @@ mod tests {
         assert_eq!(audio(&cleared), before);
         assert_eq!(cleared.len(), early.len(), "nothing moved");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A RIFF chunk: its id, its size and its body, padded to an even size.
+    fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = id.to_vec();
+        v.extend((body.len() as u32).to_le_bytes());
+        v.extend(body);
+        if body.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    }
+
+    #[test]
+    fn a_cue_chunk_too_short_for_its_count_has_no_markers() {
+        for size in 0..4 {
+            let mut file = b"RIFF\0\0\0\0WAVE".to_vec();
+            file.extend(riff_chunk(b"cue ", &[1u8; 3][..size]));
+            assert_eq!(read_cues(&mut Cursor::new(&file)).unwrap(), []);
+        }
+    }
+
+    #[test]
+    fn a_64_bit_data_size_past_the_file_ends_the_walk() {
+        // The same lie in a plain file, where `ds64` means nothing, and in
+        // an RF64 one, where it gives the size of the data.
+        for magic in [b"RIFF", b"RF64"] {
+            let mut ds64 = Vec::new();
+            ds64.extend(0u64.to_le_bytes());
+            // The data chunk starts at byte 48: with this size it would end
+            // at byte 12, where the walk began.
+            ds64.extend((u64::MAX - 43).to_le_bytes());
+            ds64.extend(0u64.to_le_bytes());
+            ds64.extend(0u32.to_le_bytes());
+            let mut file = magic.to_vec();
+            file.extend(u32::MAX.to_le_bytes());
+            file.extend(b"WAVE");
+            file.extend(riff_chunk(b"ds64", &ds64));
+            file.extend(b"data");
+            file.extend(u32::MAX.to_le_bytes());
+            file.extend([0u8; 6]);
+            let (list, _) = chunks(&mut Cursor::new(&file)).unwrap();
+            assert_eq!(list.len(), 2);
+            assert_eq!(list[1].end(), file.len() as u64);
+            assert_eq!(read_cues(&mut Cursor::new(&file)).unwrap(), []);
+        }
     }
 
     fn tone(n: usize, ch: usize) -> Vec<Vec<f32>> {

@@ -6,6 +6,7 @@
 //! it is ready, and if it ever fails, the processor composites (the same
 //! frames: `bv-gpu`'s tests check it against `bv-render`).
 
+use crate::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -136,7 +137,7 @@ impl Accel {
     /// card that failed is tried again when chosen again.
     pub(crate) fn set(self: &Arc<Accel>, choice: GpuChoice) {
         let serial = {
-            let mut st = self.state.lock().expect("acceleration");
+            let mut st = self.state.locked();
             let failed = matches!(st.status, GpuStatus::Failed(_));
             if st.choice == choice && !failed {
                 return;
@@ -162,7 +163,7 @@ impl Accel {
                 };
                 let opened = Gpu::open(name);
                 let gpu = {
-                    let mut st = me.state.lock().expect("acceleration");
+                    let mut st = me.state.locked();
                     if st.serial != serial {
                         return;
                     }
@@ -185,7 +186,7 @@ impl Accel {
                 if let Some(g) = gpu {
                     let warmed = g.warm_up();
                     {
-                        let mut st = me.state.lock().expect("acceleration");
+                        let mut st = me.state.locked();
                         if st.serial == serial {
                             st.warming = false;
                         }
@@ -196,30 +197,29 @@ impl Accel {
                 }
             });
         if spawned.is_err() {
-            self.state.lock().expect("acceleration").status =
-                GpuStatus::Failed("could not start".into());
+            self.state.locked().status = GpuStatus::Failed("could not start".into());
         }
     }
 
     pub(crate) fn status(&self) -> GpuStatus {
-        self.state.lock().expect("acceleration").status.clone()
+        self.state.locked().status.clone()
     }
 
     /// Whether the card is opening or still compiling its kernels.
     pub(crate) fn starting(&self) -> bool {
-        let st = self.state.lock().expect("acceleration");
+        let st = self.state.locked();
         st.status == GpuStatus::Starting || st.warming
     }
 
     /// The card, when it is ready.
     fn gpu(&self) -> Option<Arc<Gpu>> {
-        self.state.lock().expect("acceleration").gpu.clone()
+        self.state.locked().gpu.clone()
     }
 
     /// `gpu` failed a frame: the processor takes over until the card is
     /// chosen again.
     fn failed(&self, gpu: &Arc<Gpu>, e: &GpuError) {
-        let mut st = self.state.lock().expect("acceleration");
+        let mut st = self.state.locked();
         if st.gpu.as_ref().is_some_and(|g| Arc::ptr_eq(g, gpu)) {
             st.gpu = None;
             st.status = GpuStatus::Failed(e.to_string());
@@ -282,6 +282,15 @@ impl Painter {
     /// Lets go of the plug-in instances no frame used lately.
     pub(crate) fn sweep_plugins(&self) {
         self.plugins.sweep(std::time::Duration::from_secs(30));
+    }
+
+    /// Lets go of the readers and the pictures of other times than the
+    /// frame's that effects asked for.
+    pub(crate) fn let_go(&mut self) {
+        self.plugins.close_readers();
+        if let Some(c) = &mut self.compositor {
+            c.let_go();
+        }
     }
 
     /// The card's compositor, if the card is ready.

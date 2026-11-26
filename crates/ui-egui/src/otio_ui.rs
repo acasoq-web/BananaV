@@ -346,10 +346,16 @@ pub(crate) fn export(app: &mut BananaApp) {
     }
     let name = crate::interchange_ui::project_name(app);
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Export OpenTimelineIO"))
+        .set_title(crate::i18n::os_text(tr("Export OpenTimelineIO")))
         .add_filter("OpenTimelineIO (*.otio)", &["otio"])
-        .add_filter(tr("OpenTimelineIO Bundle (*.otioz)"), &["otioz"])
-        .add_filter(tr("OpenTimelineIO Folder Bundle (*.otiod)"), &["otiod"])
+        .add_filter(
+            crate::i18n::os_text(tr("OpenTimelineIO Bundle (*.otioz)")),
+            &["otioz"],
+        )
+        .add_filter(
+            crate::i18n::os_text(tr("OpenTimelineIO Folder Bundle (*.otiod)")),
+            &["otiod"],
+        )
         .set_file_name(format!("{name}.otio"))
         .save_file()
     else {
@@ -478,9 +484,9 @@ fn write_folder(
 /// changes).
 pub(crate) fn import_dialog(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Import OpenTimelineIO"))
+        .set_title(crate::i18n::os_text(tr("Import OpenTimelineIO")))
         .add_filter("OpenTimelineIO (*.otio, *.otioz)", &["otio", "otioz"])
-        .add_filter(tr("All Files"), &["*"])
+        .add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
         .pick_file()
     else {
         return;
@@ -669,9 +675,9 @@ pub(crate) fn import_fcp(app: &mut BananaApp, fcpxml: bool) {
         )
     };
     let Some(path) = rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter(filter, &[ext])
-        .add_filter(tr("All Files"), &["*"])
+        .set_title(crate::i18n::os_text(title))
+        .add_filter(crate::i18n::os_text(filter), &[ext])
+        .add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
         .pick_file()
     else {
         return;

@@ -33,13 +33,19 @@
 //! Swedish too: the texts people need most to find their way (menus, the
 //! main windows, the timeline, the render dialog); Preferences marks them
 //! so, and they are not kept up with every new text. Their Asian and Thai
-//! letters come from the computer's fonts (`interface_fonts`).
+//! letters come from the computer's fonts (`interface_fonts`). Arabic
+//! (2026-11-17) is partial too, and written right to left: egui joins its
+//! letters and reads each word from the right, and its texts are made
+//! ready when its catalog is read (`rtl`: each line's words and runs in
+//! visual order; `os_text` gives the operating system's own titles their
+//! reading order back).
 
 use std::collections::HashMap;
 use std::fmt::{Display, Write as _};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod ar;
 mod cs;
 mod de;
 mod es_419;
@@ -52,6 +58,7 @@ mod ko;
 mod pl;
 mod pt_br;
 mod pt_pt;
+mod rtl;
 mod ru;
 mod sv;
 mod th;
@@ -170,12 +177,20 @@ languages! {
     Hungarian => hu::LOCALE,
     PortuguesePortugal => pt_pt::LOCALE,
     Swedish => sv::LOCALE,
+    Arabic => ar::LOCALE,
 }
 
 impl Language {
-    /// The language's own name, as listed in Preferences.
+    /// The language's own name, as listed in Preferences (a right-to-left
+    /// one ready for egui).
     pub fn native_name(self) -> &'static str {
-        self.locale().native_name
+        shown(self, self.locale().native_name)
+    }
+
+    /// Whether it is written right to left (its texts reordered for egui,
+    /// [`rtl`]).
+    pub fn right_to_left(self) -> bool {
+        matches!(self, Language::Arabic)
     }
 
     /// BCP 47 tag.
@@ -238,20 +253,71 @@ fn catalog(lang: Language) -> &'static Catalog {
     let all = CATALOGS.get_or_init(|| {
         Language::ALL
             .iter()
-            .map(|l| {
+            .map(|&l| {
                 let locale = l.locale();
+                // A right-to-left language's texts made ready for egui once
+                // (kept for good: a catalog's worth).
+                let ready = |t: &'static str| -> &'static str {
+                    if l.right_to_left() && rtl::has_rtl(t) {
+                        Box::leak(rtl::visual(t).into_boxed_str())
+                    } else {
+                        t
+                    }
+                };
                 Catalog {
-                    texts: locale.texts.iter().copied().collect(),
+                    texts: locale.texts.iter().map(|&(en, t)| (en, ready(t))).collect(),
                     plurals: locale
                         .plurals
                         .iter()
-                        .map(|(one, other, forms)| ((*one, *other), *forms))
+                        .map(|&(one, other, forms)| {
+                            let forms: &'static [&'static str] = if l.right_to_left() {
+                                Box::leak(
+                                    forms
+                                        .iter()
+                                        .map(|&f| ready(f))
+                                        .collect::<Vec<_>>()
+                                        .into_boxed_slice(),
+                                )
+                            } else {
+                                forms
+                            };
+                            ((one, other), forms)
+                        })
                         .collect(),
                 }
             })
             .collect()
     });
     &all[lang.index()]
+}
+
+/// A text of `lang`'s catalog as egui shows it: a right-to-left
+/// language's made ready once ([`rtl::visual`]) and kept.
+fn shown(lang: Language, text: &'static str) -> &'static str {
+    if !lang.right_to_left() || !rtl::has_rtl(text) {
+        return text;
+    }
+    static READY: std::sync::Mutex<Option<HashMap<&'static str, &'static str>>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut ready) = READY.lock() else {
+        return text;
+    };
+    let ready = ready.get_or_insert_with(HashMap::new);
+    ready
+        .entry(text)
+        .or_insert_with(|| Box::leak(rtl::visual(text).into_boxed_str()))
+}
+
+/// `text` (shown by egui) for the operating system to lay out itself — a
+/// window's title, a file dialog's: a right-to-left language's text back
+/// in reading order ([`rtl::logical`]); others as they are.
+pub fn os_text(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if language().right_to_left() && rtl::has_rtl(text) {
+        rtl::logical(text)
+    } else {
+        text.to_string()
+    }
 }
 
 static LANGUAGE: AtomicU8 = AtomicU8::new(0);
@@ -341,7 +407,7 @@ pub fn trc<'a>(context: &str, text: &'a str) -> &'a str {
         .context
         .iter()
         .find(|(ctx, en, _)| *ctx == context && *en == text)
-        .map_or_else(|| translate(lang, text), |(_, _, t)| *t)
+        .map_or_else(|| translate(lang, text), |(_, _, t)| shown(lang, t))
 }
 
 /// The form of a text that counts `n`, in `lang`: `one` and `other` are the
@@ -657,6 +723,48 @@ mod tests {
     fn templates_follow_the_catalog() {
         let pt = translate(Language::PortugueseBrazil, "Saved to {}");
         assert_eq!(fill(pt, &[&"x.srt"]), "Salvo em x.srt");
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    /// Banana Split's effects, which the interface translates by value,
+    /// have their Portuguese: names, groups, descriptions, settings,
+    /// hints, choices and presets.
+    #[test]
+    fn every_text_of_the_pack_has_its_portuguese() {
+        bv_engine::plugins::register_own();
+        let have: std::collections::HashSet<&str> =
+            super::pt_br::ENTRIES.iter().map(|(k, _)| *k).collect();
+        let mut lacking = std::collections::BTreeSet::new();
+        let mut effects = 0;
+        for info in bv_ofx::registry().known() {
+            if !bv_engine::plugins::is_banana_split(&info) {
+                continue;
+            }
+            effects += 1;
+            let group = info.grouping.rsplit('/').next().unwrap_or("");
+            let mut texts = vec![info.label.clone(), info.description.clone(), group.into()];
+            for p in info.described.iter().flat_map(|d| &d.params) {
+                if p.name.starts_with(bv_engine::plugins::PACK_PREFIX) || p.secret {
+                    continue;
+                }
+                texts.extend([p.label.clone(), p.hint.clone()]);
+                texts.extend(p.options.iter().cloned());
+            }
+            texts.extend(
+                bv_engine::plugins::own_presets(&info.identifier)
+                    .iter()
+                    .map(|p| p.name.to_string()),
+            );
+            lacking.extend(
+                texts
+                    .into_iter()
+                    .filter(|t| !t.is_empty() && !have.contains(t.as_str())),
+            );
+        }
+        assert!(effects > 250, "{effects}");
+        assert!(lacking.is_empty(), "{lacking:#?}");
     }
 }
 

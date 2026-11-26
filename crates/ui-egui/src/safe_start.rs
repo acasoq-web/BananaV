@@ -111,7 +111,7 @@ fn write(r: &Record) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(r) {
-        let _ = std::fs::write(path, bytes);
+        let _ = crate::safe_file::write(&path, &bytes);
     }
 }
 

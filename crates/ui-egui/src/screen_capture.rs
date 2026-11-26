@@ -242,7 +242,7 @@ fn window_ui(ui: &mut egui::Ui, app: &mut BananaApp) {
                 }
                 if bar_button(ui, Icon::Open, tr("Open Folder"), None).clicked() {
                     let folder = capture_folder(&app.settings.capture);
-                    let _ = std::process::Command::new("explorer").arg(folder).spawn();
+                    let _ = crate::app::more_actions::open_externally(&folder);
                 }
             }
         });
@@ -806,7 +806,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut BananaApp) {
                         ui.add(egui::Label::new(folder.display().to_string()).truncate());
                         if crate::widgets::icon_button(ui, Icon::Open, tr("Browse…")).clicked()
                             && let Some(p) = rfd::FileDialog::new()
-                                .set_title(tr("Recording Folder"))
+                                .set_title(crate::i18n::os_text(tr("Recording Folder")))
                                 .set_directory(&folder)
                                 .pick_folder()
                         {
@@ -816,7 +816,7 @@ fn settings_dialog(ctx: &egui::Context, app: &mut BananaApp) {
                             .clicked()
                         {
                             let _ = std::fs::create_dir_all(&folder);
-                            let _ = std::process::Command::new("explorer").arg(&folder).spawn();
+                            let _ = crate::app::more_actions::open_externally(&folder);
                         }
                     });
                     ui.end_row();

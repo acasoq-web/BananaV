@@ -5,8 +5,10 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
+use std::hash::{Hash as _, Hasher as _};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use bv_core::{FrameRate, ImageRgbaF32, Tick};
@@ -44,6 +46,15 @@ pub fn register_own() {
         if let Err(e) = bv_ofx::registry().add_built_in(binary) {
             eprintln!("BananaV's own effects did not load: {e}");
         }
+        let pack = bv_ofx::Binary::built_in(
+            bv_banana::BINARY,
+            bv_banana::number_of_plugins,
+            bv_banana::get_plugin,
+            None,
+        );
+        if let Err(e) = bv_ofx::registry().add_built_in(pack) {
+            eprintln!("Banana Split did not load: {e}");
+        }
     });
 }
 
@@ -55,7 +66,18 @@ pub use bv_effects::{
 /// The factory presets of BananaV's own effect `id` (OpenFX has none:
 /// BananaV lists these with the user's).
 pub fn own_presets(id: &str) -> Vec<Preset> {
+    if bv_banana::is_own(id) {
+        return bv_banana::presets(id);
+    }
     bv_effects::presets(id)
+}
+
+/// The identifiers of Banana Split's plug-ins start with it.
+pub const PACK_PREFIX: &str = bv_banana::ID_PREFIX;
+
+/// Whether `info` is one of Banana Split's, BananaV's own pack.
+pub fn is_banana_split(info: &bv_ofx::PluginInfo) -> bool {
+    bv_banana::is_own(&info.identifier) && info.file == std::path::Path::new(bv_banana::BINARY)
 }
 
 /// The font face Titles & Text draws `family` with for `bold` and
@@ -77,7 +99,10 @@ pub fn interface_fallbacks(first: Cjk) -> Vec<(std::path::PathBuf, u32)> {
 /// Whether `info` is one of BananaV's own plug-ins (built into it, not
 /// found in a folder).
 pub fn is_own(info: &bv_ofx::PluginInfo) -> bool {
-    info.identifier.starts_with(OWN_PREFIX) && info.file == std::path::Path::new(bv_effects::BINARY)
+    info.identifier.starts_with(OWN_PREFIX)
+        && [bv_effects::BINARY, bv_banana::BINARY]
+            .iter()
+            .any(|b| info.file == std::path::Path::new(b))
 }
 
 /// An effect of the project: what it belongs to, its place in its owner's
@@ -189,6 +214,65 @@ impl ClipSource for Still {
     }
 }
 
+/// Pictures of other times worked out lately. An effect that reads the
+/// frames before its own (trails, echoes) asks at each frame for the same
+/// ones as at the last but one: kept, each is worked out once, in order,
+/// instead of the media being read again from further back.
+#[derive(Default)]
+struct Past {
+    /// Each with what it is of, when it was made and when used last.
+    pictures: Vec<(u64, Arc<ImageRgbaF32>, Instant, Instant)>,
+}
+
+impl Past {
+    /// At most this many bytes and this long: a media's file may change.
+    const BYTES: usize = 384 << 20;
+    const LASTS: Duration = Duration::from_secs(10);
+
+    fn get(&mut self, key: u64) -> Option<Arc<ImageRgbaF32>> {
+        let now = Instant::now();
+        let p = self
+            .pictures
+            .iter_mut()
+            .find(|p| p.0 == key && now - p.2 < Self::LASTS)?;
+        p.3 = now;
+        Some(Arc::clone(&p.1))
+    }
+
+    /// Those too old go.
+    fn tidy(&mut self) {
+        let now = Instant::now();
+        self.pictures.retain(|p| now - p.2 < Self::LASTS);
+    }
+
+    fn put(&mut self, key: u64, picture: &Arc<ImageRgbaF32>) {
+        let now = Instant::now();
+        self.tidy();
+        self.pictures.retain(|p| p.0 != key);
+        let size = |p: &ImageRgbaF32| p.data.len() * size_of::<[f32; 4]>();
+        let mut bytes: usize =
+            size(picture) + self.pictures.iter().map(|p| size(&p.1)).sum::<usize>();
+        while bytes > Self::BYTES
+            && let Some(oldest) = (0..self.pictures.len()).min_by_key(|&i| self.pictures[i].3)
+        {
+            bytes -= size(&self.pictures.swap_remove(oldest).1);
+        }
+        if bytes <= Self::BYTES {
+            self.pictures.push((key, Arc::clone(picture), now, now));
+        }
+    }
+}
+
+/// Hashes what is written to it.
+struct HashText(std::hash::DefaultHasher);
+
+impl std::fmt::Write for HashText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write(s.as_bytes());
+        Ok(())
+    }
+}
+
 /// The plug-in effects of a preview or of a file being rendered.
 pub struct OfxEffects {
     purpose: Purpose,
@@ -198,8 +282,11 @@ pub struct OfxEffects {
     making: Mutex<HashMap<SlotKey, Arc<Mutex<()>>>>,
     /// Itself, for the inputs that read other times.
     me: Weak<OfxEffects>,
-    /// The readers of pictures at other times than the frame's.
-    pool: Mutex<Option<VideoPool>>,
+    /// The readers of pictures at other times than the frame's, and when
+    /// they were used last.
+    pool: Mutex<Option<(VideoPool, Instant)>>,
+    /// And those pictures.
+    past: Mutex<Past>,
 }
 
 impl std::fmt::Debug for OfxEffects {
@@ -220,6 +307,7 @@ impl OfxEffects {
             making: Mutex::new(HashMap::new()),
             me: me.clone(),
             pool: Mutex::new(None),
+            past: Mutex::default(),
         })
     }
 
@@ -234,9 +322,14 @@ impl OfxEffects {
         (enter, working): (Option<&[[f32; 3]; 3]>, Option<AcesSpace>),
     ) -> Option<ImageRgbaF32> {
         let mut pool = lock(&self.pool);
-        let pool = pool.get_or_insert_with(VideoPool::new);
+        let (pool, used) = pool.get_or_insert_with(|| (VideoPool::new(), Instant::now()));
+        *used = Instant::now();
         let pic = pool.frame_scaled(info, t, size.0, size.1).ok()?;
-        let mut img = bv_render::reduce_to(&pic, size.0, size.1);
+        let mut img = if (pic.width, pic.height) == size {
+            Arc::try_unwrap(pic).unwrap_or_else(|p| (*p).clone())
+        } else {
+            bv_render::reduce_to(&pic, size.0, size.1)
+        };
         // A media in a color space of its own enters through it.
         let space = working
             .zip(info.color_space)
@@ -258,9 +351,21 @@ impl OfxEffects {
             let kept = if s.made_in > SLOW_TO_MAKE { slow } else { idle };
             s.used.elapsed() < kept
         });
-        if let Ok(mut pool) = self.pool.try_lock() {
+        if let Ok(mut pool) = self.pool.try_lock()
+            && pool
+                .as_ref()
+                .is_some_and(|(_, used)| used.elapsed() >= Past::LASTS)
+        {
             *pool = None;
         }
+        lock(&self.past).tidy();
+    }
+
+    /// Lets go of the readers of other times (their files are free) and of
+    /// the pictures read.
+    pub fn close_readers(&self) {
+        *lock(&self.pool) = None;
+        lock(&self.past).pictures = Vec::new();
     }
 
     /// How many instances it keeps.
@@ -470,6 +575,7 @@ impl OfxEffects {
             framing: s.framing,
             ruler: call.timeline - call.time,
             effects: self.me.clone(),
+            key: OnceLock::new(),
         }
     }
 
@@ -679,6 +785,11 @@ impl PluginEffects for OfxEffects {
             .picture(time)
     }
 
+    fn input_key(&self, call: &PluginCall<'_>, size: (u32, u32)) -> Option<u64> {
+        let s = call.source?;
+        Some(self.temporal(call, s, (0.0, None), size, true).key())
+    }
+
     fn on_card(&self, call: &PluginCall<'_>) -> bool {
         self.card_instance(call).is_some()
     }
@@ -783,6 +894,8 @@ struct Temporal {
     /// The owner's time on the ruler: its own plus this.
     ruler: Tick,
     effects: Weak<OfxEffects>,
+    /// What its pictures are of, but for their time.
+    key: OnceLock<u64>,
 }
 
 impl ClipSource for Temporal {
@@ -802,6 +915,14 @@ impl ClipSource for Temporal {
             None => owner,
         };
         let frame = self.frame;
+        let key = {
+            let mut h = std::hash::DefaultHasher::new();
+            (self.key(), owner).hash(&mut h);
+            h.finish()
+        };
+        if let Some(kept) = lock(&effects.past).get(key) {
+            return Some(kept);
+        }
         let size = self.framing.map_or(frame, |f| f.media_size);
         let mut img = effects.media_at(
             &self.info,
@@ -848,7 +969,9 @@ impl ClipSource for Temporal {
                 local,
             );
         }
-        Some(Arc::new(img))
+        let img = Arc::new(img);
+        lock(&effects.past).put(key, &img);
+        Some(img)
     }
 
     fn full_size(&self) -> (f64, f64) {
@@ -857,6 +980,36 @@ impl ClipSource for Temporal {
 }
 
 impl Temporal {
+    /// What its pictures are of, as a number: all they are made from but
+    /// their time. The event's effects from this one on are left out, so
+    /// that its settings change nothing here.
+    fn key(&self) -> u64 {
+        *self.key.get_or_init(|| {
+            let mut clip = self.clip.clone();
+            clip.effects = Vec::new();
+            let mut h = HashText(std::hash::DefaultHasher::new());
+            let _ = write!(
+                h,
+                "{:?} {:?} {:?} {:?} {:?} {:?}",
+                self.info, clip, self.before, self.framing, self.enter, self.working
+            );
+            let _ = write!(
+                h,
+                "{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                self.id,
+                self.frame,
+                self.rate,
+                self.media_time,
+                self.fx_scale,
+                self.video_gamma,
+                self.clips,
+                self.full_size,
+                self.ruler
+            );
+            h.0.finish()
+        })
+    }
+
     /// `img` through `chain` (others' effects; this plug-in is not run
     /// again inside itself), their sizes scaled by `fx_scale`, their
     /// pictures `full` big at full resolution.
@@ -903,6 +1056,9 @@ impl Temporal {
         }
     }
 }
+
+#[cfg(test)]
+mod pack_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -973,13 +1129,30 @@ pub(crate) mod tests {
     }
 
     /// The graphics card, when the computer has one.
-    fn card(accel: &std::sync::Arc<Accel>) -> bool {
+    pub(super) fn card(accel: &std::sync::Arc<Accel>) -> bool {
         accel.set(GpuChoice::Auto);
         let start = Instant::now();
         while matches!(accel.status(), GpuStatus::Starting) && start.elapsed().as_secs() < 60 {
             std::thread::sleep(Duration::from_millis(50));
         }
         matches!(accel.status(), GpuStatus::Ready(_))
+    }
+
+    /// Fails the test when the card stopped during it: a failed card frame
+    /// turns the card off, and the frames compared after that were the
+    /// processor's on both sides (the test passed, comparing nothing).
+    pub(super) struct StaysOnCard(pub(super) std::sync::Arc<Accel>);
+
+    impl Drop for StaysOnCard {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                let status = self.0.status();
+                assert!(
+                    matches!(status, GpuStatus::Ready(_)),
+                    "the graphics card stopped during the test: {status:?}"
+                );
+            }
+        }
     }
 
     fn close(a: [f32; 4], b: [f32; 4]) -> bool {
@@ -1044,6 +1217,7 @@ pub(crate) mod tests {
         assert!(close(l, r) && l[0] > 0.2 && l[0] < 0.8, "{l:?} {r:?}");
         // On the graphics card: the same.
         if card(&accel) {
+            let _card = StaysOnCard(accel.clone());
             let (wipe2, made2) = frames(&mut painter, &mut pool);
             for (a, b) in [(&wipe, &wipe2), (&made, &made2)] {
                 for (x, y) in [(8, 18), (56, 18), (32, 0), (32, 35)] {
@@ -1097,6 +1271,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         let before = bv_ofx_testplug::CUDA_RENDERS.load(Ordering::Relaxed);
         let on_card = painter.linear(&p, at, size, &mut pool, bg);
         for y in 0..size.1 {
@@ -1203,10 +1378,10 @@ pub(crate) mod tests {
         motion_text(&steps)
     }
 
-    fn own_fx(id: &str, preset: Option<&str>, values: &[(&str, PluginValue)]) -> Effect {
+    pub(super) fn own_fx(id: &str, preset: Option<&str>, values: &[(&str, PluginValue)]) -> Effect {
         let mut params = BTreeMap::new();
         if let Some(name) = preset {
-            let p = bv_effects::presets(id)
+            let p = own_presets(id)
                 .into_iter()
                 .find(|p| p.name == name)
                 .expect(name);
@@ -1495,6 +1670,7 @@ pub(crate) mod tests {
             println!("no graphics card");
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         let black = [0.0, 0.0, 0.0, 1.0];
         const FRAMES: i64 = 16;
         for size in [(1920, 1080), (3840, 2160)] {
@@ -2675,6 +2851,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         // The same math on the card: what is left is the processor's
         // doubles against the card's floats. Tiny Planet's seam — the
         // meridian where the picture's left and right edges meet — may
@@ -2792,6 +2969,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         for ((name, q), c) in runs.iter().zip(&cpu) {
             let g = painter.linear(q, at, size, &mut pool, black);
             let (mut most, mut sum, mut off) = (0f32, 0f64, 0usize);
@@ -2969,6 +3147,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         // Metal (macOS) builds the kernels with fast math, wgpu's default
         // there: levels counted from a picture a hair off land a level
         // apart on some of the bars.
@@ -3078,6 +3257,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         for ((name, q, at), c) in runs.iter().zip(&cpu) {
             let g = painter.linear(q, *at, size, &mut pool, black);
             let (mut most, mut sum) = (0f32, 0f64);
@@ -3148,6 +3328,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         // A frame first, the card's way ready (its first may still be the
         // processor's).
         let _ = painter.linear(&scenarios[0].1, at, size, &mut VideoPool::new(), black);
@@ -3247,6 +3428,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         // A frame first, the card's way ready (its first may still be the
         // processor's).
         let _ = painter.linear(&scenarios[0].1, at, size, &mut VideoPool::new(), black);
@@ -3355,6 +3537,7 @@ pub(crate) mod tests {
         if !card(&accel) {
             return;
         }
+        let _card = StaysOnCard(accel.clone());
         let mut c = cpu.iter();
         for (name, p, random) in &scenarios {
             // GL Transitions' code: the card's sines and powers, a few

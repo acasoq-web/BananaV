@@ -4,6 +4,7 @@
 //! target's (`bv_mixer::align`), and a few seconds where the target is
 //! busiest are read again from both for the fine step.
 
+use crate::LockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -102,7 +103,7 @@ impl AudioSyncJob {
                 .spawn(move || {
                     let mut last = Instant::now();
                     let mut tick = |hops: u64| {
-                        progress.lock().expect("progress").done += hops;
+                        progress.locked().done += hops;
                         if last.elapsed() > Duration::from_millis(100) {
                             last = Instant::now();
                             repaint();
@@ -110,7 +111,7 @@ impl AudioSyncJob {
                         !cancel.load(Ordering::Relaxed)
                     };
                     let result = run(&sources, &mut tick);
-                    let mut p = progress.lock().expect("progress");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.done = p.total;
                     match result {
@@ -130,7 +131,15 @@ impl AudioSyncJob {
     }
 
     pub(crate) fn progress(&self) -> AudioSyncProgress {
-        self.progress.lock().expect("progress").clone()
+        crate::settled(
+            &self.progress,
+            self.thread.as_ref(),
+            |p| p.finished,
+            |p| {
+                p.finished = true;
+                p.error = Some(crate::STOPPED.into());
+            },
+        )
     }
 
     pub(crate) fn cancel(&self) {

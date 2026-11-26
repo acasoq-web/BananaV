@@ -111,7 +111,10 @@ impl Engine {
             let written = written.clone();
             std::thread::Builder::new()
                 .name("bv-real-time-render".into())
-                .spawn(move || write_blocks(w, blocks, end, &written).map(drop))
+                .spawn(move || {
+                    let _awake = bv_platform::KeepAwake::new("Rendering in real time");
+                    write_blocks(w, blocks, end, &written).map(drop)
+                })
                 .map_err(|e| e.to_string())?
         };
         crate::playback::set_capture(Some(to));

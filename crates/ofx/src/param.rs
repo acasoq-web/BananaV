@@ -868,12 +868,17 @@ pub fn parameter_suite() -> &'static OfxParameterSuiteV1 {
 
 // The parametric parameter suite: curves of (position, value) points.
 
+/// The most curves a parametric parameter has here: their number is the
+/// plug-in's, and every call makes them all (millions would ask for
+/// gigabytes).
+pub(crate) const MAX_CURVES: usize = 256;
+
 /// How many curves a parametric parameter has.
 fn curve_count(p: &Param) -> usize {
     p.props
         .int(kOfxParamPropParametricDimension, 0)
         .unwrap_or(1)
-        .max(1) as usize
+        .clamp(1, MAX_CURVES as c_int) as usize
 }
 
 /// A parametric parameter's curves at `time` (frames), as many as it has.
@@ -1278,5 +1283,35 @@ mod tests {
         }
         assert_ne!(curve.animation().value, identity);
         assert_eq!(curve.default_value(), identity);
+    }
+
+    /// A parametric parameter said to have curves by the million has the
+    /// most taken (every call makes them all).
+    #[test]
+    fn curves_past_the_most_a_parametric_parameter_has_are_none() {
+        let set = ParamSet::new(SetKind::ParamDescriptor);
+        let p = set.define(ParamType::Parametric, c"curve").unwrap();
+        p.props
+            .set_int(kOfxParamPropParametricDimension, &[c_int::MAX]);
+        let s = &PARAMETRIC_SUITE;
+        let last = MAX_CURVES as c_int - 1;
+        // SAFETY: a valid handle.
+        unsafe {
+            let h = p.handle();
+            assert_eq!(
+                (s.parametric_param_add_control_point)(h, last, 0.0, 0.5, 0.5, false),
+                0
+            );
+            let mut n = 0;
+            assert_eq!(
+                (s.parametric_param_get_n_control_points)(h, last, 0.0, &mut n),
+                0
+            );
+            assert_eq!(n, 1);
+            assert_eq!(
+                (s.parametric_param_add_control_point)(h, last + 1, 0.0, 0.5, 0.5, false),
+                kOfxStatErrBadIndex
+            );
+        }
     }
 }

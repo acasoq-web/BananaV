@@ -3,6 +3,7 @@
 //! (`bv_timeline::ducking::LevelMeter`) over the media time it plays and a
 //! few seconds around it (so a trim keeps it).
 
+use crate::LockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -68,7 +69,7 @@ impl DuckJob {
                     let mut last = Instant::now();
                     for s in &sources {
                         let mut tick = |seconds: f64| {
-                            progress.lock().expect("progress").done += seconds;
+                            progress.locked().done += seconds;
                             if last.elapsed() > Duration::from_millis(100) {
                                 last = Instant::now();
                                 repaint();
@@ -79,13 +80,13 @@ impl DuckJob {
                         if cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        let mut p = progress.lock().expect("progress");
+                        let mut p = progress.locked();
                         match result {
                             Ok(levels) => p.results.push((s.clip, levels)),
                             Err(e) => p.errors.push((s.clip, e)),
                         }
                     }
-                    let mut p = progress.lock().expect("progress");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.done = p.total;
                     drop(p);
@@ -101,7 +102,7 @@ impl DuckJob {
     }
 
     pub(crate) fn progress(&self) -> DuckProgress {
-        self.progress.lock().expect("progress").clone()
+        self.progress.locked().clone()
     }
 
     pub(crate) fn cancel(&self) {

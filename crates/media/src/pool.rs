@@ -370,6 +370,12 @@ fn fetch(reader: &mut dyn VideoReader, ask: Ask) -> Result<Picture> {
     }
 }
 
+/// Whether `a`, worked out beforehand, is `b`: a sped-up event's times are
+/// rounded to the tick.
+fn same(a: &Ask, b: &Ask) -> bool {
+    (a.time - b.time).abs() <= Tick(64) && Ask { time: b.time, ..*a } == *b
+}
+
 /// A reader's thread: answers the pictures asked for and, while nothing is
 /// asked, decodes the next ones when the last were asked in steps forward.
 fn work(
@@ -397,6 +403,10 @@ fn work(
         .video
         .map_or(Tick::ZERO, |v| v.frame_rate.frame_duration());
     let mut forward = false;
+    // How far apart the pictures asked for going forward are: the next
+    // frames, or, sped up, those that far on.
+    let mut stride = frame;
+    let mut stepped = frame;
     // Played backward, the stretch before the picture asked for is decoded
     // beforehand (`plan`, one picture each time nothing is asked) and kept
     // until it is asked for (`behind`).
@@ -409,9 +419,9 @@ fn work(
             Err(mpsc::TryRecvError::Empty) => {
                 // Nothing asked: decode the next picture, if any is due.
                 let next = match ahead.back().map(|(a, _)| *a).or(last) {
-                    Some(from) if forward && frame > Tick::ZERO && ahead.len() < AHEAD => {
+                    Some(from) if forward && stride > Tick::ZERO && ahead.len() < AHEAD => {
                         Some(Ask {
-                            time: from.time + frame,
+                            time: from.time + stride,
                             ..from
                         })
                     }
@@ -443,7 +453,7 @@ fn work(
         }
         interrupt.store(false, Ordering::Relaxed);
         // Pictures decoded ahead that were passed by are dropped.
-        while ahead.front().is_some_and(|(a, _)| *a != ask) {
+        while ahead.front().is_some_and(|(a, _)| !same(a, &ask)) {
             let behind = ahead.front().is_some_and(|(a, _)| {
                 a.want == ask.want && a.min_size == ask.min_size && a.time < ask.time
             });
@@ -492,6 +502,14 @@ fn work(
         if !forward {
             ahead.clear();
         }
+        let step = match last {
+            Some(l) if forward && (ask.time - l.time).0 * 2 > frame.0 * 3 => ask.time - l.time,
+            _ => frame,
+        };
+        // Steps that vary tell nothing of the next one.
+        let steady = step == frame || (step - stepped).abs() <= Tick(64);
+        stride = if steady { step } else { Tick::ZERO };
+        stepped = step;
         // Backward: the stretch before it, once the last one is used up.
         let stretch = last.map_or_else(Vec::new, |l| stretch_behind(l, ask));
         if stretch.is_empty() {

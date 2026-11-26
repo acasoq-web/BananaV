@@ -19,7 +19,7 @@ static HOST: AtomicPtr<OfxHost> = AtomicPtr::new(null_mut());
 
 /// The host's suites the plug-ins use.
 #[derive(Debug)]
-pub(crate) struct Suites {
+pub struct Suites {
     pub props: &'static OfxPropertySuiteV1,
     pub effect: &'static OfxImageEffectSuiteV1,
     pub params: &'static OfxParameterSuiteV1,
@@ -31,13 +31,17 @@ pub(crate) struct Suites {
 }
 
 /// Every plug-in's `setHost`.
-pub(crate) unsafe extern "C" fn set_host(host: *mut OfxHost) {
+///
+/// # Safety
+/// Called by hosts, as the specification says: with their own structure,
+/// which stays.
+pub unsafe extern "C" fn set_host(host: *mut OfxHost) {
     HOST.store(host, Ordering::Release);
 }
 
 /// The host's suites, once it gave itself; `None` before that, or when it
 /// lacks one the plug-ins cannot do without.
-pub(crate) fn suites() -> Option<&'static Suites> {
+pub fn suites() -> Option<&'static Suites> {
     static SUITES: OnceLock<Option<Suites>> = OnceLock::new();
     let host = HOST.load(Ordering::Acquire);
     if host.is_null() {
@@ -72,20 +76,22 @@ pub(crate) fn suites() -> Option<&'static Suites> {
 /// Whether `BV_EFFECTS_TRACE` asks the plug-ins to tell what hosts give
 /// them (on the standard error), to find out why one renders wrong in a
 /// host.
-pub(crate) fn tracing() -> bool {
+pub fn tracing() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BV_EFFECTS_TRACE").is_some())
 }
 
 /// Whether `action` (a C string from the host) is `name`.
-pub(crate) fn is(action: *const c_char, name: &CStr) -> bool {
+// Only ever given what the host called a plug-in with.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn is(action: *const c_char, name: &CStr) -> bool {
     // SAFETY: hosts pass actions as C strings.
     !action.is_null() && unsafe { CStr::from_ptr(action) } == name
 }
 
 /// A property set of the host's.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Props(pub OfxPropertySetHandle);
+pub struct Props(pub OfxPropertySetHandle);
 
 impl Props {
     fn suite(self) -> Option<&'static OfxPropertySuiteV1> {
@@ -128,6 +134,8 @@ impl Props {
         }
     }
 
+    // The host keeps the pointer: it is not read here.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn set_ptr(self, name: &CStr, value: *mut c_void) {
         let Some(p) = self.suite() else { return };
         // SAFETY: as above; the host keeps the pointer, not what it points to.
@@ -235,7 +243,7 @@ impl Props {
 
 /// An image effect of the host's: a descriptor or an instance.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Fx(pub OfxImageEffectHandle);
+pub struct Fx(pub OfxImageEffectHandle);
 
 impl Fx {
     pub fn props(self) -> Props {
@@ -343,7 +351,7 @@ impl Fx {
 
 /// A parameter of the host's.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Param(pub OfxParamHandle);
+pub struct Param(pub OfxParamHandle);
 
 impl Param {
     fn suite(self) -> Option<&'static OfxParameterSuiteV1> {
@@ -515,6 +523,16 @@ impl Param {
         }
     }
 
+    /// Makes it as `from` (one of its kind), keys and all.
+    pub fn copy_from(self, from: Param) {
+        if let Some(p) = self.suite()
+            && !from.0.is_null()
+        {
+            // SAFETY: the host's parameters; no range: all of it.
+            unsafe { (p.param_copy)(self.0, from.0, 0.0, std::ptr::null()) };
+        }
+    }
+
     pub fn set_xy(self, [x, y]: [f64; 2]) {
         if let Some(p) = self.suite() {
             // SAFETY: a 2D double parameter takes two doubles.
@@ -632,7 +650,7 @@ impl Param {
 
 /// A clip of an effect instance.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Clip(pub OfxImageClipHandle);
+pub struct Clip(pub OfxImageClipHandle);
 
 impl Clip {
     /// Its region of definition at `time` (canonical coordinates: x1, y1,
@@ -724,7 +742,7 @@ impl Clip {
 
 /// How an image keeps each channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Depth {
+pub enum Depth {
     Byte,
     Short,
     Float,
@@ -732,7 +750,7 @@ pub(crate) enum Depth {
 
 /// An image the host handed out (released when dropped).
 #[derive(Debug)]
-pub(crate) struct Image {
+pub struct Image {
     handle: OfxPropertySetHandle,
     data: *mut u8,
     row_bytes: isize,
@@ -775,7 +793,7 @@ impl Drop for Image {
 
 /// Runs `f` for each row of `rows`, on the host's threads (or here, when
 /// it lends none).
-pub(crate) fn for_rows(rows: std::ops::Range<c_int>, f: &(dyn Fn(c_int) + Sync)) {
+pub fn for_rows(rows: std::ops::Range<c_int>, f: &(dyn Fn(c_int) + Sync)) {
     struct Job<'a> {
         f: &'a (dyn Fn(c_int) + Sync),
         rows: std::ops::Range<c_int>,
@@ -818,7 +836,7 @@ fn threads(cpus: Option<c_uint>, rows: usize) -> c_uint {
 }
 
 /// The property set behind an interact's handle.
-pub(crate) fn interact_props(handle: *const c_void) -> Option<Props> {
+pub fn interact_props(handle: *const c_void) -> Option<Props> {
     let s = suites()?.interact?;
     let mut p = null_mut();
     // SAFETY: the host's interact.
@@ -827,7 +845,7 @@ pub(crate) fn interact_props(handle: *const c_void) -> Option<Props> {
 }
 
 /// Asks the host to draw an interact again.
-pub(crate) fn redraw(handle: *const c_void) {
+pub fn redraw(handle: *const c_void) {
     if let Some(s) = suites().and_then(|s| s.interact) {
         // SAFETY: the host's interact.
         unsafe { (s.interact_redraw)(handle as OfxInteractHandle) };
@@ -836,7 +854,7 @@ pub(crate) fn redraw(handle: *const c_void) {
 
 /// What an overlay draws on, during its draw action.
 #[derive(Debug)]
-pub(crate) struct Draw {
+pub struct Draw {
     ctx: OfxDrawContextHandle,
     suite: &'static OfxDrawSuiteV1,
 }
@@ -924,19 +942,19 @@ impl Draw {
 
 /// A handle's ring, in screen pixels ([`Draw::handle`]), and how near the
 /// pen takes it.
-pub(crate) const HANDLE_RING: f64 = 8.0;
-pub(crate) const HANDLE_REACH: f64 = 13.0;
+pub const HANDLE_RING: f64 = 8.0;
+pub const HANDLE_REACH: f64 = 13.0;
 
 /// Whether the pen at `pen` takes a handle at `at` (canonical units; `ps`
 /// the pixel scale).
-pub(crate) fn near_handle(pen: [f64; 2], at: [f64; 2], ps: [f64; 2]) -> bool {
+pub fn near_handle(pen: [f64; 2], at: [f64; 2], ps: [f64; 2]) -> bool {
     ((pen[0] - at[0]) / ps[0]).hypot((pen[1] - at[1]) / ps[1]) <= HANDLE_REACH
 }
 
 /// Tells a double click among an interface's presses (OpenFX's pen has
 /// none): a second press soon after the first and near it.
 #[derive(Debug, Default)]
-pub(crate) struct Clicks {
+pub struct Clicks {
     last: Option<(Instant, [f64; 2])>,
 }
 

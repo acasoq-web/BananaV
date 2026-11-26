@@ -1,0 +1,17 @@
+[package]
+name = "bv-quicktime"
+description = "QuickTime's own video codecs, decoded by BananaV: Animation (run lengths) and the uncompressed Y'CbCr and RGB formats (2vuy, yuv2, v210, v410, v308, v408, r210, R10k, raw, b48r, b64a, BGRA)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 1
+wasm = true
+
+[dependencies]
+
+[lints]
+workspace = true

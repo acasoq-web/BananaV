@@ -39,6 +39,9 @@ impl Compositor {
         if !call.fx.id.starts_with(bv_effects::ID_PREFIX) {
             return false;
         }
+        if bv_banana::is_own(&call.fx.id) {
+            return self.banana_effect(enc, plugins, call, img);
+        }
         let Some(values) = plugins.0.values_at(call) else {
             return false;
         };
@@ -215,6 +218,9 @@ impl Compositor {
         if !fx.id.starts_with(bv_effects::ID_PREFIX) {
             return None;
         }
+        if bv_banana::is_own(&fx.id) {
+            return self.banana_generator(enc, m);
+        }
         let video = m.info.video.as_ref()?;
         // Turned or read with another alpha: as the processor reads it.
         if video.reading != bv_timeline::VideoReading::default() {
@@ -290,6 +296,9 @@ impl Compositor {
     ) -> Option<Img> {
         if !call.fx.id.starts_with(bv_effects::ID_PREFIX) {
             return None;
+        }
+        if bv_banana::is_own(&call.fx.id) {
+            return self.banana_transition(enc, plugins, call, (from, to), progress);
         }
         let values: Vec<(String, accel::Value)> = plugins
             .0

@@ -628,7 +628,7 @@ fn crossfade_at(p: &mut Project, track: TrackId, at: Tick, (before, after): (Tic
         if !auto {
             // Without Automatic Crossfades the event fades in over the
             // overlap by itself.
-            c.fade_in = c.fade_in.max(made);
+            c.fade_in_at_least(made);
         }
     }
 }

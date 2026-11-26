@@ -36,6 +36,9 @@ const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 const GL_DEPTH_BUFFER_BIT: u32 = 0x0100;
 const GL_STENCIL_BUFFER_BIT: u32 = 0x0400;
 const GL_ALL_ATTRIB_BITS: u32 = 0x000F_FFFF;
+const GL_PACK_ROW_LENGTH: u32 = 0x0D02;
+const GL_PACK_SKIP_ROWS: u32 = 0x0D03;
+const GL_PACK_SKIP_PIXELS: u32 = 0x0D04;
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_RGBA: u32 = 0x1908;
 const GL_UNSIGNED_BYTE: u32 = 0x1401;
@@ -46,6 +49,7 @@ const GL_DEPTH24_STENCIL8: u32 = 0x88F0;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
 const GL_DEPTH_STENCIL_ATTACHMENT: u32 = 0x821A;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+const GL_PIXEL_PACK_BUFFER: u32 = 0x88EB;
 
 #[link(name = "opengl32")]
 unsafe extern "system" {
@@ -130,7 +134,8 @@ struct PixelFormat {
 }
 
 /// The framebuffer objects' functions (OpenGL 3, or the extension), and
-/// glBlendFuncSeparate (1.4): what the card's driver gives.
+/// glBlendFuncSeparate (1.4) and glBindBuffer (1.5): what the card's
+/// driver gives.
 struct Functions {
     gen_framebuffers: unsafe extern "system" fn(i32, *mut u32),
     bind_framebuffer: unsafe extern "system" fn(u32, u32),
@@ -140,6 +145,7 @@ struct Functions {
     framebuffer_renderbuffer: unsafe extern "system" fn(u32, u32, u32, u32),
     check_framebuffer_status: unsafe extern "system" fn(u32) -> u32,
     blend_func_separate: Option<unsafe extern "system" fn(u32, u32, u32, u32)>,
+    bind_buffer: Option<unsafe extern "system" fn(u32, u32)>,
 }
 
 impl Functions {
@@ -183,6 +189,7 @@ impl Functions {
                     c"glCheckFramebufferStatusEXT",
                 )?,
                 blend_func_separate: function(c"glBlendFuncSeparate", c"glBlendFuncSeparateEXT"),
+                bind_buffer: function(c"glBindBuffer", c"glBindBufferARB"),
             })
         }
     }
@@ -418,6 +425,16 @@ pub(crate) fn drawn(
         (canvas.gl.bind_framebuffer)(GL_FRAMEBUFFER, canvas.framebuffer);
         let row = w as usize * 4;
         let mut up = vec![0u8; row * h as usize];
+        // How the plug-in left pixels packed is not in the attribute stack
+        // (it is the client's state): rows of the picture's own length,
+        // none skipped, into `up` itself (no buffer object of its own), or
+        // what is read would not fit `up`.
+        if let Some(bind_buffer) = canvas.gl.bind_buffer {
+            bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+        }
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(
             0,
@@ -436,5 +453,37 @@ pub(crate) fn drawn(
             height: h as u32,
             rgba,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How a plug-in left OpenGL packing pixels (rows of another length,
+    /// rows and pixels skipped) does not change how its drawing is read
+    /// back: every pixel, in the picture's own rows. Where the graphics
+    /// card has the OpenGL for it.
+    #[test]
+    fn a_plug_ins_pixel_packing_does_not_change_the_read_back() {
+        let whole = projection([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let drawing = drawn([8, 4], &whole, || {
+            // SAFETY: the canvas's context is current while this draws.
+            // Rows one pixel long keep what is read inside the picture
+            // even where this state is not put back.
+            unsafe {
+                glPixelStorei(GL_PACK_ROW_LENGTH, 1);
+                glPixelStorei(GL_PACK_SKIP_ROWS, 2);
+                glPixelStorei(GL_PACK_SKIP_PIXELS, 3);
+                glClearColor(1.0, 1.0, 1.0, 1.0);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+        });
+        let Some(drawing) = drawing else {
+            eprintln!("no OpenGL for overlays here: nothing to read back");
+            return;
+        };
+        assert_eq!((drawing.width, drawing.height), (8, 4));
+        assert_eq!(drawing.rgba, [255; 8 * 4 * 4], "every pixel read back");
     }
 }

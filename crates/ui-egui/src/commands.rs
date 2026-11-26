@@ -336,6 +336,8 @@ pub enum Cmd {
     CustomizeTimelineToolbar,
     /// BananaV's own: the envelopes' line, reach and points.
     EnvelopeAppearance,
+    /// BananaV's own features, switched on (Options › BananaV Mods…).
+    Mods,
     // Help
     HelpContents,
     KeyboardShortcuts,
@@ -599,6 +601,7 @@ pub(crate) fn all() -> Vec<Cmd> {
         CustomizeToolbar,
         CustomizeTimelineToolbar,
         EnvelopeAppearance,
+        Mods,
         HelpContents,
         KeyboardShortcuts,
         CheckUpdates,
@@ -762,7 +765,7 @@ impl Cmd {
             CenterOnCursor => tr("Center View Around Cursor"),
             Ripple(RippleScope::AffectedTracks) => tr("Affected Tracks"),
             Ripple(RippleScope::AffectedTracksAndMarkers) => {
-                tr("Affected Tracks, Markers, and Regions")
+                tr("Affected Tracks, Bus Tracks, Markers, and Regions")
             }
             Ripple(RippleScope::All) => tr("All Tracks, Markers, and Regions"),
             SelectAll => tr("Select All"),
@@ -980,7 +983,7 @@ impl Cmd {
             AutoRipple => tr("Auto Ripple"),
             RippleMode(RippleScope::AffectedTracks) => tr("Affected Tracks"),
             RippleMode(RippleScope::AffectedTracksAndMarkers) => {
-                tr("Affected Tracks, Markers, and Regions")
+                tr("Affected Tracks, Bus Tracks, Markers, and Regions")
             }
             RippleMode(RippleScope::All) => tr("All Tracks, Markers, and Regions"),
             IgnoreGrouping => tr("Ignore Event Grouping"),
@@ -997,6 +1000,7 @@ impl Cmd {
             KeyboardShortcuts => tr("Keyboard Shortcuts"),
             CheckUpdates => tr("Check for Software Updates…"),
             EnvelopeAppearance => tr("Envelope Appearance…"),
+            Mods => tr("BananaV Mods…"),
             About => tr("About"),
         };
         s.to_string()
@@ -1326,7 +1330,9 @@ impl Cmd {
             Undo | UndoAll => app.history.can_undo(),
             Redo => app.history.can_redo(),
             ClearHistory => app.history.can_undo() || app.history.can_redo(),
-            Delete => sel || app.track_list_selection().is_some(),
+            Delete => {
+                sel || app.track_list_selection().is_some() || app.timeline.env_picks.is_some()
+            }
             Cut | Copy | TrimStart | TrimEnd | SelectEventStart | SelectEventEnd
             | SelectionPrevEvent | SelectionNextEvent | Mute | Lock | Loop | GroupRemove
             | GroupClear | GroupSelectAll | GroupCut | GroupCopy | GroupDelete | Ripple(_)
@@ -1418,12 +1424,29 @@ impl Cmd {
                         .any(|t| t.kind == TrackKind::Video && !t.clips.is_empty())
             }
             CleanUpPrerender => !p.prerenders.is_empty(),
-            RippleMode(_) => app.auto_ripple,
+            // A mod's, while it is on (Options › BananaV Mods…).
+            UseTool(Tool::TrackSelect { .. }) => app.settings.mods.track_select,
+            Window(Tab::Transform) => app.settings.mods.transform,
+            EnvelopeAppearance => app.settings.mods.envelope_look,
+            // The ripple modes are picked before Auto Ripple goes on too
+            // (VEGAS's Help: choose a ripple type, then turn Auto Ripple
+            // on).
             _ => true,
         }
     }
 
+    /// Runs the command. The timeline's view follows the edit cursor when
+    /// the command moved it (the arrows past the view's edge, Go To, a
+    /// marker's number).
     pub fn run(self, app: &mut BananaApp) {
+        let from = app.cursor;
+        self.act(app);
+        if app.cursor != from {
+            app.timeline.reveal_cursor = true;
+        }
+    }
+
+    fn act(self, app: &mut BananaApp) {
         use Cmd::*;
         match self {
             New => app.request(Pending::New),
@@ -1450,7 +1473,7 @@ impl Cmd {
             ImportProjectMedia => crate::interchange_ui::import_project_media(app),
             ImportEdl => crate::interchange_ui::import_edl(app),
             ImportOtio => app.request(Pending::ImportOtio),
-            ImportVeg => crate::veg_ui::import(app),
+            ImportVeg => app.request(Pending::ImportVeg),
             ImportXml => app.request(Pending::ImportFcp(false)),
             ImportClosedCaptioning => app.import_closed_captioning(),
             ImportFcpxml => app.request(Pending::ImportFcp(true)),
@@ -1486,6 +1509,8 @@ impl Cmd {
                     let tracks = app.tracks_with(t);
                     app.delete_tracks(&tracks);
                 }
+                // Envelope points picked: they go (the events stay).
+                None if app.timeline.env_picks.is_some() => app.delete_envelope_picks(),
                 None => app.delete_selection(app.auto_ripple),
             },
             Trim => app.trim_to_loop(),
@@ -1911,6 +1936,7 @@ impl Cmd {
             KeyboardShortcuts => app.menu_dialogs.more.help = Some(1),
             CheckUpdates => app.check_updates(true),
             EnvelopeAppearance => app.open_envelope_look(),
+            Mods => app.open_mods(),
             About => app.dialogs.about = true,
         }
     }
@@ -2939,6 +2965,98 @@ mod tests {
         assert_eq!(app.snapping, !snapping);
         press(&ctx, &mut app, CMD_SHIFT, Key::U);
         assert!(app.project().ignore_groups);
+    }
+
+    #[test]
+    fn the_view_follows_a_cursor_a_key_moves_past_its_edge() {
+        use bv_core::Tick;
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.load_demo();
+        frame(&ctx, &mut app, vec![]);
+        // Zoomed in: a few seconds show.
+        app.timeline.ticks_per_px = Tick::from_seconds(1).0 as f64 / 200.0;
+        frame(&ctx, &mut app, vec![]);
+        let (start, width) = app.timeline.view_for_test();
+        let per_px = app.timeline.ticks_per_px;
+        let px = |t: Tick, start: Tick| ((t - start).0 as f64 / per_px) as f32;
+        // The cursor near the right edge, then the Right Arrow on and on.
+        let rate = app.frame_rate();
+        let edge = start + Tick((f64::from(width - 30.0) * per_px) as i64);
+        app.seek(rate.snap_nearest(edge));
+        frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.timeline.view_for_test().0,
+            start,
+            "a seek alone moves no view"
+        );
+        for _ in 0..40 {
+            press(&ctx, &mut app, ALT, Key::ArrowRight);
+        }
+        frame(&ctx, &mut app, vec![]);
+        let (now, width) = app.timeline.view_for_test();
+        assert!(now > start, "the view went on with the cursor");
+        let x = px(app.cursor, now);
+        assert!(
+            x > width - 60.0 && x <= width - 10.0,
+            "the cursor stays a little inside the right edge: {x} of {width}"
+        );
+        // And back: Home, the project's start in sight again.
+        press(&ctx, &mut app, CMD, Key::Home);
+        frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.cursor, Tick::ZERO);
+        assert_eq!(app.timeline.view_for_test().0, Tick::ZERO);
+    }
+
+    #[test]
+    fn a_key_no_one_took_closes_nothing() {
+        // egui's own Ctrl+Q — with Shift and Alt too — closed the window
+        // whenever the keyboard map had not taken the key (the keys in
+        // another window, a text being typed): Insert › Audio Track, Video
+        // Track and Adjustment Track's keys ended BananaV.
+        let closes = |ctx: &egui::Context, modifiers: Modifiers| {
+            let event = |pressed| egui::Event::Key {
+                key: Key::Q,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            };
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 960.0),
+                )),
+                events: vec![event(true), event(false)],
+                ..Default::default()
+            };
+            // Nothing drawn: no one takes the key.
+            let mut out = ctx.run_ui(raw, |_| {});
+            out.textures_delta.clear();
+            out.viewport_output.values().any(|v| {
+                v.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::ViewportCommand::Close))
+            })
+        };
+        // egui left alone does close on each of them.
+        for modifiers in [CMD, CMD_SHIFT, CMD_ALT_SHIFT] {
+            assert!(
+                closes(&egui::Context::default(), modifiers),
+                "egui's own {modifiers:?} and Q"
+            );
+        }
+        let ctx = egui::Context::default();
+        let _app = BananaApp::new(ctx.clone());
+        for modifiers in [CMD, CMD_SHIFT, CMD_ALT_SHIFT] {
+            assert!(
+                !closes(&ctx, modifiers),
+                "{modifiers:?} and Q close the window"
+            );
+        }
+        // Nor does egui zoom the interface by itself (the scale is the
+        // Preferences').
+        assert!(!ctx.options(|o| o.zoom_with_keyboard));
     }
 
     #[test]

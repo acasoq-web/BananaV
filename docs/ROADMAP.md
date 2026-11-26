@@ -982,6 +982,255 @@ piece of interface.
   and Delete Track deletes them all, in one undo.
 ## Awaiting the maintainer's review
 
+- **The user's list of 2026-11-25** — Open Folder after a render (the
+  path alone between quotes: Explorer opened Documents); the preview's
+  speed picked beside its quality and changed by K and L as it plays,
+  the pitch kept (`tempo.rs`); Properties only from View › Window; events
+  sped up and faster playback smooth (strides in the decoders, the pool
+  and the preview); the Render window's overflowing rows and its tree;
+  the timeline's scroll bars (wheel, presses beside the thumb); no sleep
+  while rendering. A user's report of broken pixels once or twice in a
+  half-hour render: nothing in BananaV found to break them — half an hour
+  rendered with NVENC and compared frame by frame is whole —; made safer
+  where it could come from: frames a card decodes damaged, errors drawn
+  as the offline color, AMD's encoder reading a frame still being copied.
+  Not tried: AMD and Intel cards, the user's own project.
+
+- **The user's second list of 2026-11-25** — Video FX's previews move
+  under the pointer when their effect does (`effect_sample_at` on a
+  thread); K slower in every map, saved maps too (`keymap::MOVED`); the
+  pitch-kept speeds remade (Hann windows of 15 ms, the natural
+  continuation kept; measured against FFmpeg's `atempo`); letters and
+  arrows in Explorer, Project Media and the plug-in windows
+  (`browse.rs`); a track's volume and pan half and half; envelopes over
+  the Opacity/Gain line take the press but on its handle, one tooltip
+  (`env_hit`); a user's report: a double-click held on an
+  envelope's line and dragged pulls the new point (it extended the time
+  selection); the mod Envelope points with events (`env_with`,
+  `carry_picked_points`) and the mods' descriptions folded; the Transform
+  mod with the wheel's zoom and pan; keyframes in the Properties window
+  (the FX window's controllers). The users' render reports: no general
+  slowness found (1440p60 on NVENC at 155 frames a second here); a crawl
+  at recordings' ends (sound past the picture) fixed, an encoder that
+  stops answering now fails the render after 20 s (watchdog), the
+  progress shows the card and the encoder. Not tried: the users' own
+  projects and cards, AMD and Intel encoders.
+
+- **Banana Split, the pack of effects (2026-11-25)** — the user's request:
+  BananaV's own pack for 0.4.0, made for the best preview, smoothness and
+  correctness. Crate `bv-banana`: 267 effects (24 color, 19 blur and
+  sharpen, 25 distort, 27 light, 38 generate, 34 stylize, 18 time, 32
+  dissolves, 31 wipes, 19 motion) with over 700 presets, all in English
+  and pt-BR; see [architecture.md](architecture.md#banana-split). Sizes
+  are parts of the frame (previews match renders), each effect a graph of
+  small kernels written once, the processor's copy generated from them.
+  Not in it yet: effects needing a second clip as a filter. Checked: every preset finite and alike on
+  both compositors, every setting changing something, previews against
+  full frames; not checked: the interface by a person, AMD and Intel
+  cards, macOS (its shaders translate), Linux. Still open: pictures of
+  other frames for track and output effects (they get the frame's own, as
+  other plug-ins do there), and an effect's own thumbnails in motion.
+  Lightning remade after the user tried it ("não tem controlador pra
+  adicionar mais controladores no meio", "distorce dependendo o tamanho"):
+  it was a wave over the straight line between its ends, with a straying
+  of one size for any length — a short bolt was a scribble and its glow
+  combed. It is a path now, through up to ten points between its ends
+  added and taken away on the preview, as crooked at any length and curve
+  (measured), as thick everywhere, its glow the same at any resolution;
+  Lightning Storm and Lightning Dissolve draw with it.
+
+- **More MOV support (2026-11-18)** — the user's request: "Adicione
+  suporte a .MOV". Tried first with 60 `.mov` files of every codec FFmpeg
+  writes into one and the user's own. Now: the track header's matrix sets
+  the media's Rotation at import (a phone's portrait video standing, as
+  VEGAS's Help says it detects media properties; `bv_mp4::facts`'s
+  `rotation`); on Windows, BananaV's own decoders on the system's packets
+  (`crates/media/src/mov.rs`): QuickTime Animation and uncompressed video
+  (new crate `bv-quicktime`), PNG and TIFF frames, µ-law/A-law/IMA 4:1
+  sound (`bv_wav::ima4_packet`); unsupported codecs named by the file's
+  code; Linux's import dialogs take `.MOV` in capitals. Checked against
+  ffmpeg (`importar`'s `mov_formats`: RGB formats 0.0–0.5 levels from its
+  frames, 4:4:4 Y′CbCr 0.1, 4:2:2 1.5 for the chroma's widening; the sound
+  with no delay; the turned video's frames). Left out on Windows (offered
+  to the user): DNxHD/HR, CineForm, 10-bit and 4:2:2 H.264, 4:2:2 HEVC,
+  DV/MPEG-2/JPEG 2000 in MOV, and MOVs the system will not open (AC-3,
+  E-AC-3, FLAC, Opus, VP9, AV1) — an own MOV reader, or FFmpeg on
+  Windows too.
+- **A command line and MCP for AI agents (2026-11-18)** — the user's
+  request: "suporte a CLI e MCP completo para agentes de IA".
+  `crates/ui-egui/src/agents`: 50 tools on a `BananaApp` (project, media,
+  tracks, events, markers, envelopes, effects and parameters with
+  keyframes, transitions, generated media, JSON model read and patched
+  with RFC 6901/6902, frames as pictures, renders, undo, the keyboard
+  map's commands), each edit an undo step, arguments checked against
+  their schemas. The command line (`bananav <command>`; `apps/cli`'s
+  `bananav-cli.exe` on Windows, a console program that starts BananaV
+  beside it) and an MCP server of BananaV's own (JSON-RPC on the standard
+  input and output, revisions 2024-11-05 to 2025-11-25, its output kept
+  clean by `bv_platform::protocol_output`). Headless, nothing of the
+  user's is written; live (Options › BananaV Mods › AI agents), the
+  window listens on 127.0.0.1 with a key only the user reads, runs the
+  calls between frames and asks Allow/Deny before saving, rendering,
+  writing a picture or opening another project. Checked: the tools on the
+  demo project (an effect keyframed, a title, a frame, a WAV render), the
+  MCP server's lines, the window's calls and question, and the real
+  program through pipes. Left out: OpenTimelineIO bundles open only in the
+  window, BananaV's audio effects and VST plug-ins change over time by
+  envelopes (no `at` keyframes), a `run` script's steps cannot use the
+  ids earlier steps made.
+- **Pan/Crop masks' feathers without bands (2026-11-17)** — the user's
+  report: a feather's fade looked coarse. The blur was rounded to whole
+  levels and the one-way bend (In, Out) is steep in its tail, so its
+  steps came out up to five levels apart with flat strips up to eighteen
+  pixels wide between them. `mask_raster::feather` now keeps the blur at
+  full precision to the end (the coverage in floats where a feather
+  reaches, whole levels elsewhere as before), bends it through a monotone
+  cubic over the measured curve's rising points (`BEND`, never a level
+  from them) and runs its pass down the columns on every core too
+  (`a_wide_feather_fades_without_bands`). Against the renders
+  (`pan_crop_renders`): the masks without feathers stay pixel-identical,
+  the feathered ones a level or two off (BananaV's own: the renders keep
+  the steps). A Discord report from 0.3.0 — Feather type and Feather (%)
+  picked in the properties went back at once — was the workspace putting
+  the masks back, fixed on 2026-11-14 (`771ec15`); its steps are a test
+  now (`the_mask_properties_set_the_feather`), and a feather type picked
+  there at 0 % takes 5 %, as the small toolbar's.
+- **Several envelope points picked (2026-11-17)** — the user's request:
+  Ctrl+click adds or takes away a point, Shift+click picks those from the
+  last one clicked (Ctrl+Shift adds them), on track and event envelopes
+  (`envelopes::Picks`, drawn white). Dragging one moves them all by the
+  same time and share of the lane, held between the points left out
+  (`Drag::EnvPoints`, `Project::move_envelope_points`); Delete and the
+  point's menu (Delete, curves, preset values) act on them all
+  (`remove_envelope_points`). VEGAS picks several only with its Envelope
+  tool's rectangle (its Help, "Editing Tool"): BananaV's Ctrl and Shift
+  work with the Normal Edit tool too; the rectangle is not made yet. A
+  drag from a point no longer scrubs with Ctrl
+  (`envelope_points_are_picked_with_ctrl_and_shift`).
+- **Arabic, a partial language (2026-11-17)** — `i18n/ar.rs` (`complete:
+  false`): the same 1,614 texts as the other partial languages, CLDR's six
+  plural forms (zero, one, two, few, many, other). Right to left: egui
+  0.36 shapes each run of text one font draws (harfrust: the letters
+  joined, the run read from the right) but lays a line's runs out left to
+  right, so `i18n/rtl.rs` puts each line's runs in visual order once, when
+  the catalog is read (UAX #9 simplified: Latin words, numbers and
+  placeholders in their own order, neutrals between runs, brackets
+  mirrored), and `i18n::os_text` gives what the system lays out itself
+  (OS windows' and file dialogs' titles, file filters) its reading order
+  back. Left as they are: the layout stays left to right (a menu's icons
+  on the left), a text a widget wraps is not reordered across its lines,
+  and a text joined after translation (a render template's name and its
+  encoder) keeps its parts' order. The letters come from the computer's
+  fonts (Segoe UI, Tahoma, Arial; Geeza Pro on macOS; Noto Sans Arabic or
+  DejaVu Sans on Linux), loaded for the first frame. Captures:
+  `telas_idiomas` (`BV_TELAS_LANG=ar` for one language, `BV_TELAS_PPP=3`
+  to look at the letters closely).
+- **The editing tools' menu (2026-11-17)** — the timeline toolbar's Normal
+  Edit Tool has a ▾, as VEGAS's (the user's print): Normal Edit, Shuffle,
+  Slip, Slide, Time Stretch/Compress and Split Trim with their icons and
+  a dot by the one in use; the button shows and picks the last one chosen
+  (`BananaApp::edit_mode`, `Tool::EDIT_MODES`). Five new icons of
+  BananaV's own (`ShuffleTool`, `SlipTool`, `SlideTool`, `StretchTool`,
+  `SplitTrimTool`).
+- **A group's playback rate (2026-11-17)** — a report: Ctrl+dragging an
+  edge of a grouped event changed that event's rate alone and moved the
+  others with the edge, so the group came apart or overlapped.
+  `Edit::stretch_group` scales the whole group about its start (its end
+  when the drag is at an event's start): each rate times the same factor,
+  each start and end placed on the scale, so butted events stay butted
+  (`a_stretched_group_stays_together`).
+- **Zoomed-in timeline lag (2026-11-17)** — a report, confirmed: with
+  waveforms shown, the closer the zoom the slower each frame (22 ms at the
+  closest, against about 3 ms zoomed out): a shape for every pixel column
+  of each audio event, and the detail blocks searched sample by sample.
+  The columns are one mesh an event and the blocks read by runs: about
+  3 ms at every zoom (`zoomed_in_waveforms_cost_a_shape_an_event`).
+- **Drags held while the cursor moves (2026-11-14)** — a report from
+  macOS: keyframes made between two Pan/Crop keyframes just by moving the
+  needle. A drag on the workspace whose release never came (macOS drops
+  it when the pointer is let go just outside the window; fixed in the
+  vendored egui-winit) went on writing what it took at the press at
+  every time the needle passed. Drags now keep the time they began at
+  (Pan/Crop box and masks, Track Motion 2D and 3D, the Transform mode);
+  the mask properties' edits, discarded by the workspace drawn after
+  them, apply. Not checked on a Mac yet.
+- **Pan/Crop needle during playback, transport keys in the FX window
+  (2026-11-14)** — with Sync Cursor the keyframe controller's needle
+  follows the playback position (it stayed at the edit cursor), and a
+  click or drag in the controller while playing moves playback there (as
+  the timeline's ruler and needle). Space, Shift+Space, Enter and Esc
+  work while the FX window has the keyboard. Track Motion's window and
+  the plug-ins' keyframe controllers still show the edit cursor while
+  playing, and Track Motion's window does not take these keys yet.
+- **Auto Ripple's modes on its button (2026-11-14)** — from the
+  maintainer's print: the ▾ beside the Auto Ripple toolbar button, its
+  menu's three modes (VEGAS's Help, "Post-edit ripple"), picked with Auto
+  Ripple off too; the middle one renamed "Affected Tracks, Bus Tracks,
+  Markers, and Regions". Ripples (rippled delete and cut, Post-Edit
+  Ripple) move the tracks' envelopes and keyframes, and with the two wider
+  modes the bus tracks'. Not done: the menu's underlined access letters
+  (no BananaV menu draws them), and its unpicked modes show an empty ring
+  as BananaV's other menus do (the print shows nothing there). Auto
+  Ripple still ripples only deleting and cutting, not trims, moves or
+  pastes.
+- **BananaV Mods, Track Select tools, [Premiere Pro] keys (2026-11-14)**
+  — Options › BananaV Mods… with a box for each of BananaV's own features,
+  all off at first: Transform (window and preview mode), Envelope
+  Appearance, and the new Track Select Forward/Backward tools (A,
+  Shift+A; Shift: one track, Alt+Shift: groups left out; dragging moves
+  them all; pointers of BananaV's). Customize Keyboard's "[Premiere Pro]"
+  map: about 70 commands with that editor's default keys. Not done yet:
+  the tools' toolbar buttons; that editor's commands BananaV lacks (ripple
+  trims Q/W, ripple delete, 5-frame steps, select clip at playhead, lift
+  and extract, match frame, the Enter render…). Which other features
+  belong among the mods is for the maintainer to say.
+- **SVG import (2026-11-16)** — `.svg` and `.svgz` as stills, BananaV's own
+  reader and renderer from W3C's SVG 1.1 (`crates/image/src/read/svg`),
+  drawn up to 3840 pixels and 8.3 million (a 4K frame's) so they stay
+  sharp; checked against a browser's render on design-tool exports
+  (gradients, masks with `mask-type`, clip paths). Not drawn yet: text
+  (`<text>`), filters (blur, shadows), patterns, markers; no animation
+  (SVG's SMIL), no per-project resolution (always the 4K size).
+
+- **Structural review (2026-11-13)** — eight read-only audits (data
+  safety, the engine's threads, the interface's per-frame work, file
+  readers, plug-in hosts, frames, the project model, audio), their
+  findings checked and fixed with tests: projects and settings written
+  whole (`safe_file.rs`, `.bak`, `.damaged`), damaged projects mended
+  (`Project::repair`), the autosave copy's lifecycle and lock, a project
+  never replaced without "Save changes?", what windows ask while the
+  layout or the dialogs draw no longer lost, jobs and the render ending on
+  a panic (`settled`, `LockExt`), the history's revision keeping the
+  engine's copy, the title's star and the timeline's copy, the exact
+  preview frame (`FrameKey`), the readers' bounds and pixel budget, the
+  mixer's automation, latency and NaN fixes, the plug-in hosts' crash
+  paths, the dev profile's debug information (`target/debug` had grown to
+  360 GB). What is left is under Next, "Structural work".
+
+- **Keys, keyframe controllers, markers and the view (2026-11-13)** —
+  egui's own Ctrl+Q (it closed the window whenever the keyboard map had
+  not taken the key, Shift and Alt included) and its Ctrl+Plus/Minus/0
+  zoom are off (`BananaApp::new`): the keys are the keyboard map's alone.
+  The Video Media Generators window has the keyframe controller under its
+  settings once a parameter is animated (`generated_media.rs`, as the FX
+  window's; a color's row shows the color along the time, `ofx_keys.rs`).
+  The bars over the tracks in VEGAS's order, measured on the user's print
+  (`timeline/mod.rs`): the marker bar (24 points), the loop region's (7),
+  the ruler; the flags' tails end in the loop region's bar and their lines
+  (the flag's color between two dark ones) go down the ruler and the
+  tracks (`marker_flag::TIMELINE`); a picked flag is grey within a ring
+  of its color. On the marker bar a double-click between flags selects
+  the time between the two markers around it (no flag: the whole
+  project) and a drag from a spot with no flag makes the time selection
+  (`bars::between_markers`); markers are made with M and the bar's menu.
+  The view follows the edit cursor a command moved out of it
+  (`TimelineView::follow_cursor`, `follow_start`). A tab shows the moving
+  pointer only while it is held (`vendor/egui_dock`). A dialog's own
+  window draws once a frame (`floating.rs`: egui's second pass left it
+  empty). `BANANAV_OPEN` takes `Review.Demo`, `Review.Transition`,
+  `Review.GeneratedMedia` and `Review.Animated` to look at those windows
+  as OS windows. Not reproduced: the controller missing in a
+  transition's window (it shows in the tests and in the real window).
 - **Interface brightness, docking, Transform mode (2026-11-09)** —
   `theme::shown` (each interface type's greys moved ±40 %, Preferences ›
   Display, live while the window is open); egui_dock's `HighlightedAreas`
@@ -2976,6 +3225,35 @@ items move up to Done.
 
 ## Next
 
+- **Structural work** (from the review of 2026-11-13; ordered by payoff):
+  the project as `Arc` parts in the history (`Arc<Track>`, `make_mut`),
+  so undo shares what an edit left alone (today up to 500 whole copies)
+  and equality short-cuts; an id index (event → track and place, media →
+  place) rebuilt per revision, for the lookups inside loops over the
+  selection and the drag; one `Job<P>` for the engine's background jobs
+  (ten hand-written copies; Auto Ducking, the Loudness scan, proxies and
+  prerender still wait for ever after a panic); an `Engine` project
+  lifecycle (caches and jobs per project, the thumbnails' `shown` map and
+  waveforms bounded by bytes); the card's failures per frame instead of
+  for the session (an 8K frame over the card's limit turns it off until
+  Preferences are applied again), buffers reused within a frame, idle
+  painters' memory released; the audio device lost while playing (the
+  transport stays "playing"), playback restarted when the project's
+  sample rate or channels change, the Master bus's latency compensated,
+  latency compensation primed (the first samples after a start or a seek
+  are silent), a nested project's audio cached when it is resampled, a
+  shared layer for the audio effects (smoothing, delay lines, reset);
+  the 32-bit bridge's editors without fatal polls (a plug-in's dialog
+  freezes BananaV for 30 s, then the plug-in is killed) and its protocol
+  off the child's standard output; the remaining unguarded plug-in calls
+  (OFX `setHost`, most VST 3 controller and view calls); one time-strip
+  widget for the six keyframe and ruler implementations; a request queue
+  in place of taking the layout and dialogs out of the app while they
+  draw; `BananaApp` (173 fields) in parts with a small dialog trait;
+  integer PCM written on the 2^(bits−1) grid it is read on; the
+  interface's test programs in two binaries instead of ten (about 30 s of
+  every interface build).
+
 - **The VEGAS 2026 documentation audit's work order** (the interactive
   report keeps it, with the Help's topics for each item): Titles & Text
   and the Compositors window; compositing modes and parent/child tracks;
@@ -3046,9 +3324,11 @@ items move up to Done.
 - **Render formats still greyed out** — MPEG-2 (DVD, Blu-ray), Ogg Vorbis,
   Dolby Digital AC-3 where Windows has no encoder, AI Auto Reframe.
 - **Import formats still missing** — MXF, FLV, raw DV and MPEG-2
-  elementary streams; DNxHD/HR, CineForm, QuickTime Animation, HuffYUV,
-  FFV1, H.264 4:2:2 and 10-bit (Windows has no decoder for them; FFmpeg
-  decodes them on Linux); E-AC-3, DTS, WavPack, TTA on Windows; JPEG 2000, PCX, PPM, QOI, SGI; EXR's DWAA/DWAB/B44
+  elementary streams; DNxHD/HR, CineForm, HuffYUV, FFV1, H.264 4:2:2 and
+  10-bit, HEVC 4:2:2, and DV, MPEG-2 and JPEG 2000 in MOV (Windows has no
+  decoder for them; FFmpeg decodes them on Linux); MOV files with AC-3,
+  E-AC-3, FLAC or Opus sound or VP9/AV1 video, which Windows will not
+  open (an own MOV reader would); E-AC-3, DTS, WavPack, TTA on Windows; JPEG 2000, PCX, PPM, QOI, SGI; EXR's DWAA/DWAB/B44
   compression; Blackmagic RAW, RED R3D, ProRes RAW. Animated WebP and APNG
   come in as stills. Xvid AVIs with B-frames show their frames one late.
 - **Codecs in pure Rust** from the public specifications: H.264, HEVC,

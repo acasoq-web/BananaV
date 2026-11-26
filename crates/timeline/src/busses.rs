@@ -62,7 +62,10 @@ pub struct MappedStrip {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Send {
     pub to: SendTo,
-    /// Its level (dB; at or under −96, nothing).
+    /// Its level (dB; at or under −96, nothing). A send starts at no
+    /// level, −∞, which a project file has no number for: it is written
+    /// as `null` and read back as −∞.
+    #[serde(deserialize_with = "level_or_none")]
     pub gain_db: f32,
     /// Taken before the volume and the mute (a track's after its effects,
     /// a bus's before its pan); else after them.
@@ -83,6 +86,12 @@ fn one() -> f32 {
 
 fn is_one(v: &f32) -> bool {
     *v == 1.0
+}
+
+/// A send's level as a project file has it: a number of dB, or `null` for
+/// no level (−∞).
+fn level_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(d)?.unwrap_or(f32::NEG_INFINITY))
 }
 
 impl Send {
@@ -976,6 +985,41 @@ mod tests {
         assert!(p.remove_fx_chain(fx));
         assert!(p.track(audio).unwrap().sends.is_empty());
         p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn sends_left_at_no_level_keep_in_the_project_file() {
+        let (mut p, audio) = project();
+        let bus = p.add_bus().unwrap();
+        let fx = p.add_fx_chain(Vec::new()).unwrap();
+        // Each at no level, and kept for what else it says: a track's taken
+        // after the volume, a bus's and an input bus's before it.
+        let track_send = Send {
+            pre_volume: false,
+            ..Send::new(SendTo::Bus(bus))
+        };
+        assert!(p.set_send(audio, track_send));
+        let early = Send {
+            pre_volume: true,
+            ..Send::of_bus(SendTo::Fx(fx))
+        };
+        assert!(p.set_bus_send(bus, early));
+        let input = p.add_input_bus(crate::model::RecordInput::default());
+        assert!(p.set_input_bus_send(input.unwrap(), early));
+        assert_eq!(p.track(audio).unwrap().sends, vec![track_send]);
+        assert_eq!(track_send.gain_db, f32::NEG_INFINITY);
+        p.check_invariants().unwrap();
+        // The file has no number for it; it opens with the same sends.
+        let back = Project::from_json(&p.to_json()).expect("the project opens again");
+        back.check_invariants().unwrap();
+        assert_eq!(back.track(audio), p.track(audio));
+        assert_eq!(back.busses, p.busses);
+        assert_eq!(back.input_busses, p.input_busses);
+        // A level is still a number, and a file without one is refused.
+        let leveled: Send =
+            serde_json::from_str(r#"{"to":{"Bus":1},"gain_db":-6.5,"pre_volume":true}"#).unwrap();
+        assert_eq!(leveled.gain_db, -6.5);
+        assert!(serde_json::from_str::<Send>(r#"{"to":{"Bus":1},"pre_volume":true}"#).is_err());
     }
 
     #[test]

@@ -1643,6 +1643,9 @@ pub struct UiSettings {
     /// timeline after each edit (else Refresh Storyboard does).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub storyboard_auto_sync: bool,
+    /// Options › BananaV Mods…: BananaV's own features switched on.
+    #[serde(default)]
+    pub mods: crate::mods::Mods,
     /// File › Copy Media with Project: Save As copies the project's media
     /// next to the project file.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1674,6 +1677,10 @@ pub struct UiSettings {
     pub details_presets: Vec<crate::tabs::details::DetailsPreset>,
     #[serde(skip)]
     path: Option<PathBuf>,
+    /// Where the settings file went when it could not be read at start
+    /// (these are then the defaults): told once, never saved.
+    #[serde(skip)]
+    pub(crate) damaged: Option<PathBuf>,
 }
 
 fn is_zero(v: &f32) -> bool {
@@ -1996,18 +2003,25 @@ fn default_path() -> Option<PathBuf> {
 }
 
 impl UiSettings {
+    /// The interface's language from the user's settings, nothing else
+    /// taken in (the command line's messages: in it).
+    pub(crate) fn apply_language_only() {
+        crate::i18n::set_language(UiSettings::load().language);
+    }
+
     pub fn load() -> UiSettings {
         let path = default_path();
-        let mut s: UiSettings = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            // The first time: the welcome screen, to choose the language
-            // and start a project.
-            .unwrap_or_else(|| UiSettings {
-                show_welcome: true,
-                ..UiSettings::default()
-            });
+        let (kept, damaged) = path
+            .as_deref()
+            .map(crate::safe_file::load_json::<UiSettings>)
+            .unwrap_or_default();
+        // The first time: the welcome screen, to choose the language and
+        // start a project.
+        let mut s = kept.unwrap_or_else(|| UiSettings {
+            show_welcome: true,
+            ..UiSettings::default()
+        });
+        s.damaged = damaged;
         s.path = path;
         s.layouts.resize(10, None);
         s.prefs.follow_new_defaults();
@@ -2062,7 +2076,7 @@ impl UiSettings {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        crate::safe_file::write(path, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Keeps `session` and writes it into the settings' file alone: what
@@ -2084,7 +2098,7 @@ impl UiSettings {
         let session = serde_json::to_value(&self.session).map_err(|e| e.to_string())?;
         fields.insert("session".into(), session);
         let json = serde_json::to_string_pretty(&on_disk).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        crate::safe_file::write(path, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Moves `path` to the top of the recent list.

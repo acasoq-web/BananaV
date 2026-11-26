@@ -1,0 +1,26 @@
+[package]
+name = "bv-banana"
+description = "Banana Split: BananaV's own pack of creative effects, transitions and generators, drawn by the graphics card and the processor from one set of kernels."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.bananav]
+layer = 2
+
+[dependencies]
+bv-core.workspace = true
+bv-effects.workspace = true
+bv-ofx-sys.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+bv-ofx.workspace = true
+bv-png.workspace = true
+# The kernels' generator (`gen/gen.rs`): reads them as wgpu does.
+naga = { version = "30", features = ["wgsl-in", "msl-out"] }
+
+[lints]
+workspace = true

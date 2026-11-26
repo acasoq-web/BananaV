@@ -2,7 +2,9 @@
 //! ABGR and luma of 8, 10, 12 and 16 bits, packed or filled (methods A and
 //! B), either byte order.
 
-use super::{Picture, PictureData, ReadError, Result, corrupt, unsupported};
+use super::{
+    Picture, PictureData, ReadError, Result, checked_size, corrupt, pixel_count, unsupported,
+};
 
 pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let be = d.starts_with(b"SDPX");
@@ -30,6 +32,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     if width == 0 || height == 0 || width > 1 << 16 || height > 1 << 16 {
         return corrupt("DPX size");
     }
+    let pixels = pixel_count(width, height)?;
     let descriptor = *d.get(800).ok_or_else(bad)?;
     let transfer = *d.get(801).ok_or_else(bad)?;
     let bits = *d.get(803).ok_or_else(bad)? as usize;
@@ -55,7 +58,14 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let n = order.len();
     let max = ((1u32 << bits) - 1) as f32;
     let data = d.get(data_at..).ok_or_else(bad)?;
-    let mut values = Vec::with_capacity(width * height * n);
+    let samples = checked_size(pixels, n)?;
+    // The samples are all in the file, or it is cut short: each takes its
+    // bits at least, however they are packed. Their room is not made on
+    // the header's word alone.
+    if (data.len() as u64) * 8 < samples as u64 * bits as u64 {
+        return Err(bad());
+    }
+    let mut values = Vec::with_capacity(samples);
     match (bits, packing) {
         (8, _) => {
             // Rows padded to 32 bits.
@@ -139,8 +149,8 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
             }
         }
     }
-    let mut rgba = vec![0u16; width * height * 4];
-    for p in 0..width * height {
+    let mut rgba = vec![0u16; checked_size(pixels, 4)?];
+    for p in 0..pixels {
         let px = &values[p * n..p * n + n];
         let to16 = |v: u32| ((v as f32 / max) * 65535.0).round() as u16;
         let out = &mut rgba[p * 4..p * 4 + 4];
@@ -194,5 +204,44 @@ mod tests {
                 assert!((a[c] as i32 - b[c] as i32).abs() <= 64, "{a:?} vs {b:?}");
             }
         }
+    }
+
+    /// The writer's 6×4 file with another size in its header.
+    fn claiming(width: u32, height: u32) -> Vec<u8> {
+        let px = vec![0u16; 6 * 4 * 4];
+        let mut d = dpx(
+            &Image {
+                width: 6,
+                height: 4,
+                pixels: Pixels::Rgba16(&px),
+                alpha: false,
+            },
+            "test",
+        );
+        assert_eq!(&d[..4], b"SDPX");
+        d[772..776].copy_from_slice(&width.to_be_bytes());
+        d[776..780].copy_from_slice(&height.to_be_bytes());
+        d
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        assert!(matches!(
+            super::read(&claiming(65_536, 65_536)),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn samples_missing_from_the_file_are_refused() {
+        // Within the budget, in a file that holds 6×4 pixels; and a row
+        // more than it holds.
+        for (width, height) in [(20_000, 20_000), (6, 5)] {
+            assert!(matches!(
+                super::read(&claiming(width, height)),
+                Err(crate::read::ReadError::Corrupt(_))
+            ));
+        }
+        assert!(super::read(&claiming(6, 4)).is_ok());
     }
 }

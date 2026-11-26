@@ -6,6 +6,7 @@
 //! format's writer: BananaV's own (MP4/MOV, WAV, images…) fed by the
 //! encoders of this computer (processor or graphics card).
 
+use crate::LockExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -471,6 +472,9 @@ impl RenderJob {
                 // Plug-in effects run on it.
                 .stack_size(bv_ofx::PLUGIN_STACK)
                 .spawn(move || {
+                    // Nobody using the computer, it would go to sleep in
+                    // the middle of a long one.
+                    let _awake = bv_platform::KeepAwake::new("Rendering");
                     let started = Instant::now();
                     let mut painter =
                         crate::accel::Painter::new(accel, crate::plugins::Purpose::File);
@@ -481,21 +485,26 @@ impl RenderJob {
                     if let Some((_, temp)) = &swap {
                         s.path = temp.clone();
                     }
-                    let result = run(
-                        &project,
-                        &s,
-                        &progress,
-                        &cancel,
-                        &shown,
-                        &repaint,
-                        started,
-                        &mut painter,
-                    );
+                    // A panic (an effect's, an encoder's) ends the render
+                    // with an error, not with a window waiting for ever.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run(
+                            &project,
+                            &s,
+                            &progress,
+                            &cancel,
+                            &shown,
+                            &repaint,
+                            started,
+                            &mut painter,
+                        )
+                    }))
+                    .unwrap_or_else(|_| Err(crate::STOPPED.into()));
                     let result = match swap {
                         Some((target, temp)) => swapped(result, &target, &temp, &cancel),
                         None => result,
                     };
-                    let mut p = progress.lock().expect("progress");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.elapsed_secs = started.elapsed().as_secs_f64();
                     p.cancelled = cancel.load(Ordering::Relaxed);
@@ -520,17 +529,25 @@ impl RenderJob {
     pub(crate) fn show_video(&self, on: bool) {
         self.shown.on.store(on, Ordering::Relaxed);
         if !on {
-            *self.shown.frame.lock().expect("frame") = None;
+            *self.shown.frame.locked() = None;
         }
     }
 
     /// The last frame rendered, while frames go to the preview.
     pub(crate) fn shown_frame(&self) -> Option<Arc<crate::PreviewFrame>> {
-        self.shown.frame.lock().expect("frame").clone()
+        self.shown.frame.locked().clone()
     }
 
     pub(crate) fn progress(&self) -> RenderProgress {
-        self.progress.lock().expect("progress").clone()
+        crate::settled(
+            &self.progress,
+            self.thread.as_ref(),
+            |p| p.finished,
+            |p| {
+                p.finished = true;
+                p.error = Some(crate::STOPPED.into());
+            },
+        )
     }
 
     pub(crate) fn cancel(&self) {
@@ -1071,7 +1088,7 @@ fn run(
             frames_since = 0;
             last_report = Instant::now();
         }
-        let mut p = progress.lock().expect("progress");
+        let mut p = progress.locked();
         p.stage = stage.to_string();
         p.done = done;
         p.total = total.max(1);
@@ -1168,7 +1185,7 @@ fn run(
                     _ => None,
                 };
                 if let Some(picture) = picture {
-                    *shown.frame.lock().expect("frame") = Some(Arc::new(picture));
+                    *shown.frame.locked() = Some(Arc::new(picture));
                     last_shown = Some(Instant::now());
                 }
             }
@@ -1203,7 +1220,7 @@ fn run(
                 // project leaves it as it was.
                 let job = match smart.as_mut().and_then(|sm| sm.frame(project, t)) {
                     Some(data) => {
-                        progress.lock().expect("progress").passed += 1;
+                        progress.locked().passed += 1;
                         Work::Compressed(data, n)
                     }
                     None => draw(n, &mut pool, painter),

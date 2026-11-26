@@ -8,11 +8,13 @@
 //!
 //! Loop: a mixagem volta ao início da região exatamente na amostra do fim, e
 //! a posição é dobrada do mesmo jeito, então som e imagem continuam juntos.
-//! Taxa: a mixagem é reamostrada (como uma fita mais rápida ou mais lenta) e
-//! o relógio avança `taxa` vezes mais rápido.
+//! Rate: what was mixed goes to the device through `tempo`, which keeps its
+//! pitch; the clock counts what was mixed and heard, so a new rate takes
+//! hold as it plays, with nothing started again.
 
+use crate::LockExt;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -24,6 +26,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::metronome::Clicks;
 use crate::resample::LinearResampler;
+use crate::tempo::Stretch;
 use crate::track_mix::TrackThreads;
 
 /// Situação da saída de áudio, para mostrar na interface.
@@ -104,7 +107,7 @@ type Capture = std::sync::mpsc::Sender<(i64, Vec<Vec<f32>>)>;
 static CAPTURE: Mutex<Option<Capture>> = Mutex::new(None);
 
 pub(crate) fn set_capture(to: Option<Capture>) {
-    *CAPTURE.lock().expect("captura") = to;
+    *CAPTURE.locked() = to;
 }
 
 /// The Loudness Meters' engine: what plays, measured from the start of
@@ -117,21 +120,20 @@ static LOUDNESS_FORMAT: Mutex<(u32, usize)> = Mutex::new((48_000, 2));
 
 /// A fresh meter for `rate` and `channels`.
 pub(crate) fn reset_loudness_for(rate: u32, channels: usize) {
-    *LOUDNESS_FORMAT.lock().expect("medidor de loudness") = (rate, channels);
+    *LOUDNESS_FORMAT.locked() = (rate, channels);
     let blocking = TRUE_PEAK_BLOCKING.load(Ordering::Relaxed);
-    *LOUDNESS.lock().expect("medidor de loudness") =
-        Some(bv_mixer::loudness::LiveMeter::new(rate, channels, blocking));
+    *LOUDNESS.locked() = Some(bv_mixer::loudness::LiveMeter::new(rate, channels, blocking));
 }
 
 /// Reset Meter Measurement: the meters start again.
 pub(crate) fn reset_loudness() {
-    let (rate, channels) = *LOUDNESS_FORMAT.lock().expect("medidor de loudness");
+    let (rate, channels) = *LOUDNESS_FORMAT.locked();
     reset_loudness_for(rate, channels);
 }
 
 /// Reset Clip: the true peaks' over-the-limit mark starts again.
 pub(crate) fn reset_true_peak_clip() {
-    if let Some(m) = LOUDNESS.lock().expect("medidor de loudness").as_mut() {
+    if let Some(m) = LOUDNESS.locked().as_mut() {
         m.reset_clip();
     }
 }
@@ -142,11 +144,7 @@ pub(crate) fn set_true_peak_blocking(on: bool) {
 
 /// The meters' readings now (`None` before anything played).
 pub(crate) fn loudness() -> Option<bv_mixer::loudness::LiveLoudness> {
-    LOUDNESS
-        .lock()
-        .expect("medidor de loudness")
-        .as_mut()
-        .map(|m| m.read())
+    LOUDNESS.locked().as_mut().map(|m| m.read())
 }
 
 pub(crate) fn set_downmix(d: bv_mixer::Downmix) {
@@ -197,16 +195,16 @@ pub(crate) fn set_buffering(playback: Duration, track: Option<Duration>) {
 
 /// The output device by name (`None`: the system's default).
 pub(crate) fn set_output_device(name: Option<String>) {
-    *OUTPUT_DEVICE.lock().expect("dispositivo de saída") = name;
+    *OUTPUT_DEVICE.locked() = name;
 }
 
 pub(crate) fn output_device() -> Option<String> {
-    OUTPUT_DEVICE.lock().expect("dispositivo de saída").clone()
+    OUTPUT_DEVICE.locked().clone()
 }
 
 /// Options › Metronome on (with these clicks) or off.
 pub(crate) fn set_metronome(clicks: Option<Clicks>) {
-    *METRONOME.lock().expect("metrônomo") = clicks.map(Arc::new);
+    *METRONOME.locked() = clicks.map(Arc::new);
 }
 
 /// Tamanho do bloco de mixagem, em amostras do projeto.
@@ -217,22 +215,27 @@ const MIX_BLOCK: usize = 1024;
 type ClicksAt = (Arc<Clicks>, u32, (Vec<f32>, Vec<f32>));
 
 struct Clock {
-    /// Amostras do dispositivo efetivamente tocadas.
-    frames: u64,
-    /// Quando o último callback terminou e quantas amostras ele entregou;
-    /// usado para interpolar a posição entre callbacks.
+    /// Frames of what was mixed (at the device's rate) that were heard.
+    played: f64,
+    /// When the last callback ended, the frames it gave the device and how
+    /// many of what was mixed each stood for: the position between
+    /// callbacks.
     at: Instant,
     last_len: u64,
+    each: f64,
 }
 
-/// Peaks of each track in a mixed block, and the device frame where the
-/// block starts playing.
+/// Peaks of each track in a mixed block, and the mixed frame the block
+/// starts at.
 type TrackPeaks = Vec<(bv_timeline::TrackId, Vec<f32>)>;
 type StripPeaks = Vec<(bv_timeline::Strip, Vec<f32>)>;
 type VuLevels = Vec<(bv_mixer::meters::MeterOf, Vec<f32>)>;
 
 struct AudioShared {
     ring: Mutex<VecDeque<f32>>,
+    /// How fast it plays (an `f64`'s bits), and what plays it so.
+    rate: AtomicU64,
+    stretch: Mutex<Stretch>,
     clock: Mutex<Clock>,
     /// Pico por canal desde a última leitura (medidores).
     peaks: Mutex<Vec<f32>>,
@@ -249,10 +252,23 @@ struct AudioShared {
     first_heard: Mutex<Option<cpal::StreamInstant>>,
 }
 
+impl AudioShared {
+    fn rate(&self) -> f64 {
+        f64::from_bits(self.rate.load(Ordering::Relaxed))
+    }
+}
+
+/// The slowest and the fastest it plays.
+const RATES: (f64, f64) = (0.1, 4.0);
+
 pub(crate) struct Playback {
     start: Tick,
     options: PlayOptions,
-    started_at: Instant,
+    /// How fast it plays (an `f64`'s bits).
+    rate: AtomicU64,
+    /// Without an audio device: since when it plays this fast, and the
+    /// seconds played before.
+    wall: Mutex<(Instant, f64)>,
     device_rate: u32,
     audio: Option<Arc<AudioShared>>,
     project: Arc<Mutex<Arc<Project>>>,
@@ -305,11 +321,11 @@ impl Output {
     }
 
     fn attach(&self, audio: Arc<AudioShared>) {
-        *self.slot.lock().expect("saída de áudio") = Some(audio);
+        *self.slot.locked() = Some(audio);
     }
 
     fn detach(&self) {
-        *self.slot.lock().expect("saída de áudio") = None;
+        *self.slot.locked() = None;
     }
 
     pub(crate) fn status(&self) -> AudioStatus {
@@ -342,7 +358,7 @@ impl Playback {
         held: Option<Arc<Output>>,
     ) -> Playback {
         let project_rate = project.settings.sample_rate;
-        let rate = options.rate.clamp(0.1, 4.0);
+        let rate = options.rate.clamp(RATES.0, RATES.1);
         let options = PlayOptions { rate, ..options };
         // Fora da região de loop, começa no início dela.
         let from = match effective_loop(&options) {
@@ -353,12 +369,22 @@ impl Playback {
         reset_loudness_for(project_rate.0, project.settings.channels.channel_count());
         let shared_project = Arc::new(Mutex::new(project));
         let stop = Arc::new(AtomicBool::new(false));
+        let output = match held.filter(|o| o.alive()) {
+            Some(o) => Ok(o),
+            None => Output::open(project_rate.0).map(Arc::new),
+        };
+        let device = output
+            .as_ref()
+            .map_or((project_rate.0, 2), |o| (o.rate, o.channels as usize));
         let audio = Arc::new(AudioShared {
             ring: Mutex::new(VecDeque::new()),
+            rate: AtomicU64::new(rate.to_bits()),
+            stretch: Mutex::new(Stretch::new(device.0, device.1)),
             clock: Mutex::new(Clock {
-                frames: 0,
+                played: 0.0,
                 at: Instant::now(),
                 last_len: 0,
+                each: rate,
             }),
             peaks: Mutex::new(Vec::new()),
             track_queue: Mutex::new(VecDeque::new()),
@@ -368,19 +394,16 @@ impl Playback {
             first_heard: Mutex::new(None),
         });
 
-        let output = match held.filter(|o| o.alive()) {
-            Some(o) => Ok(o),
-            None => Output::open(project_rate.0).map(Arc::new),
-        };
-        let (output, status, device_rate, device_channels) = match output {
+        let (device_rate, device_channels) = device;
+        let (output, status) = match output {
             Ok(o) => {
                 o.attach(audio.clone());
-                let (status, rate, channels) = (o.status(), o.rate, o.channels as usize);
-                (Some(o), status, rate, channels)
+                let status = o.status();
+                (Some(o), status)
             }
             Err(e) => {
                 note_audio_error(format!("The audio output could not be opened: {e}"));
-                (None, AudioStatus::Unavailable(e), project_rate.0, 2)
+                (None, AudioStatus::Unavailable(e))
             }
         };
 
@@ -406,7 +429,8 @@ impl Playback {
         Playback {
             start: from,
             options,
-            started_at: Instant::now(),
+            rate: AtomicU64::new(rate.to_bits()),
+            wall: Mutex::new((Instant::now(), 0.0)),
             device_rate,
             audio: output.is_some().then_some(audio),
             project: shared_project,
@@ -419,7 +443,21 @@ impl Playback {
 
     /// How fast it plays (1 = normal speed).
     pub(crate) fn rate(&self) -> f64 {
-        self.options.rate
+        f64::from_bits(self.rate.load(Ordering::Relaxed))
+    }
+
+    /// Plays this fast from now on, without stopping.
+    pub(crate) fn set_rate(&self, rate: f64) {
+        let rate = rate.clamp(RATES.0, RATES.1);
+        {
+            let mut wall = self.wall.locked();
+            let played = wall.1 + wall.0.elapsed().as_secs_f64() * self.rate();
+            *wall = (Instant::now(), played);
+        }
+        self.rate.store(rate.to_bits(), Ordering::Relaxed);
+        if let Some(a) = &self.audio {
+            a.rate.store(rate.to_bits(), Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn audio_status(&self) -> AudioStatus {
@@ -427,22 +465,25 @@ impl Playback {
     }
 
     pub(crate) fn set_project(&self, project: Arc<Project>) {
-        *self.project.lock().expect("projeto do playback") = project;
+        *self.project.locked() = project;
     }
 
     /// Tempo da timeline percorrido desde o início, sem considerar o loop.
     fn elapsed(&self) -> Tick {
         let seconds = match &self.audio {
             Some(a) => {
-                let c = a.clock.lock().expect("relógio de áudio");
+                let c = a.clock.locked();
                 // Interpola dentro do último buffer entregue, sem passar dele.
                 let since = c.at.elapsed().as_secs_f64() * self.device_rate as f64;
-                let extra = (since as u64).min(c.last_len);
-                (c.frames + extra) as f64 / self.device_rate as f64
+                let extra = (since as u64).min(c.last_len) as f64;
+                (c.played + extra * c.each) / self.device_rate as f64
             }
-            None => self.started_at.elapsed().as_secs_f64(),
+            None => {
+                let wall = self.wall.locked();
+                wall.1 + wall.0.elapsed().as_secs_f64() * self.rate()
+            }
         };
-        Tick((seconds * self.options.rate * TICKS_PER_SECOND as f64) as i64)
+        Tick((seconds * TICKS_PER_SECOND as f64) as i64)
     }
 
     pub(crate) fn position(&self) -> Tick {
@@ -457,47 +498,42 @@ impl Playback {
         if effective_loop(&self.options).is_some() || self.options.past_end {
             return false;
         }
-        let end = self.project.lock().expect("projeto do playback").duration();
+        let end = self.project.locked().duration();
         self.position() >= end
     }
 
     /// Pico por canal desde a última chamada (0 a 1+).
     pub(crate) fn take_peaks(&self) -> Option<Vec<f32>> {
         let a = self.audio.as_ref()?;
-        let mut p = a.peaks.lock().expect("medidores");
+        let mut p = a.peaks.locked();
         Some(std::mem::take(&mut *p))
     }
 
     /// When the playback's first sound reached the output (recording lines
     /// the takes up with it).
     pub(crate) fn first_heard(&self) -> Option<cpal::StreamInstant> {
-        *self
-            .audio
-            .as_ref()?
-            .first_heard
-            .lock()
-            .expect("relógio de áudio")
+        *self.audio.as_ref()?.first_heard.locked()
     }
 
     /// Peak per channel of each track heard since the last call.
     pub(crate) fn take_track_peaks(&self) -> TrackPeaks {
-        self.audio.as_ref().map_or_else(Vec::new, |a| {
-            std::mem::take(&mut *a.track_peaks.lock().expect("medidores"))
-        })
+        self.audio
+            .as_ref()
+            .map_or_else(Vec::new, |a| std::mem::take(&mut *a.track_peaks.locked()))
     }
 
     /// The latest VU/PPM reading of each meter heard since the last call.
     pub(crate) fn take_vu_levels(&self) -> VuLevels {
-        self.audio.as_ref().map_or_else(Vec::new, |a| {
-            std::mem::take(&mut *a.vu_levels.lock().expect("medidores"))
-        })
+        self.audio
+            .as_ref()
+            .map_or_else(Vec::new, |a| std::mem::take(&mut *a.vu_levels.locked()))
     }
 
     /// Peak per channel of each bus and chain heard since the last call.
     pub(crate) fn take_strip_peaks(&self) -> StripPeaks {
-        self.audio.as_ref().map_or_else(Vec::new, |a| {
-            std::mem::take(&mut *a.strip_peaks.lock().expect("medidores"))
-        })
+        self.audio
+            .as_ref()
+            .map_or_else(Vec::new, |a| std::mem::take(&mut *a.strip_peaks.locked()))
     }
 }
 
@@ -587,7 +623,7 @@ fn play_into<T: Copy + Default>(
     at: cpal::StreamInstant,
     convert: impl Fn(f32) -> T,
 ) {
-    let audio = slot.lock().expect("saída de áudio").clone();
+    let audio = slot.locked().clone();
     match audio {
         Some(a) => fill(out, &a, channels, at, convert),
         None => out.fill(T::default()),
@@ -604,24 +640,28 @@ fn fill<T: Copy + Default>(
 ) {
     let channels = channels as usize;
     let mut peaks = vec![0.0f32; channels];
-    let mut ring = audio.ring.lock().expect("buffer de áudio");
-    // Só quadros completos (todas as amostras de um instante) contam.
-    let available = (ring.len() / channels).min(out.len() / channels);
+    let mut heard = vec![0.0f32; out.len()];
+    // Whole frames alone (every channel's sample of an instant) count.
+    let got = {
+        let mut stretch = audio.stretch.locked();
+        let mut ring = audio.ring.locked();
+        stretch.pull(&mut ring, &mut heard, audio.rate())
+    };
+    let available = got.frames;
     for (i, (o, s)) in out
         .iter_mut()
-        .zip(ring.drain(..available * channels))
+        .zip(&heard[..available * channels])
         .enumerate()
     {
         let p = &mut peaks[i % channels];
         *p = p.max(s.abs());
-        *o = convert(s);
+        *o = convert(*s);
     }
-    drop(ring);
     for o in &mut out[available * channels..] {
         *o = T::default();
     }
     {
-        let mut shared = audio.peaks.lock().expect("medidores");
+        let mut shared = audio.peaks.locked();
         if shared.len() != channels {
             *shared = vec![0.0; channels];
         }
@@ -630,20 +670,21 @@ fn fill<T: Copy + Default>(
         }
     }
     let heard = {
-        let mut c = audio.clock.lock().expect("relógio de áudio");
-        if c.frames == 0 && available > 0 {
-            *audio.first_heard.lock().expect("relógio de áudio") = Some(at);
+        let mut c = audio.clock.locked();
+        if c.played == 0.0 && available > 0 {
+            *audio.first_heard.locked() = Some(at);
         }
-        c.frames += available as u64;
+        c.played += got.passed;
         c.at = Instant::now();
         c.last_len = available as u64;
-        c.frames
+        c.each = got.passed / available.max(1) as f64;
+        c.played as u64
     };
     // The meters follow what is heard, not what is mixed ahead.
-    let mut queue = audio.track_queue.lock().expect("medidores");
-    let mut tracks = audio.track_peaks.lock().expect("medidores");
-    let mut strips = audio.strip_peaks.lock().expect("medidores");
-    let mut vu = audio.vu_levels.lock().expect("medidores");
+    let mut queue = audio.track_queue.locked();
+    let mut tracks = audio.track_peaks.locked();
+    let mut strips = audio.strip_peaks.locked();
+    let mut vu = audio.vu_levels.locked();
     while queue.front().is_some_and(|(at, _, _, _)| *at <= heard) {
         let Some((_, block, strip_block, vu_block)) = queue.pop_front() else {
             break;
@@ -691,7 +732,7 @@ fn mix_loop(
     let mut threads = (TRACK_BUFFER_MS.load(Ordering::Relaxed) > 0).then(TrackThreads::default);
     // The metronome's clicks at the project's rate, made once.
     let mut clicks: Option<ClicksAt> = None;
-    let first = project.lock().expect("projeto").settings;
+    let first = project.locked().settings;
     let rate = first.sample_rate;
     let mut next = rate.sample_at(from);
     let loop_samples = effective_loop(&options).map(|r| {
@@ -704,10 +745,10 @@ fn mix_loop(
     // The project's channels, and the device's for the busses on its
     // hardware outputs.
     let width = project_channels.max(device_channels);
-    let resample = options.rate != 1.0 || rate.0 != device_rate;
-    let mut resampler = resample.then(|| {
-        LinearResampler::with_step(rate.0 as f64 * options.rate / device_rate as f64, width)
-    });
+    let mut resampler = (rate.0 != device_rate)
+        .then(|| LinearResampler::with_step(rate.0 as f64 / device_rate as f64, width));
+    // The frames mixed so far.
+    let mut mixed = 0u64;
     while !stop.load(Ordering::Relaxed) {
         let ahead_ms = PLAYBACK_BUFFER_MS.load(Ordering::Relaxed)
             + if threads.is_some() {
@@ -715,8 +756,11 @@ fn mix_loop(
             } else {
                 0
             };
-        let target = (ahead_ms as f64 / 1000.0 * device_rate as f64) as usize * device_channels;
-        let buffered = audio.ring.lock().expect("buffer de áudio").len();
+        // As long as it lasts at the speed it plays.
+        let speed = audio.rate();
+        let ahead = ahead_ms as f64 / 1000.0 * speed.max(1.0) + Stretch::look_ahead(speed);
+        let target = (ahead * device_rate as f64) as usize * device_channels;
+        let buffered = audio.ring.locked().len();
         if buffered >= target {
             std::thread::sleep(Duration::from_millis(5));
             continue;
@@ -728,7 +772,7 @@ fn mix_loop(
             }
             n = n.min((end - next) as usize);
         }
-        let p = project.lock().expect("projeto").clone();
+        let p = project.locked().clone();
         let (mut buf, track_peaks, strip_peaks, vu_levels, hardware) = match &mut threads {
             Some(t) => {
                 let (b, peaks) = t.mix(&p, next, n);
@@ -750,13 +794,13 @@ fn mix_loop(
         };
         // The Loudness Meters measure the program (no clicks, no monitoring),
         // and a real-time render writes it.
-        if let Some(m) = LOUDNESS.lock().expect("medidor de loudness").as_mut() {
+        if let Some(m) = LOUDNESS.locked().as_mut() {
             m.push(&buf.channels);
         }
-        if let Some(to) = CAPTURE.lock().expect("captura").as_ref() {
+        if let Some(to) = CAPTURE.locked().as_ref() {
             let _ = to.send((next, buf.channels.clone()));
         }
-        let metronome = METRONOME.lock().expect("metrônomo").clone();
+        let metronome = METRONOME.locked().clone();
         if let Some(c) = metronome {
             let rate = p.settings.sample_rate;
             if clicks
@@ -797,20 +841,17 @@ fn mix_loop(
         );
         add_hardware(&mut buf.channels, &hardware, device_channels, width);
         next += n as i64;
-        // The device frame where this block will be heard.
-        let queued = (audio.ring.lock().expect("buffer de áudio").len() / device_channels) as u64;
-        let heard_at = audio.clock.lock().expect("relógio de áudio").frames + queued;
-        audio.track_queue.lock().expect("medidores").push_back((
-            heard_at,
-            track_peaks,
-            strip_peaks,
-            vu_levels,
-        ));
+        // Where this block will be heard.
+        audio
+            .track_queue
+            .locked()
+            .push_back((mixed, track_peaks, strip_peaks, vu_levels));
         let channels = match &mut resampler {
             Some(r) => r.process(&buf.channels),
             None => buf.channels,
         };
         let frames = channels.first().map_or(0, Vec::len);
+        mixed += frames as u64;
         let mut interleaved = Vec::with_capacity(frames * device_channels);
         for i in 0..frames {
             for c in 0..device_channels {
@@ -818,11 +859,7 @@ fn mix_loop(
                 interleaved.push(channels.get(c).map_or(0.0, |ch| ch[i]));
             }
         }
-        audio
-            .ring
-            .lock()
-            .expect("buffer de áudio")
-            .extend(interleaved);
+        audio.ring.locked().extend(interleaved);
     }
 }
 
@@ -885,6 +922,89 @@ fn first_sample(rate: SampleRate, t: Tick) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A playback without an audio device: the wall clock's.
+    fn silent(rate: f64) -> Playback {
+        Playback {
+            start: Tick::from_seconds(10),
+            options: PlayOptions {
+                past_end: true,
+                ..PlayOptions::default()
+            },
+            rate: AtomicU64::new(rate.to_bits()),
+            wall: Mutex::new((Instant::now(), 0.0)),
+            device_rate: 48_000,
+            audio: None,
+            project: Arc::new(Mutex::new(Arc::new(Project::new(Default::default())))),
+            stop: Arc::new(AtomicBool::new(false)),
+            mixer: None,
+            output: None,
+            status: AudioStatus::NotStarted,
+        }
+    }
+
+    /// A new rate takes hold where playback is, without a jump.
+    #[test]
+    fn the_rate_changes_as_it_plays() {
+        let p = silent(1.0);
+        let mut last = p.position();
+        for rate in [4.0, 0.25, 2.0, 1.0] {
+            std::thread::sleep(Duration::from_millis(40));
+            let before = p.position();
+            p.set_rate(rate);
+            let after = p.position();
+            assert_eq!(p.rate(), rate);
+            assert!(before > last, "it goes on");
+            assert!(after >= before && after - before < Tick::from_seconds_f64(0.02));
+            last = after;
+        }
+        p.set_rate(50.0);
+        assert_eq!(p.rate(), 4.0);
+    }
+
+    /// With a device the clock counts what was mixed and heard: at twice
+    /// the speed twice as much, from the buffer the device takes.
+    #[test]
+    fn the_clock_counts_what_was_heard() {
+        let audio = AudioShared {
+            ring: Mutex::new(std::iter::repeat_n(0.1f32, 2 * 48_000).collect()),
+            rate: AtomicU64::new(1.0f64.to_bits()),
+            stretch: Mutex::new(Stretch::new(48_000, 2)),
+            clock: Mutex::new(Clock {
+                played: 0.0,
+                at: Instant::now(),
+                last_len: 0,
+                each: 1.0,
+            }),
+            peaks: Mutex::new(Vec::new()),
+            track_queue: Mutex::new(VecDeque::new()),
+            track_peaks: Mutex::new(Vec::new()),
+            strip_peaks: Mutex::new(Vec::new()),
+            vu_levels: Mutex::new(Vec::new()),
+            first_heard: Mutex::new(None),
+        };
+        let at = cpal::StreamInstant::ZERO;
+        let mut out = vec![0.0f32; 480 * 2];
+        let hear = |out: &mut [f32]| {
+            for _ in 0..20 {
+                fill(out, &audio, 2, at, |s| s);
+            }
+            audio.clock.locked().played
+        };
+        assert_eq!(hear(&mut out), 9_600.0);
+        audio.rate.store(2.0f64.to_bits(), Ordering::Relaxed);
+        let twice = hear(&mut out);
+        assert!((twice - 9_600.0 - 19_200.0).abs() < 3_000.0, "{twice}");
+        assert!(out.iter().all(|s| (s - 0.1).abs() < 1e-6));
+        // Nothing more mixed: it waits.
+        audio.ring.locked().clear();
+        audio.rate.store(1.0f64.to_bits(), Ordering::Relaxed);
+        let mut last = hear(&mut out);
+        for _ in 0..20 {
+            last = hear(&mut out);
+        }
+        assert_eq!(hear(&mut out), last);
+    }
 
     /// A bus on the device's second pair plays on its channels 3 and 4,
     /// the stereo program staying on 1 and 2; a pair the device lacks is

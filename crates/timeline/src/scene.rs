@@ -197,6 +197,13 @@ pub trait PluginEffects: Sync {
         None
     }
 
+    /// What `call`'s input, `size` big, is made of at any time, as a number:
+    /// pictures of it kept on the graphics card from the frames before are
+    /// found by it and by their time (`None`: not known, none are kept).
+    fn input_key(&self, _call: &PluginCall<'_>, _size: (u32, u32)) -> Option<u64> {
+        None
+    }
+
     /// Whether `call`'s plug-in draws on pictures in the graphics card's
     /// memory as CUDA sees it ([`CardPicture`]s): a card CUDA shares then
     /// hands it its pictures where they are, instead of bringing them to

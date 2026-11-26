@@ -5,6 +5,7 @@
 //! the levels are there for the interface; when the input's first sound was
 //! captured lines the takes up with what was heard (the recording latency).
 
+use crate::LockExt;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufWriter;
@@ -209,7 +210,7 @@ impl Recorder {
             }
         }
         let shared = Arc::new(Shared::default());
-        *shared.first_capture.lock().expect("recording") = vec![None; devices.len()];
+        *shared.first_capture.locked() = vec![None; devices.len()];
         let (date, time) = now_stamp();
         let (tx, rx) = channel::<Block>();
         let mut streams = Vec::new();
@@ -255,7 +256,7 @@ impl Recorder {
                     Ok(w) => (Some(w), None),
                     Err(e) => (None, Some(e)),
                 };
-                shared.waves.lock().expect("recording").insert(
+                shared.waves.locked().insert(
                     t.track,
                     RecordingWave {
                         peaks: Vec::new(),
@@ -333,7 +334,10 @@ impl Recorder {
         let to_thread = shared.clone();
         let writer = std::thread::Builder::new()
             .name("bv-record".into())
-            .spawn(move || write(rx, writing, rates, &to_thread))
+            .spawn(move || {
+                let _awake = bv_platform::KeepAwake::new("Recording");
+                write(rx, writing, rates, &to_thread)
+            })
             .map_err(|e| e.to_string())?;
         let streams: Vec<cpal::Stream> = streams.into_iter().map(|(s, _)| s).collect();
         for s in &streams {

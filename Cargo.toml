@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-or-later"
@@ -36,6 +36,7 @@ bv-image = { path = "crates/image" }
 bv-wav = { path = "crates/wav" }
 bv-flac = { path = "crates/flac" }
 bv-prores = { path = "crates/prores" }
+bv-quicktime = { path = "crates/quicktime" }
 bv-mf = { path = "crates/mf" }
 bv-mp4 = { path = "crates/mp4" }
 bv-mpeg2 = { path = "crates/mpeg2" }
@@ -59,6 +60,7 @@ bv-ui-egui = { path = "crates/ui-egui" }
 bv-ofx-sys = { path = "crates/ofx-sys" }
 bv-ofx = { path = "crates/ofx" }
 bv-effects = { path = "crates/effects" }
+bv-banana = { path = "crates/banana" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -82,8 +84,13 @@ todo = "warn"
 print_stdout = "warn"
 
 [profile.dev]
-# Codecs e composição ficam inutilizáveis sem otimização, mesmo em debug.
+# Codecs and compositing are unusable without optimization, even in debug.
 opt-level = 1
+# Line tables only: a backtrace still names its files and lines. Full debug
+# information made every test program of the interface a 500 MB PDB (13 GB
+# written by each build of them, the linker out of memory writing several
+# side by side) and `target/debug` grew by hundreds of gigabytes.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3

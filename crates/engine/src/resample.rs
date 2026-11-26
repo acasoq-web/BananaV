@@ -33,6 +33,12 @@ impl LinearResampler {
         if n == 0 {
             return out;
         }
+        // The project's channels changed while playing (Project
+        // Properties, an undo): the new ones start from silence instead of
+        // reading past the old count, which stopped the mixer's thread.
+        if self.prev.len() != input.len() {
+            self.prev.resize(input.len(), 0.0);
+        }
         while self.pos < n as f64 {
             let i = self.pos.floor() as usize;
             let f = (self.pos - i as f64) as f32;
@@ -54,6 +60,19 @@ impl LinearResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn more_channels_than_it_started_with_are_resampled_too() {
+        let mut r = LinearResampler::new(48000, 44100, 2);
+        let _ = r.process(&[vec![0.5; 64], vec![0.5; 64]]);
+        let six: Vec<Vec<f32>> = (0..6).map(|_| vec![0.25; 64]).collect();
+        let out = r.process(&six);
+        assert_eq!(out.len(), 6);
+        assert!(out.iter().all(|c| c.len() == out[0].len()));
+        // And back to two.
+        let out = r.process(&[vec![0.5; 64], vec![0.5; 64]]);
+        assert_eq!(out.len(), 2);
+    }
 
     #[test]
     fn mesma_taxa_e_identidade_com_uma_amostra_de_atraso() {

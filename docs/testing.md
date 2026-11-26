@@ -29,10 +29,50 @@ with the user's prints and the graphics card's parity tests.
   windows, closes it — it never touches the user's mouse or keyboard).
   `BANANAV_OPEN`'s commands run once BananaV started, the project given
   opened, any context's (`Edit.Select.All;Tools.Video.VideoEventFX;
-  Transport.Play` plays with the FX window open): with `BV_FRAME_TRACE`
+  Transport.Play` plays with the FX window open) — and what the screen
+  tests set up: `Review.Demo` (the demonstration project),
+  `Review.Transition` (a transition's window), `Review.GeneratedMedia`
+  (the Video Media Generators window) and `Review.Animated` (a parameter
+  of each animated: their keyframe controllers show). Mouse presses sent
+  to those windows as messages do not reach their controls (the system
+  tells the window the real mouse is not over it), and only the main
+  window has an accessibility tree: what a click does is the headless
+  tests'. With `BV_FRAME_TRACE`
   and `BV_PREVIEW_TRACE`, and `APPDATA` and `LOCALAPPDATA` pointing to
   copies, it measures the interface and the preview without touching the
   user's settings.
+- **MOV formats** (`cargo test -p bv-media --test importar mov_formats --
+  --ignored --nocapture`, ffmpeg on the PATH): each of QuickTime's
+  formats BananaV decodes itself made by ffmpeg, every frame in its
+  place and its colors and alpha against ffmpeg's (`check_colors`: the
+  Y′CbCr ones at 720p, ffmpeg told to convert as BT.709); µ-law, A-law and
+  IMA 4:1 sound against the tone; a portrait video turned by its matrix.
+- **Banana Split** (`crates/banana`): `tests/pack.rs` checks every effect —
+  its description, numbers from any picture at every preset and at the
+  ends of its settings, transitions' ends exact, the mask and the mix,
+  each setting changing what is drawn, half the pixels showing the same,
+  smooth motion —, `tests/generated.rs` that the processor's kernels are
+  up to date; `cargo test -p bv-gpu --lib banana` draws every preset on
+  the card and the processor, `cargo test -p bv-engine --lib pack_tests`
+  the effects in a project's frames; `bolt.rs`' tests measure Lightning's
+  paths and `tests/path.rs` drags their places through the host. To look
+  at them: `tests/sheets.rs` (contact sheets, every preset with
+  `BV_BANANA_PRESETS=1`; `bolts`, Lightning at many sizes and curves);
+  `telas`' `captura_raio` draws its controls. To measure:
+  `cargo test --release -p bv-engine --lib the_packs_times -- --ignored
+  --nocapture` (`BV_BANANA_VIDEO`, `BV_BANANA_ONLY`, `BV_BANANA_SIZE`,
+  `BV_BANANA_CARD_ONLY`); at 1080p on an RTX 4070, read back included, the
+  whole frame takes 5.6 ms without an effect, 6 to 15 ms with one.
+- **AI agents and the command line** (`agents::tests`, `agents::mcp`,
+  `agents::link`, `agents::cli`): the tools on a BananaV without a window
+  (the demo project edited, an effect keyframed, a title placed, a frame
+  seen, a WAV rendered), the MCP server answering a client's lines, and
+  the open window running a client's calls between frames — the one that
+  saves waiting for the user's answer, given by the test as a no. The
+  listener's address goes to a file of the test's own, never the user's
+  settings folder. With the real program, a client is a pipe: start
+  `bananav mcp`, write `initialize`, `tools/list` and `tools/call` lines,
+  read a JSON line back for each; closing its input ends it.
 - Why it feels slow: `BV_FRAME_TRACE=1` gives each frame of the window (how
   long after the last one, how long it took, the preview's picture, what
   asked for it), `BV_PREVIEW_TRACE=1` each frame drawn, `BV_GPU_TRACE=1` each
@@ -64,7 +104,8 @@ with the user's prints and the graphics card's parity tests.
   engine (`play_file` in `bv-engine`, without the interface): different
   frames shown a second and the longest wait between two, the card's
   kernels compiled first (`BV_PLAY_WARM`). `BV_PLAY_PROJECT=3840x2160@59.94`
-  (the project), `BV_PLAY_SIZE` (the size frames are drawn at: Auto's room
+  (the project), `BV_PLAY_SPEED=4` (the events sped up), `BV_PLAY_RATE=2`
+  (the playback), `BV_PLAY_SIZE` (the size frames are drawn at: Auto's room
   or, at Full, the project's), `BV_PLAY_ROOM=1280x720` (the screen's
   pixels: frames drawn larger come back reduced), `BV_PLAY_EFFECTS=<ids>`
   (stacked on the events), `BV_PLAY_TRANSITION=dissolve|<id>` (two events
@@ -78,6 +119,31 @@ with the user's prints and the graphics card's parity tests.
   of the file about 40 (two 4K decoders and twice the card's work: the
   card and the decoders are the limit, with no stalls); Push with Border
   and Gaussian Blur on two 4K events about 19.
+- Speeds, with 1080p60 and 4K60 H.264 in a 1080p 59.94 project: 59 frames
+  a second with the events or the playback at 2×, 3× and 4× (1.5×: 49).
+  `BV_SEEK_FILE=<video> cargo test --release -p bv-mf --test seek_speed
+  strides -- --ignored` compares the frames a stride gives with those
+  that come one by one.
+- A long render looked at frame by frame: `BV_LONG_FILE=<video> cargo test
+  --release -p bv-engine --test long_render -- --ignored --nocapture`
+  renders pieces of the file for half an hour (`BV_LONG_MINUTES`,
+  `BV_LONG_ENCODER`) and compares every frame of the result with the one
+  it should be, block by block: what a card or a decoder breaks once in a
+  hundred thousand frames shows.
+- A render's speed: `BV_SPEED_FILE=<video> cargo test --release -p
+  bv-engine --test render_speed -- --ignored --nocapture` places the file
+  end to end for a minute (`BV_SPEED_SECONDS`) and renders it to MP4
+  (`BV_SPEED_SIZE=2560x1440`, `BV_SPEED_ENCODER`, `BV_SPEED_QUALITY`,
+  `BV_SPEED_BITRATE`, `BV_SPEED_AUDIO`), printing the frames a second
+  every five seconds (a stall shows) and in all. RTX 4070, NVENC H.264:
+  1440p60 155 frames a second, 4K60 at 4K 71, 4K60 to 1440p 109.
+  `cargo test -p bv-mf --test hardware past_the_last -- --ignored` (needs
+  ffmpeg) checks that frames past a file's last picture come at once.
+- The preview's pitch-kept speeds against FFmpeg's `atempo`:
+  `cargo test -p bv-engine --lib tempo::tests::how_a_voice_sounds --
+  --ignored --nocapture` (FFmpeg on the path) prints how far each strays
+  from what the voice should be, in dB, and writes both to `target/tempo`
+  to be heard.
 - The whole program, as the user plays: `APPDATA`/`LOCALAPPDATA` on a
   copy of the settings (with `"match_first_media": false` and a
   `"new_project"` of the project wanted), `BV_FRAME_TRACE=1

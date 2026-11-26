@@ -64,7 +64,8 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "apng", "jpg", "jpeg", "jpe", "jfif", "bmp", "dib", "gif", "tif", "tiff", "tga", "icb",
     "vda", "vst", "dpx", "exr", "psd", "psb", "webp", "heic", "heif", "hif", "avif", "jxr", "wdp",
     "hdp", "ico", "dng", "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "orf", "rw2",
-    "raf", "pef", "srw", "x3f", "erf", "kdc", "dcr", "mrw", "3fr", "mef", "iiq", "rwl",
+    "raf", "pef", "srw", "x3f", "erf", "kdc", "dcr", "mrw", "3fr", "mef", "iiq", "rwl", "svg",
+    "svgz",
 ];
 
 /// Camera RAW files: Windows' RAW extension develops them (many are TIFF
@@ -168,6 +169,10 @@ fn kind(path: &str, head: &[u8]) -> Kind {
     if head.starts_with(&[0x89, b'P', b'N', b'G']) {
         return Kind::Png;
     }
+    // A gzipped SVG document has no signature of its own.
+    if ext == "svgz" && head.starts_with(&[0x1f, 0x8b]) {
+        return Kind::Image(Format::Svg);
+    }
     match bv_image::read::sniff(head) {
         Some(Format::Gif) => return Kind::Gif,
         Some(Format::Tiff) if RAW_EXTENSIONS.contains(&ext.as_str()) => return Kind::SystemImage,
@@ -240,6 +245,14 @@ pub(crate) fn probe(path: &str) -> Result<MediaInfo> {
     let mut info = probe_streams(path, &head)?;
     if let Some(v) = &mut info.video {
         v.spherical = spherical(path, &head);
+        // A phone's portrait video, stored lying: its track's matrix turns
+        // it, as Media Properties' Rotation would.
+        if crate::mov::is_mpeg4(&head) {
+            let turn = crate::mov::rotation(&crate::mov::tracks(path));
+            if turn != bv_timeline::MediaRotation::Original {
+                *v = v.turned_to(turn);
+            }
+        }
     }
     Ok(info)
 }
@@ -404,6 +417,7 @@ pub fn describe_file(path: &str) -> FileDescription {
             Format::Dpx => "DPX",
             Format::Exr => "OpenEXR",
             Format::Psd => "Photoshop",
+            Format::Svg => "SVG",
         })),
         Kind::Gif => own("GIF"),
         Kind::Tga => still(own("TGA")),
@@ -422,10 +436,13 @@ pub fn describe_file(path: &str) -> FileDescription {
             let video = probe.as_ref().and_then(|p| p.video);
             let audio = probe.as_ref().map_or(&[][..], |p| &p.audio_streams[..]);
             let mut readers = vec![FileReader::SystemMedia];
-            let own_decoder = video.is_some_and(|v| bv_mf::codec::is_prores(v.codec))
-                || audio
-                    .iter()
-                    .any(|a| bv_mf::codec::is_ac3(a.codec) && !a.decodable);
+            let facts = crate::mov::tracks(path);
+            let own_decoder = video.is_some_and(|v| {
+                bv_mf::codec::is_prores(v.codec)
+                    || (!v.decodable && crate::mov::own_video(&facts).is_some())
+            }) || audio.iter().enumerate().any(|(i, a)| {
+                (bv_mf::codec::is_ac3(a.codec) && !a.decodable) || own_audio(&facts, i, a).is_some()
+            });
             if own_decoder {
                 readers.push(FileReader::Own);
             }
@@ -544,20 +561,30 @@ fn system_probe(path: &str) -> Result<MediaInfo> {
         }
         Err(e) => return Err(MediaError::Unsupported(e.to_string())),
     };
+    // What the file's own boxes say (an MPEG-4 family file): its formats
+    // BananaV decodes itself, their names.
+    let tracks = crate::mov::tracks(path);
+    let own = crate::mov::own_video(&tracks).is_some();
     let video = match p.video {
-        Some(v) if v.decodable || bv_mf::codec::is_prores(v.codec) => Some(VideoStreamInfo {
-            width: v.width,
-            height: v.height,
-            frame_rate: v.frame_rate,
-            pixel_aspect: bv_timeline::PixelAspect::new(v.pixel_aspect.0, v.pixel_aspect.1),
-            field_order: v.field_order,
-            spherical: false,
-            full_range: false,
-            reading: Default::default(),
-        }),
+        Some(v) if v.decodable || bv_mf::codec::is_prores(v.codec) || own => {
+            Some(VideoStreamInfo {
+                width: v.width,
+                height: v.height,
+                frame_rate: v.frame_rate,
+                pixel_aspect: bv_timeline::PixelAspect::new(v.pixel_aspect.0, v.pixel_aspect.1),
+                field_order: v.field_order,
+                spherical: false,
+                full_range: false,
+                reading: Default::default(),
+            })
+        }
         Some(v) => {
+            // The file's own code when it says one (the system's may be
+            // turned round).
+            let code = crate::mov::video_track(&tracks)
+                .map_or(v.codec, |t| bv_mf::codec::fourcc(&t.codec));
             // Windows decodes H.264 only in 4:2:0 and 8 bits.
-            let codec = match bv_mf::codec::name(v.codec).as_str() {
+            let codec = match bv_mf::codec::name(code).as_str() {
                 "H.264" => "H.264 4:2:2 / 10-bit".to_string(),
                 name => name.to_string(),
             };
@@ -572,12 +599,14 @@ fn system_probe(path: &str) -> Result<MediaInfo> {
         .audio_streams
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.decodable || bv_mf::codec::is_ac3(a.codec))
+        .filter(|(i, a)| kept_audio(&tracks, *i, a))
         .map(|(i, a)| {
-            let decoder = if bv_mf::codec::is_ac3(a.codec) {
-                bv_mf::AudioDecoder::open_with(path, i, Box::new(Ac3::default()))
-            } else {
-                bv_mf::AudioDecoder::open_stream(path, i)
+            let decoder = match own_audio(&tracks, i, a) {
+                Some(d) => bv_mf::AudioDecoder::open_with(path, i, d),
+                None if bv_mf::codec::is_ac3(a.codec) => {
+                    bv_mf::AudioDecoder::open_with(path, i, Box::new(Ac3::default()))
+                }
+                None => bv_mf::AudioDecoder::open_stream(path, i),
             };
             match decoder {
                 Ok(mut d) => {
@@ -614,15 +643,37 @@ fn system_probe(path: &str) -> Result<MediaInfo> {
 
 /// The index the system gives the `stream`-th audio stream BananaV kept
 /// (streams it cannot decode were left out at import).
-fn system_audio_index(path: &str, stream: u16) -> Result<(usize, u32)> {
+fn system_audio_index(path: &str, stream: u16) -> Result<(usize, bv_mf::AudioInfo)> {
     let p = bv_mf::probe(path).map_err(mf_err)?;
+    let tracks = crate::mov::tracks(path);
     p.audio_streams
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.decodable || bv_mf::codec::is_ac3(a.codec))
+        .filter(|(i, a)| kept_audio(&tracks, *i, a))
         .nth(stream as usize)
-        .map(|(i, a)| (i, a.codec))
+        .map(|(i, a)| (i, *a))
         .ok_or(MediaError::NoStream)
+}
+
+/// Whether the system's `i`-th audio stream `a` is read: the system decodes
+/// it, or BananaV does (AC-3; µ-law, A-law, IMA 4:1 of an MPEG-4 family
+/// file's `tracks`).
+fn kept_audio(tracks: &[bv_mp4::facts::TrackFacts], i: usize, a: &bv_mf::AudioInfo) -> bool {
+    a.decodable || bv_mf::codec::is_ac3(a.codec) || own_audio(tracks, i, a).is_some()
+}
+
+/// BananaV's own decoder for the system's `i`-th audio stream `a`, when the
+/// system has none and the file's track is one BananaV decodes.
+fn own_audio(
+    tracks: &[bv_mp4::facts::TrackFacts],
+    i: usize,
+    a: &bv_mf::AudioInfo,
+) -> Option<Box<dyn bv_mf::PacketDecoder>> {
+    if a.decodable {
+        return None;
+    }
+    let (codec, t) = crate::mov::own_audio_track(tracks, i)?;
+    Some(Box::new(crate::mov::OwnAudioDecoder::new(codec, t)))
 }
 
 // ---- Stills ----------------------------------------------------------------------------
@@ -719,6 +770,13 @@ fn picture(path: &str) -> Result<Arc<Picture>> {
                 })
             }
             Kind::Tga => bv_image::read::read_tga(&data).map_err(|e| unsupported(&e)),
+            // A drawing: the pictures it holds read here (a file beside it,
+            // a PNG in it).
+            Kind::Image(Format::Svg) => {
+                let dir = Path::new(path).parent();
+                bv_image::read::read_svg(&data, &|href| svg_picture(dir, href))
+                    .map_err(|e| unsupported(&e))
+            }
             Kind::SystemImage => {
                 let (width, height, rgba) = system_image(path).map_err(|e| unsupported(&e))?;
                 Ok(Picture {
@@ -732,6 +790,71 @@ fn picture(path: &str) -> Result<Arc<Picture>> {
             _ => bv_image::read::read(&data).map_err(|e| unsupported(&e)),
         }
     })
+}
+
+/// A picture an SVG document holds, by its `href`: a `data:` URI's bytes,
+/// or a file — beside the document, or where a `file:` URL says (no
+/// other address is fetched).
+fn svg_picture(dir: Option<&Path>, href: &str) -> Option<Picture> {
+    let bytes = match bv_image::read::data_uri(href) {
+        Some(b) => b,
+        None => {
+            let h = href.trim();
+            if h.contains("://") && !h.starts_with("file://") {
+                return None;
+            }
+            let local = h
+                .strip_prefix("file:///")
+                .or_else(|| h.strip_prefix("file://"))
+                .unwrap_or(h);
+            let local = percent_decoded(local);
+            let p = Path::new(&local);
+            let file = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                dir?.join(p)
+            };
+            std::fs::read(file).ok()?
+        }
+    };
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        let png = bv_png::decode(&bytes).ok()?;
+        let data = match png.pixels {
+            bv_png::Pixels::Rgba8(px) => PictureData::Rgba8(px),
+            bv_png::Pixels::Rgba16(px) => PictureData::Rgba16(px),
+        };
+        return Some(Picture {
+            width: png.width,
+            height: png.height,
+            data,
+            linear: false,
+            premultiplied: false,
+        });
+    }
+    // The pictures BananaV reads itself (an SVG among them: its own
+    // pictures only from `data:` URIs then).
+    bv_image::read::read(&bytes).ok()
+}
+
+/// `%20` and its kind decoded (a `file:` URL's path).
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn gif(path: &str) -> Result<Arc<Gif>> {
@@ -787,7 +910,7 @@ fn light16() -> &'static [f32] {
 
 /// The largest halving (power of 2, up to 16) whose result still covers
 /// `min_w` × `min_h`.
-fn reduction(w: u32, h: u32, min_w: u32, min_h: u32) -> u32 {
+pub(crate) fn reduction(w: u32, h: u32, min_w: u32, min_h: u32) -> u32 {
     let mut factor = 1u32;
     while factor < 16 && w / (factor * 2) >= min_w && h / (factor * 2) >= min_h {
         factor *= 2;
@@ -808,7 +931,7 @@ pub(crate) struct AlphaReading {
 /// as `alpha` says: as its file keeps it (straight, OpenEXR's
 /// premultiplied), straight, premultiplied — against black or, dirty, the
 /// background —, or none (opaque, its colors as they are).
-fn to_linear(p: &Picture, k: usize, alpha: AlphaReading) -> ImageRgbaF32 {
+pub(crate) fn to_linear(p: &Picture, k: usize, alpha: AlphaReading) -> ImageRgbaF32 {
     let (w, h) = (p.width as usize, p.height as usize);
     let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
     let mut out = ImageRgbaF32::transparent(ow as u32, oh as u32);
@@ -1215,10 +1338,14 @@ pub(crate) fn open_video(path: &str) -> Result<Box<dyn VideoReader>> {
         Kind::Other => match SystemVideo::open(path) {
             Ok(v) => Ok(Box::new(v)),
             Err(e) => {
-                // The system reads ProRes files; BananaV decodes them.
+                // The system reads ProRes files, QuickTime's Animation and
+                // uncompressed ones, PNG and TIFF frames; BananaV decodes
+                // them.
                 let reader = bv_mf::PacketReader::video(path).map_err(|_| e.clone())?;
                 if bv_mf::codec::is_prores(reader.info().codec) {
                     Ok(Box::new(ProResVideo::new(reader)))
+                } else if let Some(own) = crate::mov::own_video(&crate::mov::tracks(path)) {
+                    Ok(Box::new(crate::mov::MovVideo::new(reader, own)))
                 } else {
                     Err(e)
                 }
@@ -1232,8 +1359,11 @@ pub(crate) fn open_audio(path: &str, stream: u16) -> Result<Box<dyn AudioReader>
     match kind(path, &head) {
         Kind::Sound => Ok(Box::new(SoundFile::open(path)?)),
         k @ (Kind::Other | Kind::Dts) if k == Kind::Other || SYSTEM_DTS => {
-            let (index, codec) = system_audio_index(path, stream)?;
-            if bv_mf::codec::is_ac3(codec) {
+            let (index, a) = system_audio_index(path, stream)?;
+            if let Some(d) = own_audio(&crate::mov::tracks(path), index, &a) {
+                let dec = bv_mf::AudioDecoder::open_with(path, index, d).map_err(mf_err)?;
+                Ok(Box::new(SystemAudio { dec }))
+            } else if bv_mf::codec::is_ac3(a.codec) {
                 let dec = bv_mf::AudioDecoder::open_with(path, index, Box::new(Ac3::default()))
                     .map_err(mf_err)?;
                 Ok(Box::new(SystemAudio { dec }))
@@ -1249,7 +1379,7 @@ pub(crate) fn open_audio(path: &str, stream: u16) -> Result<Box<dyn AudioReader>
     }
 }
 
-fn mf_err(e: bv_mf::Error) -> MediaError {
+pub(crate) fn mf_err(e: bv_mf::Error) -> MediaError {
     match e {
         bv_mf::Error::NoStream => MediaError::NoStream,
         bv_mf::Error::UnsupportedFile => MediaError::UnsupportedFile(String::new()),
@@ -1561,50 +1691,64 @@ impl VideoReader for ProResVideo {
             duration: Tick::ZERO,
         };
         let mut img = bv_color::frame_to_linear_levels(&frame, factor, levels);
-        let mode = self.alpha.mode;
-        if let Some(alpha) = &d.alpha
-            && mode != AlphaChannel::None
-        {
-            // 4444's alpha: averaged like the color, then premultiplied —
-            // or, premultiplied already (against the background, dirty),
-            // the colors divided by it in their own values first.
-            let k = factor as usize;
-            let ow = img.width as usize;
-            let back = self.alpha.background.map(|v| v as f32 / 255.0);
-            let dirty = mode == AlphaChannel::PremultipliedDirty;
-            let premultiplied = dirty || mode == AlphaChannel::Premultiplied;
-            for (i, px) in img.data.iter_mut().enumerate() {
-                let (ox, oy) = (i % ow, i / ow);
-                let (mut acc, mut n) = (0f32, 0f32);
-                for y in oy * k..((oy + 1) * k).min(h) {
-                    for x in ox * k..((ox + 1) * k).min(w) {
-                        acc += alpha[y * w + x] as f32 / 65535.0;
-                        n += 1.0;
-                    }
-                }
-                let a = acc / n.max(1.0);
-                *px = if !premultiplied {
-                    [px[0] * a, px[1] * a, px[2] * a, a]
-                } else if a <= 0.0 {
-                    [0.0; 4]
-                } else {
-                    let un = |v: f32, b: f32| {
-                        let e = bv_color::transfer::linear_to_bt709(v.max(0.0));
-                        let e = if dirty { e - (1.0 - a) * b } else { e };
-                        bv_color::transfer::bt709_to_linear((e / a).clamp(0.0, 1.0)) * a
-                    };
-                    [
-                        un(px[0], back[0]),
-                        un(px[1], back[1]),
-                        un(px[2], back[2]),
-                        a,
-                    ]
-                };
-            }
+        if let Some(alpha) = &d.alpha {
+            alpha_over(&mut img, alpha, w, h, factor, self.alpha);
         }
         let img = Arc::new(img);
         self.last = Some((start, factor, levels, img.clone()));
         Ok(img)
+    }
+}
+
+/// A decoded picture's alpha (`alpha`, 0–65535 straight, `w` × `h`) put on
+/// its colors (`img`, `factor` times smaller), as the Media Properties'
+/// Alpha channel says: averaged like the colors, then multiplied in — or,
+/// premultiplied already (against the background, dirty), the colors
+/// divided by it in their own values first. None: left opaque.
+pub(crate) fn alpha_over(
+    img: &mut ImageRgbaF32,
+    alpha: &[u16],
+    w: usize,
+    h: usize,
+    factor: u32,
+    reading: AlphaReading,
+) {
+    let mode = reading.mode;
+    if mode == AlphaChannel::None {
+        return;
+    }
+    let k = factor as usize;
+    let ow = img.width as usize;
+    let back = reading.background.map(|v| v as f32 / 255.0);
+    let dirty = mode == AlphaChannel::PremultipliedDirty;
+    let premultiplied = dirty || mode == AlphaChannel::Premultiplied;
+    for (i, px) in img.data.iter_mut().enumerate() {
+        let (ox, oy) = (i % ow, i / ow);
+        let (mut acc, mut n) = (0f32, 0f32);
+        for y in oy * k..((oy + 1) * k).min(h) {
+            for x in ox * k..((ox + 1) * k).min(w) {
+                acc += alpha[y * w + x] as f32 / 65535.0;
+                n += 1.0;
+            }
+        }
+        let a = acc / n.max(1.0);
+        *px = if !premultiplied {
+            [px[0] * a, px[1] * a, px[2] * a, a]
+        } else if a <= 0.0 {
+            [0.0; 4]
+        } else {
+            let un = |v: f32, b: f32| {
+                let e = bv_color::transfer::linear_to_bt709(v.max(0.0));
+                let e = if dirty { e - (1.0 - a) * b } else { e };
+                bv_color::transfer::bt709_to_linear((e / a).clamp(0.0, 1.0)) * a
+            };
+            [
+                un(px[0], back[0]),
+                un(px[1], back[1]),
+                un(px[2], back[2]),
+                a,
+            ]
+        };
     }
 }
 
@@ -1677,6 +1821,57 @@ mod tests {
         assert_eq!(kind("a.heic", &heic), Kind::SystemImage);
         let mp4 = [&[0, 0, 0, 24][..], b"ftypisom", &[0, 0, 2, 0], b"isomiso2"].concat();
         assert_eq!(kind("a.mp4", &mp4), Kind::Other);
+    }
+
+    /// An SVG drawing imported as a still: as big as fits a 4K frame, its
+    /// shapes and the picture beside it that it holds drawn; gzipped
+    /// (`.svgz`) too; a web address it names left alone.
+    #[test]
+    fn svg_drawings_import_as_stills() {
+        let dir = std::env::temp_dir().join(format!("bv-svg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("art")).unwrap();
+        // A green 2 × 2 PNG beside it.
+        let green = [0u8, 255, 0, 255].repeat(4);
+        std::fs::write(
+            dir.join("art/green.png"),
+            bv_png::encode_rgba8(2, 2, &green, 6),
+        )
+        .unwrap();
+        let svg = r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">
+  <rect width="100" height="100" fill="#ff0000"/>
+  <image href="art/green.png" x="100" y="0" width="100" height="100"/>
+  <image href="https://example.com/x.png" x="0" y="0" width="10" height="10"/>
+</svg>"##;
+        let file = dir.join("drawing.svg");
+        std::fs::write(&file, svg).unwrap();
+        let path = file.to_string_lossy().to_string();
+        assert_eq!(kind(&path, svg.as_bytes()), Kind::Image(Format::Svg));
+        let info = crate::probe_file(&path).unwrap();
+        let v = info.video.expect("a picture");
+        assert_eq!((v.width, v.height), (3840, 1920));
+        assert!(info.still);
+        let pic = picture(&path).unwrap();
+        assert_eq!((pic.width, pic.height), (3840, 1920));
+        let PictureData::Rgba8(px) = &pic.data else {
+            panic!("8 bits")
+        };
+        let at = |x: usize, y: usize| &px[(y * 3840 + x) * 4..(y * 3840 + x) * 4 + 4];
+        assert_eq!(at(960, 960), &[255, 0, 0, 255], "the square");
+        assert_eq!(at(2880, 960), &[0, 255, 0, 255], "the picture beside it");
+        assert_eq!(at(50, 50), &[255, 0, 0, 255], "no web address fetched");
+        // Gzipped.
+        let packed = bv_deflate::deflate(svg.as_bytes(), 6);
+        let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255];
+        gz.extend_from_slice(&packed);
+        gz.extend_from_slice(&bv_deflate::crc32(svg.as_bytes()).to_le_bytes());
+        gz.extend_from_slice(&(svg.len() as u32).to_le_bytes());
+        let file = dir.join("drawing.svgz");
+        std::fs::write(&file, &gz).unwrap();
+        let path = file.to_string_lossy().to_string();
+        let info = crate::probe_file(&path).unwrap();
+        assert_eq!(info.video.map(|v| (v.width, v.height)), Some((3840, 1920)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A picture file read as its Media Properties say: turned a quarter

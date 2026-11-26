@@ -1052,10 +1052,13 @@ fn envelope_menu(ui: &mut egui::Ui, view: &mut TimelineView, app: &mut BananaApp
         view.bus_point = None;
         ui.close();
     }
-    ui.separator();
-    if ui.button(tr("Envelope Appearance…")).clicked() {
-        app.open_envelope_look();
-        ui.close();
+    // Its mod's (Options › BananaV Mods…).
+    if app.settings.mods.envelope_look {
+        ui.separator();
+        if ui.button(tr("Envelope Appearance…")).clicked() {
+            app.open_envelope_look();
+            ui.close();
+        }
     }
 }
 

@@ -1,7 +1,9 @@
 //! Off-screen captures of the loop region (its bar of its own color, the
 //! strip between yellow handles, the lines down the timeline, the tracks
 //! tinted), the Envelope Appearance window (VEGAS's look, then wide lines
-//! with square points) and the update window. Run with:
+//! with square points), the update window, the Normal Edit Tool's menu
+//! of editing tools, envelope points picked and the BananaV Mods window
+//! with AI agents on. Run with:
 //! `cargo test -p bv-ui-egui --test telas_rodada -- --ignored --nocapture`
 //! The images go to `target/telas/rodada_*.png`. Nothing is saved: no OK
 //! is pressed.
@@ -11,6 +13,7 @@ use std::time::Duration;
 
 use bv_ui_egui::{BananaApp, Language, apply_theme, egui, set_language};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 
 fn settle(h: &mut Harness<'_, BananaApp>) {
     for _ in 0..20 {
@@ -26,6 +29,22 @@ fn snap(h: &mut Harness<'_, BananaApp>, name: &str) {
     let img = h.render().expect("render");
     img.save(dir.join(format!("rodada_{name}.png")))
         .expect("save");
+}
+
+/// A click of the mouse's main button at `at`: moved there, pressed and
+/// let go, a frame for each.
+fn mouse_click(h: &mut Harness<'_, BananaApp>, at: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
 }
 
 fn harness(app: BananaApp) -> Harness<'static, BananaApp> {
@@ -102,7 +121,7 @@ fn captura_loop_envelopes_atualizacao() {
     let mut app = BananaApp::new(egui::Context::default());
     app.welcome_for_review("closed");
     app.load_demo();
-    app.update_for_review("0.3.0");
+    app.update_for_review("0.4.1");
     let mut h = harness(app);
     snap(&mut h, "atualizacao");
 }
@@ -123,4 +142,120 @@ fn captura_loop_e_transform() {
     snap(&mut h, "loop_hidden");
     h.state_mut().transform_window_for_review();
     snap(&mut h, "transform");
+}
+
+/// The markers' flags at the timeline's top, their tails ending in the
+/// loop region's bar and their lines down the ruler and the tracks; then
+/// the keyframe controller a parameter's Animate button brings up in a
+/// transition's window and in the Video Media Generators window (Titles &
+/// Text's Text color, its row the color's own).
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_marcadores_e_keyframes() {
+    set_language(Language::English);
+    let mut app = BananaApp::new(egui::Context::default());
+    app.welcome_for_review("closed");
+    app.load_demo();
+    let mut h = harness(app);
+    snap(&mut h, "marcadores");
+    // A transition's window: its first parameter animated, with the mouse.
+    assert!(h.state_mut().transition_for_review(true));
+    settle(&mut h);
+    let at = h
+        .query_all_by_label("Animate")
+        .next()
+        .map(|c| c.rect().center())
+        .expect("an Animate button");
+    mouse_click(&mut h, at);
+    settle(&mut h);
+    assert!(
+        h.query_by_label("Sync Cursor").is_some(),
+        "the keyframe controller"
+    );
+    snap(&mut h, "transicao_animada");
+    // The Video Media Generators window on a Titles & Text event: its Text
+    // color animated.
+    let mut app = BananaApp::new(egui::Context::default());
+    app.welcome_for_review("closed");
+    app.load_demo();
+    app.titles_for_review();
+    let mut h = harness(app);
+    settle(&mut h);
+    snap(&mut h, "gerador_antes");
+    let row = h
+        .query_all_by_label("Text color:")
+        .next()
+        .map(|c| c.rect().center().y)
+        .expect("Titles & Text's Text color");
+    let at = h
+        .query_all_by_label("Animate")
+        .map(|c| c.rect().center())
+        .min_by(|a, b| (a.y - row).abs().total_cmp(&(b.y - row).abs()))
+        .expect("an Animate button");
+    mouse_click(&mut h, at);
+    settle(&mut h);
+    assert!(
+        h.query_by_label("Sync Cursor").is_some(),
+        "the keyframe controller"
+    );
+    snap(&mut h, "gerador_animado");
+}
+
+/// The Normal Edit Tool's menu of editing tools, opened by its arrow in
+/// the timeline's toolbar; then the button after the Slip Tool is picked.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_ferramentas_de_edicao() {
+    let mut app = BananaApp::new(egui::Context::default());
+    app.welcome_for_review("closed");
+    app.load_demo();
+    // The app takes the language of the user's settings: English here.
+    set_language(Language::English);
+    let mut h = harness(app);
+    settle(&mut h);
+    let at = h
+        .query_all_by_label("Editing Tool")
+        .next()
+        .map(|c| c.rect().center())
+        .expect("the Normal Edit Tool's arrow");
+    mouse_click(&mut h, at);
+    snap(&mut h, "ferramentas_menu");
+    let slip = h
+        .query_all_by_label("Slip Tool")
+        .next()
+        .map(|c| c.rect().center())
+        .expect("the Slip Tool's row");
+    mouse_click(&mut h, slip);
+    snap(&mut h, "ferramentas_slip");
+}
+
+/// Envelope points picked with Ctrl and Shift: an adjustment track's
+/// Composite envelope, its points at 4 and 6 s picked (white).
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_pontos_escolhidos() {
+    let mut app = BananaApp::new(egui::Context::default());
+    app.welcome_for_review("closed");
+    app.load_demo();
+    app.envelope_picks_for_review();
+    set_language(Language::English);
+    let mut h = harness(app);
+    snap(&mut h, "pontos_escolhidos");
+}
+
+/// Options › BananaV Mods with AI agents on: the window listening (its
+/// address in a file of the test's own), Copy MCP configuration.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_mods_agentes() {
+    let mut app = BananaApp::new(egui::Context::default());
+    app.welcome_for_review("closed");
+    app.load_demo();
+    let file = std::env::temp_dir().join(format!("bv-agents-telas-{}.json", std::process::id()));
+    app.agents_for_review(file.clone());
+    set_language(Language::English);
+    let mut h = harness(app);
+    snap(&mut h, "mods_agentes");
+    drop(h);
+    let _ = std::fs::remove_file(file);
 }

@@ -145,13 +145,50 @@ fn after_double_click(project: &Project) -> Option<TimeRange> {
     (all.duration > Tick::ZERO).then_some(all)
 }
 
+/// The time between the markers and the regions' ends around `t` — the
+/// project's start and end where there is none on a side —, as a
+/// double-click on VEGAS's marker bar selects it (with no marker at all,
+/// the whole project). `None` when there is no time there.
+fn between_markers(project: &Project, t: Tick) -> Option<TimeRange> {
+    let points = project.markers.iter().map(|m| m.time).chain(
+        project
+            .regions
+            .iter()
+            .flat_map(|r| [r.range.start, r.range.end()]),
+    );
+    let mut before = Tick::ZERO;
+    let mut after: Option<Tick> = None;
+    for p in points {
+        if p <= t {
+            before = before.max(p);
+        } else {
+            after = Some(after.map_or(p, |a| a.min(p)));
+        }
+    }
+    let end = after.unwrap_or_else(|| project.duration());
+    (end > before).then(|| TimeRange::from_bounds(before, end))
+}
+
+/// Whether `drag` makes or changes the loop region.
+fn on_loop(drag: &Option<BarDrag>) -> bool {
+    matches!(
+        drag,
+        Some(
+            BarDrag::LoopCreate { .. }
+                | BarDrag::LoopMove { .. }
+                | BarDrag::LoopStart
+                | BarDrag::LoopEnd
+        )
+    )
+}
+
 pub(crate) fn interact(
     view: &mut TimelineView,
     ui: &mut egui::Ui,
     app: &mut BananaApp,
     l: &Layout,
 ) {
-    let project = app.project().clone();
+    let project = app.project_snapshot();
     let pointer = ui.input(|i| i.pointer.latest_pos());
 
     // The time display's menu: what it shows.
@@ -224,10 +261,16 @@ pub(crate) fn interact(
         }
     });
 
-    // Barra de loop.
+    // The loop region's bar; and the marker bar over it, where a drag
+    // from a spot with no flag makes the time selection too, as VEGAS's.
     let lb = ui.interact(
         l.loop_bar,
         ui.id().with("barra-loop"),
+        Sense::click_and_drag(),
+    );
+    let mb = ui.interact(
+        l.marker_bar,
+        ui.id().with("barra-marcadores"),
         Sense::click_and_drag(),
     );
     let region = project.loop_region;
@@ -250,9 +293,18 @@ pub(crate) fn interact(
             }
         });
     }
-    if lb.dragged()
+    if mb.drag_started()
+        && !view.marker_tool.active
+        && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        && marker_at(view, l, &project, o.x).is_none()
+    {
+        let t = view.time_at(l, o.x).max(Tick::ZERO);
+        let anchor = view.snap(app, &project, t, &[Tick::ZERO], &[]);
+        view.bar_drag = Some(BarDrag::LoopCreate { anchor });
+    }
+    if (lb.dragged() || mb.dragged())
         && let Some(p) = pointer
-        && view.bar_drag.is_some()
+        && on_loop(&view.bar_drag)
     {
         let x = view.edge_scroll_x(ui, l, p.x);
         let Some(drag) = &view.bar_drag else {
@@ -290,7 +342,7 @@ pub(crate) fn interact(
             app.hidden_selection = None;
         }
     }
-    if lb.drag_stopped() {
+    if lb.drag_stopped() || (mb.drag_stopped() && on_loop(&view.bar_drag)) {
         view.bar_drag = None;
         view.snap_line = None;
         app.restart_if_playing();
@@ -366,12 +418,7 @@ pub(crate) fn interact(
         crate::menus::cmd(ui, app, Cmd::SetProjectTempo);
     });
 
-    // Barra de marcadores.
-    let mb = ui.interact(
-        l.marker_bar,
-        ui.id().with("barra-marcadores"),
-        Sense::click_and_drag(),
-    );
+    // The marker bar's flags.
     if mb.drag_started()
         && let Some(o) = ui.input(|i| i.pointer.press_origin())
         && let Some((id, region_end)) = marker_at(view, l, &project, o.x)
@@ -457,7 +504,8 @@ pub(crate) fn interact(
                 app.seek(t);
             }
         }
-        if mb.double_clicked() {
+        // Clicks counted in pairs, as the loop bar's.
+        if crate::widgets::double_click(ui, &mb) {
             match hit {
                 Some((id, _)) => {
                     let name = project
@@ -475,12 +523,14 @@ pub(crate) fn interact(
                         .unwrap_or_default();
                     app.dialogs.rename = Some((id, name));
                 }
+                // Between flags, as VEGAS's: the time between the two
+                // markers around the click selected (the whole project
+                // with none).
                 None => {
-                    let t = project
-                        .settings
-                        .frame_rate
-                        .snap_floor(view.time_at(l, p.x).max(Tick::ZERO));
-                    app.modify(|p| p.add_marker(t));
+                    let t = view.time_at(l, p.x).max(Tick::ZERO);
+                    if let Some(r) = between_markers(&project, t) {
+                        app.set_loop_region(Some(r));
+                    }
                 }
             }
         }
@@ -513,7 +563,7 @@ pub(crate) fn interact(
         show(ui.ctx(), s);
     }
     mb.on_hover_text(tr(
-        "Markers (M) and regions (R) · double-click creates/renames · drag to move",
+        "Markers (M) and regions (R) · drag: time selection · double-click: selects between two markers (on a flag, renames it) · drag a flag to move it",
     ))
     .context_menu(|ui| {
         if let super::lanes::ContextTarget::Marker(hit, t) = view.context {
@@ -730,8 +780,8 @@ pub(crate) fn paint(
         let shade = theme::panel_dark();
         let lines = app.shown_selection().is_some();
         let bar = Rect::from_min_max(
-            pos2(x0.max(l.loop_bar.left()), l.loop_bar.top() + 2.0),
-            pos2(x1.min(l.loop_bar.right()), l.loop_bar.bottom() - 1.0),
+            pos2(x0.max(l.loop_bar.left()), l.loop_bar.top()),
+            pos2(x1.min(l.loop_bar.right()), l.loop_bar.bottom()),
         );
         if bar.width() > 0.0 {
             painter.rect_filled(bar, 0.0, strip);
@@ -742,7 +792,7 @@ pub(crate) fn paint(
             pos2(l.loop_bar.right(), l.lanes.bottom()),
         ));
         let top = l.loop_bar.top();
-        let size = (l.loop_bar.height() * 0.5).round().max(5.0);
+        let size = (l.loop_bar.height() - 2.0).round().max(5.0);
         for (x, toward) in [(x0, 1.0), (x1, -1.0)] {
             if !shown(x) {
                 continue;
@@ -759,8 +809,9 @@ pub(crate) fn paint(
                     Stroke::new(1.0, handle),
                 );
             }
-            // The handle: a right triangle at the bar's top, toward the
-            // region's middle, its long side outlined dark.
+            // The handle: a right triangle a point under the bar's top,
+            // toward the region's middle, its long side outlined dark.
+            let top = top + 1.0;
             down.add(Shape::convex_polygon(
                 vec![
                     pos2(x, top),
@@ -776,14 +827,18 @@ pub(crate) fn paint(
             );
         }
     }
+    // The marker bar's ground (its flags come last, over the bars).
+    painter.rect_filled(l.marker_bar, 0.0, theme::panel());
     // Tools › Selectively Prerender Video: a bar at the top over each part
     // that plays from its file.
     for r in prerendered {
-        let x0 = view.x_of(l, r.start).max(l.loop_bar.left());
-        let x1 = view.x_of(l, r.end()).min(l.loop_bar.right());
+        let x0 = view.x_of(l, r.start).max(l.marker_bar.left());
+        let x1 = view.x_of(l, r.end()).min(l.marker_bar.right());
         if x1 > x0 {
-            let bar =
-                Rect::from_min_max(pos2(x0, l.loop_bar.top()), pos2(x1, l.loop_bar.top() + 3.0));
+            let bar = Rect::from_min_max(
+                pos2(x0, l.marker_bar.top()),
+                pos2(x1, l.marker_bar.top() + 3.0),
+            );
             painter.rect_filled(bar, 0.0, theme::prerendered());
         }
     }
@@ -854,45 +909,58 @@ pub(crate) fn paint(
         frame += minor;
     }
 
-    // Markers and regions. Their lines cross the tracks always, or only
+    // Markers and regions, as VEGAS's (measured on the user's print): their
+    // flags in the marker bar, at the top, each one's tail ending in the
+    // loop region's bar under it; their lines — the flag's color between
+    // two dark ones — down the ruler, and down the tracks always or only
     // while snapping is on (Options › Preferences › General: "Always draw
     // marker lines").
-    painter.rect_filled(l.marker_bar, 0.0, theme::panel_dark());
-    let mp = painter.with_clip_rect(l.marker_bar);
     let lines = app.settings.prefs.marker_lines || app.snapping;
-    let lanes = painter.with_clip_rect(if lines { l.lanes } else { Rect::NOTHING });
-    // VEGAS's flags: a region's at both its ends, a marker's at it, each
-    // with its number (a name that is one, else its place), a name that is
-    // not one after it.
+    let across = |top: f32, bottom: f32| {
+        Rect::from_min_max(
+            pos2(l.marker_bar.left(), top),
+            pos2(l.marker_bar.right(), bottom),
+        )
+    };
+    let mp = painter.with_clip_rect(across(l.marker_bar.top(), l.loop_bar.bottom()));
+    let down = painter.with_clip_rect(across(
+        l.loop_bar.top(),
+        if lines {
+            l.lanes.bottom()
+        } else {
+            l.lanes.top()
+        },
+    ));
+    // A region's flag at both its ends, a marker's at it, each with its
+    // number (a name that is one, else its place), a name that is not one
+    // after it.
     use crate::marker_flag::{self as flag, Kind};
-    let top = l.marker_bar.top();
+    let size = flag::TIMELINE;
+    // The flag's rectangle ends on the loop bar's first row, its tail on
+    // its last.
+    let top = l.loop_bar.top() - size.body() + 0.5;
+    let tip = top + size.height - 1.0;
+    let one = |x: f32, kind: Kind, number: &str, name: &str, picked: bool| {
+        flag::paint_pole(&down, x, tip, l.lanes.bottom(), kind, size);
+        // Its edge a point outside its pole, toward the pole's other side.
+        let edge = if kind == Kind::RegionEnd { 1.0 } else { -1.0 };
+        let f = flag::paint(&mp, x + edge, top, number, kind, size, picked);
+        if kind != Kind::RegionEnd {
+            flag::paint_name(&mp, f, name, size, kind);
+        }
+    };
     for (i, r) in project.regions.iter().enumerate() {
         let (x0, x1) = (view.x_of(l, r.range.start), view.x_of(l, r.range.end()));
         let picked = super::marker_tool::picked(view, super::marker_tool::MarkerBar::Markers, r.id);
         let (number, name) = flag_texts(&r.name, i);
-        for (x, kind) in [(x0, Kind::RegionStart), (x1, Kind::RegionEnd)] {
-            let f = flag::paint(&mp, x, top, &number, kind, flag::TIMELINE, picked);
-            if kind == Kind::RegionStart {
-                flag::paint_name(&mp, f, name, flag::TIMELINE, kind);
-            }
-            lanes.line_segment(
-                [pos2(x, l.lanes.top()), pos2(x, l.lanes.bottom())],
-                Stroke::new(1.0, flag::REGION.gamma_multiply(0.35)),
-            );
-        }
+        one(x0, Kind::RegionStart, &number, name, picked);
+        one(x1, Kind::RegionEnd, &number, name, picked);
     }
     for (i, m) in project.markers.iter().enumerate() {
         let x = view.x_of(l, m.time);
         let picked = super::marker_tool::picked(view, super::marker_tool::MarkerBar::Markers, m.id);
         let (number, name) = flag_texts(&m.name, i);
-        let f = flag::paint(&mp, x, top, &number, Kind::Marker, flag::TIMELINE, picked);
-        flag::paint_name(&mp, f, name, flag::TIMELINE, Kind::Marker);
-        lanes.add(Shape::dashed_line(
-            &[pos2(x, l.lanes.top()), pos2(x, l.lanes.bottom())],
-            Stroke::new(1.0, flag::MARKER.gamma_multiply(0.5)),
-            4.0,
-            4.0,
-        ));
+        one(x, Kind::Marker, &number, name, picked);
     }
 }
 
@@ -999,6 +1067,195 @@ mod tests {
             None,
             "nothing to take"
         );
+    }
+
+    /// The demonstration project in a window, its timeline drawn.
+    fn demo() -> egui_kittest::Harness<'static, BananaApp> {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        h
+    }
+
+    fn button(h: &egui_kittest::Harness<'_, BananaApp>, pos: egui::Pos2, pressed: bool) {
+        h.event(crate::egui::Event::PointerButton {
+            pos,
+            button: crate::egui::PointerButton::Primary,
+            pressed,
+            modifiers: crate::egui::Modifiers::default(),
+        });
+    }
+
+    fn double_click(h: &mut egui_kittest::Harness<'_, BananaApp>, at: egui::Pos2) {
+        h.event(crate::egui::Event::PointerMoved(at));
+        for _ in 0..2 {
+            button(h, at, true);
+            h.step();
+            button(h, at, false);
+            h.step();
+        }
+        h.step();
+    }
+
+    #[test]
+    fn the_time_between_two_markers_is_what_a_double_click_selects() {
+        let s = Tick::from_seconds;
+        let mut p = Project::default();
+        // No marker: nothing without a project, the whole of one.
+        assert_eq!(between_markers(&p, s(3)), None);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.load_demo();
+        let mut demo = app.project().clone();
+        demo.markers.clear();
+        demo.regions.clear();
+        let end = demo.duration();
+        assert_eq!(
+            between_markers(&demo, s(3)),
+            Some(TimeRange::from_bounds(Tick::ZERO, end))
+        );
+        // Markers and a region's ends bound it; the project's start and
+        // end where there is none on a side.
+        demo.add_marker(s(2));
+        demo.add_marker(s(6));
+        assert_eq!(
+            between_markers(&demo, s(1)),
+            Some(TimeRange::from_bounds(Tick::ZERO, s(2)))
+        );
+        assert_eq!(
+            between_markers(&demo, s(3)),
+            Some(TimeRange::from_bounds(s(2), s(6)))
+        );
+        assert_eq!(
+            between_markers(&demo, s(7)),
+            Some(TimeRange::from_bounds(s(6), end))
+        );
+        // Past the project's end and its last marker: no time there.
+        p.add_marker(s(2));
+        assert_eq!(between_markers(&p, s(5)), None);
+    }
+
+    #[test]
+    fn the_marker_bar_is_over_the_loop_bar_and_the_ruler() {
+        let h = demo();
+        let app = h.state();
+        let l = app.timeline.layout(app.timeline.last_rect, app.project());
+        // As VEGAS's: the flags' bar, the loop region's under it (where
+        // their tails end), then the ruler and the tracks.
+        assert_eq!(l.marker_bar.bottom(), l.loop_bar.top());
+        assert_eq!(l.loop_bar.bottom(), l.ruler.top());
+        assert_eq!(l.ruler.bottom(), l.lanes.top());
+        assert_eq!(l.marker_bar.height(), 24.0);
+        assert_eq!(l.loop_bar.height(), 7.0);
+        // A flag's tail ends on the loop bar's last row.
+        let size = crate::marker_flag::TIMELINE;
+        let top = l.loop_bar.top() - size.body();
+        assert_eq!(top + size.height, l.loop_bar.bottom() - 1.0);
+        assert!(top > l.marker_bar.top());
+    }
+
+    #[test]
+    fn a_double_click_on_the_marker_bar_selects_between_two_markers() {
+        let mut h = demo();
+        let before = h.state().project().clone();
+        let mut points: Vec<Tick> = before
+            .markers
+            .iter()
+            .map(|m| m.time)
+            .chain(
+                before
+                    .regions
+                    .iter()
+                    .flat_map(|r| [r.range.start, r.range.end()]),
+            )
+            .collect();
+        points.sort();
+        points.dedup();
+        assert!(points.len() >= 2, "the demo has markers: {points:?}");
+        h.state_mut().set_loop_region(None);
+        h.step();
+        // Between the first two flags.
+        let (a, b) = (points[0], points[1]);
+        let middle = (a.as_seconds_f64() + b.as_seconds_f64()) / 2.0;
+        let at = h.state().bar_spot_for_review("markers", middle);
+        double_click(&mut h, at);
+        assert_eq!(
+            h.state().project().loop_region,
+            Some(TimeRange::from_bounds(a, b))
+        );
+        // No marker came of it (BananaV's double-click made one before).
+        assert_eq!(h.state().project().markers.len(), before.markers.len());
+        // Before the first flag: from the project's start.
+        if a > Tick::from_seconds_f64(0.6) {
+            let at = h
+                .state()
+                .bar_spot_for_review("markers", a.as_seconds_f64() / 2.0);
+            double_click(&mut h, at);
+            assert_eq!(
+                h.state().project().loop_region,
+                Some(TimeRange::from_bounds(Tick::ZERO, a))
+            );
+        }
+    }
+
+    #[test]
+    fn a_drag_along_the_marker_bar_makes_the_time_selection() {
+        let mut h = demo();
+        h.state_mut().set_loop_region(None);
+        h.step();
+        let before = h.state().project().clone();
+        // From a spot with no flag to another.
+        let free = |t: f64| {
+            before
+                .markers
+                .iter()
+                .map(|m| m.time)
+                .chain(
+                    before
+                        .regions
+                        .iter()
+                        .flat_map(|r| [r.range.start, r.range.end()]),
+                )
+                .all(|m| {
+                    (m.as_seconds_f64() - t).abs() > 0.5
+                        && !(t > m.as_seconds_f64() && t < m.as_seconds_f64() + 0.5)
+                })
+        };
+        let from_s = (10..80)
+            .map(|k| f64::from(k) / 10.0)
+            .find(|&t| free(t))
+            .expect("a free spot");
+        let to_s = from_s + 1.0;
+        let from = h.state().bar_spot_for_review("markers", from_s);
+        let to = h.state().bar_spot_for_review("markers", to_s);
+        h.event(crate::egui::Event::PointerMoved(from));
+        button(&h, from, true);
+        h.step();
+        for k in 1..=10 {
+            let at = from + (to - from) * (k as f32 / 10.0);
+            h.event(crate::egui::Event::PointerMoved(at));
+            h.step();
+        }
+        button(&h, to, false);
+        h.step();
+        let made = h.state().project().loop_region.expect("a time selection");
+        assert!(
+            (made.start.as_seconds_f64() - from_s).abs() < 0.3
+                && (made.end().as_seconds_f64() - to_s).abs() < 0.3,
+            "{from_s}..{to_s}: {made:?}"
+        );
+        assert_eq!(h.state().project().markers, before.markers, "no flag moved");
     }
 
     #[test]

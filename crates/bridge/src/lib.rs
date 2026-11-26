@@ -289,6 +289,9 @@ impl Process {
                 let why = In::new(hello.get(1..).unwrap_or(&[]))
                     .str()
                     .unwrap_or_default();
+                // An answer garbled, it may be alive and serving (its input
+                // is still open): ended, not waited for.
+                let _ = child.kill();
                 let _ = child.wait();
                 Err(why)
             }

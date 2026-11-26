@@ -40,6 +40,8 @@ pub struct MoreDialogs {
     pub subclip: Option<crate::subclip_ui::SubclipDialog>,
     /// Options › Envelope Appearance… (and an envelope's shortcut menu).
     pub envelope_look: Option<crate::envelope_look::EnvelopeLookDialog>,
+    /// Options › BananaV Mods….
+    pub mods: Option<crate::mods::ModsDialog>,
     /// Help › Check for Software Updates…, and the check as BananaV starts.
     pub updates: Option<crate::updates::UpdateDialog>,
     /// Project Media's Rename: the media, its name being typed and where
@@ -117,8 +119,8 @@ impl Preferences {
 
 pub fn export_preferences(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Export Preferences"))
-        .add_filter(tr("BananaV Preferences"), &["json"])
+        .set_title(crate::i18n::os_text(tr("Export Preferences")))
+        .add_filter(crate::i18n::os_text(tr("BananaV Preferences")), &["json"])
         .set_file_name(tr("BananaV Preferences.json"))
         .save_file()
     else {
@@ -133,8 +135,8 @@ pub fn export_preferences(app: &mut BananaApp) {
 
 pub fn import_preferences(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Import Preferences"))
-        .add_filter(tr("BananaV Preferences"), &["json"])
+        .set_title(crate::i18n::os_text(tr("Import Preferences")))
+        .add_filter(crate::i18n::os_text(tr("BananaV Preferences")), &["json"])
         .pick_file()
     else {
         return;
@@ -174,14 +176,56 @@ fn loudness_text(
 }
 
 impl MoreDialogs {
+    /// Takes in the windows opened while these were being drawn (see
+    /// `MenuDialogs::absorb`): Burn Disc's windows starting their job,
+    /// Customize Toolbar's Help.
+    pub(crate) fn absorb(&mut self, opened: MoreDialogs) {
+        macro_rules! take {
+            ($($window:ident),* $(,)?) => {
+                $(
+                    if opened.$window.is_some() {
+                        self.$window = opened.$window;
+                    }
+                )*
+            };
+        }
+        take!(
+            insert_time,
+            slideshow,
+            ruler_time,
+            preferences,
+            internal,
+            help,
+            keyboard,
+            toolbar,
+            scope_settings,
+            subtitles,
+            command,
+            subclip,
+            envelope_look,
+            mods,
+            updates,
+            media_rename,
+            media_scenes,
+            burn_dvd,
+            burn_tao,
+            burn_dao,
+            burn_job,
+        );
+        self.loudness |= opened.loudness;
+    }
+
     pub fn open_insert_time(&mut self) {
         self.insert_time = Some(("00:00:05;00".into(), false));
     }
 
     pub fn open_slideshow(&mut self) {
         if let Some(paths) = rfd::FileDialog::new()
-            .set_title(tr("Slideshow: choose the images"))
-            .add_filter(tr("Images"), &["png", "jpg", "jpeg", "bmp"])
+            .set_title(crate::i18n::os_text(tr("Slideshow: choose the images")))
+            .add_filter(
+                crate::i18n::os_text(tr("Images")),
+                &["png", "jpg", "jpeg", "bmp"],
+            )
             .pick_files()
         {
             self.slideshow = Some(Slideshow {
@@ -247,6 +291,11 @@ impl MoreDialogs {
             && d.show(ctx, app)
         {
             self.envelope_look = Some(d);
+        }
+        if let Some(mut d) = self.mods.take()
+            && d.show(ctx, app)
+        {
+            self.mods = Some(d);
         }
         if let Some(mut d) = self.updates.take()
             && d.show(ctx, app)
@@ -548,8 +597,8 @@ impl MoreDialogs {
             && let Some(p) = progress.as_ref()
             && let Some(r) = p.report
             && let Some(path) = rfd::FileDialog::new()
-                .set_title(tr("Save Loudness Log"))
-                .add_filter(tr("Text"), &["txt"])
+                .set_title(crate::i18n::os_text(tr("Save Loudness Log")))
+                .add_filter(crate::i18n::os_text(tr("Text")), &["txt"])
                 .set_file_name(tr("Loudness log.txt"))
                 .save_file()
         {

@@ -4,7 +4,10 @@
 //! R, G, B and A (or a layer's, or Y for gray) come out as linear light
 //! with premultiplied alpha, framed by the display window.
 
-use super::{Picture, PictureData, ReadError, Result, corrupt, unsupported};
+use super::{
+    MAX_PIXELS, Picture, PictureData, ReadError, Result, checked_size, corrupt, pixel_count,
+    unsupported,
+};
 
 #[derive(Clone, Debug)]
 struct Channel {
@@ -99,14 +102,19 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     }
     let (dx0, dy0, dx1, dy1) = data_window.ok_or_else(bad)?;
     let (wx0, wy0, wx1, wy1) = display_window.unwrap_or((dx0, dy0, dx1, dy1));
-    let (dw, dh) = ((dx1 - dx0 + 1) as usize, (dy1 - dy0 + 1) as usize);
-    if dx1 < dx0 || dy1 < dy0 || dw > 1 << 16 || dh > 1 << 16 {
+    // The windows' sizes in 64 bits: one from the least 32-bit number to
+    // the greatest is wider than 32 bits count (it came out as nothing).
+    let (dw, dh) = (span(dx0, dx1), span(dy0, dy1));
+    if dw <= 0 || dh <= 0 || dw > 1 << 16 || dh > 1 << 16 {
         return corrupt("OpenEXR data window");
     }
-    // A display window much larger than the data is not shown whole.
-    let (mut ow, mut oh) = ((wx1 - wx0 + 1) as i64, (wy1 - wy0 + 1) as i64);
+    let (dw, dh) = (dw as usize, dh as usize);
+    let pixels = pixel_count(dw, dh)?;
+    // A display window much larger than the data is not shown whole (nor
+    // one over the pixel budget).
+    let (mut ow, mut oh) = (span(wx0, wx1), span(wy0, wy1));
     let (mut ox0, mut oy0) = (wx0, wy0);
-    if ow <= 0 || oh <= 0 || ow > 1 << 15 || oh > 1 << 15 {
+    if ow <= 0 || oh <= 0 || ow > 1 << 15 || oh > 1 << 15 || ow * oh > MAX_PIXELS as i64 {
         (ow, oh, ox0, oy0) = (dw as i64, dh as i64, dx0, dy0);
     }
     let lines_per_block = match compression {
@@ -144,8 +152,17 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         }
     }
     let row_bytes: usize = channels.iter().map(|c| c.bytes() * dw).sum();
-    // Every channel's samples of the data window, as f32.
-    let mut planes = vec![vec![0f32; dw * dh]; channels.len()];
+    // The shown channels' samples of the data window, as f32; the others
+    // (a file may list thousands) are read past, with no plane.
+    let mut planes: Vec<Vec<f32>> = (0..channels.len())
+        .map(|c| {
+            if rgb.contains(&c) || a == Some(c) {
+                vec![0f32; pixels]
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
     let mut put_lines = |raw: &[u8], first: usize, x0: usize, width: usize, lines: usize| {
         let row = row_bytes / dw * width;
         for l in 0..lines {
@@ -166,8 +183,10 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                         2 => f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
                         _ => u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32,
                     };
-                    if x0 + x < dw {
-                        planes[ci][yy * dw + x0 + x] = v;
+                    if x0 + x < dw
+                        && let Some(p) = planes[ci].get_mut(yy * dw + x0 + x)
+                    {
+                        *p = v;
                     }
                 }
                 at += n * width;
@@ -214,7 +233,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
                 let (Some(yy), Some(size)) = (i32_at(d, off), i32_at(d, off + 4)) else {
                     continue;
                 };
-                let first = (yy - dy0).max(0) as usize;
+                let first = (yy as i64 - dy0 as i64).max(0) as usize;
                 let lines = lines_per_block.min(dh.saturating_sub(first));
                 let Some(packed) = d.get(off + 8..off + 8 + size.max(0) as usize) else {
                     continue;
@@ -229,14 +248,14 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     }
     // Framed by the display window; outside the data, transparent.
     let (ow, oh) = (ow as usize, oh as usize);
-    let mut out = vec![0f32; ow * oh * 4];
+    let mut out = vec![0f32; checked_size(pixel_count(ow, oh)?, 4)?];
     for yy in 0..dh {
-        let oy = dy0 + yy as i32 - oy0;
+        let oy = dy0 as i64 + yy as i64 - oy0 as i64;
         if oy < 0 || oy as usize >= oh {
             continue;
         }
         for xx in 0..dw {
-            let ox = dx0 + xx as i32 - ox0;
+            let ox = dx0 as i64 + xx as i64 - ox0 as i64;
             if ox < 0 || ox as usize >= ow {
                 continue;
             }
@@ -277,16 +296,23 @@ pub(super) fn dimensions(d: &[u8]) -> Option<(u32, u32)> {
         pos = kind_end + 5 + size;
     }
     let (x0, y0, x1, y1) = display.or(data)?;
-    let (w, h) = ((x1 - x0 + 1) as i64, (y1 - y0 + 1) as i64);
-    if w > 0 && h > 0 && w <= 1 << 15 && h <= 1 << 15 {
+    let (w, h) = (span(x0, x1), span(y0, y1));
+    if w > 0 && h > 0 && w <= 1 << 15 && h <= 1 << 15 && w * h <= MAX_PIXELS as i64 {
         return Some((w as u32, h as u32));
     }
     let (x0, y0, x1, y1) = data?;
-    Some(((x1 - x0 + 1).max(1) as u32, (y1 - y0 + 1).max(1) as u32))
+    let size = |lo: i32, hi: i32| span(lo, hi).clamp(1, u32::MAX as i64) as u32;
+    Some((size(x0, x1), size(y0, y1)))
 }
 
 fn box2i(v: &[u8]) -> Option<(i32, i32, i32, i32)> {
     Some((i32_at(v, 0)?, i32_at(v, 4)?, i32_at(v, 8)?, i32_at(v, 12)?))
+}
+
+/// How many columns (or rows) a window from `lo` to `hi` has: in 64 bits,
+/// for the difference of two 32-bit numbers may not fit in 32.
+fn span(lo: i32, hi: i32) -> i64 {
+    hi as i64 - lo as i64 + 1
 }
 
 /// A block's bytes as stored uncompressed (`expect` of them).
@@ -305,10 +331,15 @@ fn decompress(
     match compression {
         0 => Some(packed.to_vec()),
         1 => Some(unpredict(&rle(packed, expect))),
-        2 | 3 => Some(unpredict(&bv_deflate::zlib_decompress(packed).ok()?)),
+        // No more unpacked than the block's own bytes (PXR24 packs floats
+        // in three of their four): a few bytes can be made to unpack into
+        // gigabytes.
+        2 | 3 => Some(unpredict(
+            &bv_deflate::zlib_decompress_limited(packed, expect).ok()?,
+        )),
         4 => piz(packed, channels, width, lines),
         5 => pxr24(
-            &bv_deflate::zlib_decompress(packed).ok()?,
+            &bv_deflate::zlib_decompress_limited(packed, expect).ok()?,
             channels,
             width,
             lines,
@@ -321,8 +352,10 @@ fn decompress(
 /// significant first), each sample stored as the difference from the
 /// previous; floats kept to 24 bits.
 fn pxr24(t: &[u8], channels: &[Channel], width: usize, lines: usize) -> Option<Vec<u8>> {
-    let mut out =
-        Vec::with_capacity(channels.iter().map(|c| c.bytes()).sum::<usize>() * width * lines);
+    // Room for what the header asks for, and no more than `t` can give
+    // (at most four bytes for three of its own).
+    let asked = channels.iter().map(|c| c.bytes()).sum::<usize>() * width * lines;
+    let mut out = Vec::with_capacity(asked.min(t.len().saturating_mul(2)));
     let mut at = 0usize;
     for _ in 0..lines {
         for c in channels {
@@ -362,7 +395,9 @@ fn pxr24(t: &[u8], channels: &[Channel], width: usize, lines: usize) -> Option<V
 }
 
 fn rle(d: &[u8], max: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(max);
+    // Room for what the header asks for, and no more than `d` can give (a
+    // run makes 128 bytes of two at most).
+    let mut out = Vec::with_capacity(max.min(d.len().saturating_mul(64)));
     let mut i = 0;
     while i < d.len() && out.len() < max {
         let n = d[i] as i8;
@@ -454,6 +489,10 @@ fn piz(d: &[u8], channels: &[Channel], width: usize, lines: usize) -> Option<Vec
     // Each channel's units, planar.
     let sizes: Vec<usize> = channels.iter().map(|c| c.bytes() / 2).collect();
     let total: usize = sizes.iter().map(|s| s * width * lines).sum();
+    // A block outside the data window has no samples to work on.
+    if total == 0 {
+        return Some(Vec::new());
+    }
     let mut tmp = huffman_decode(d.get(pos..pos + length)?, total)?;
     let mut start = 0;
     for &size in &sizes {
@@ -657,7 +696,9 @@ fn huffman_decode(d: &[u8], count: usize) -> Option<Vec<u16>> {
     }
     let rlc = i_max as u32;
     let data = d.get(p..)?;
-    let mut out: Vec<u16> = Vec::with_capacity(count);
+    // Room for what the header asks for, and no more than the codes can
+    // give (a run makes 255 values of nine bits at least).
+    let mut out: Vec<u16> = Vec::with_capacity(count.min(data.len().saturating_mul(256)));
     // A symbol: a value, or the run of the previous one (8 more bits).
     let emit = |sym: u32,
                 lc: &mut u32,
@@ -764,5 +805,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The writer's 9×5 file with another `dataWindow` or `displayWindow`
+    /// (its least and greatest columns and rows).
+    fn with_window(name: &str, window: [i32; 4]) -> Vec<u8> {
+        let px = vec![[0.5f32, 0.25, 0.125, 1.0]; 9 * 5];
+        let mut file = exr(9, 5, &px, true, false, ExrCompression::None);
+        let key = format!("{name}\0box2i\0");
+        let found = file.windows(key.len()).position(|w| w == key.as_bytes());
+        let at = found.unwrap() + key.len() + 4;
+        for (i, v) in window.iter().enumerate() {
+            file[at + i * 4..at + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        file
+    }
+
+    #[test]
+    fn a_data_window_wider_than_32_bits_count_is_refused() {
+        // From the least number to the greatest, across and down; and one
+        // that ends before it starts.
+        for window in [
+            [i32::MIN, 0, i32::MAX, 4],
+            [0, i32::MIN, 8, i32::MAX],
+            [5, 0, 4, 4],
+        ] {
+            assert!(
+                matches!(
+                    super::read(&with_window("dataWindow", window)),
+                    Err(crate::read::ReadError::Corrupt(_))
+                ),
+                "{window:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_display_window_that_cannot_be_shown_gives_way_to_the_data() {
+        // From the least number to the greatest, and 32768 × 32768 (over
+        // the pixel budget).
+        for window in [
+            [i32::MIN, i32::MIN, i32::MAX, i32::MAX],
+            [0, 0, 32_767, 32_767],
+        ] {
+            let file = with_window("displayWindow", window);
+            let p = super::read(&file).unwrap();
+            assert_eq!((p.width, p.height), (9, 5), "{window:?}");
+            assert_eq!(super::dimensions(&file).map(|d| d.0), Some(9));
+        }
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // 65536 × 65536 in the header of a file of 9×5 pixels.
+        let file = with_window("dataWindow", [0, 0, 65_535, 65_535]);
+        assert!(matches!(
+            super::read(&file),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_piz_block_of_no_lines_is_empty() {
+        // A block past the data window has no lines: a float channel's
+        // second halves were looked for where there are no samples.
+        let channels = [super::Channel {
+            name: "R".into(),
+            kind: 2,
+            xs: 1,
+            ys: 1,
+        }];
+        // No values but 0, then a Huffman table of 21 bytes and no codes.
+        let mut d = vec![0u8; 5];
+        d.extend(21i32.to_le_bytes());
+        d.extend([0u8; 21]);
+        assert_eq!(super::piz(&d, &channels, 4, 0), Some(Vec::new()));
     }
 }

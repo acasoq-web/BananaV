@@ -122,6 +122,8 @@ struct Mft {
     activate: IMFActivate,
     mft: IMFTransform,
     events: Option<IMFMediaEventGenerator>,
+    /// Watches the waits for its events.
+    watch: Option<Watchdog>,
     /// Inputs the asynchronous MFT asked for and has not been given.
     need_input: u32,
     provides_samples: bool,
@@ -146,10 +148,12 @@ impl Mft {
             } else {
                 None
             };
+            let watch = if is_async { Watchdog::new(&mft) } else { None };
             Ok(Mft {
                 activate,
                 mft,
                 events,
+                watch,
                 need_input: 0,
                 provides_samples: false,
                 out_size: 0,
@@ -260,10 +264,7 @@ impl Mft {
             }
             Some(ev) => {
                 while self.need_input == 0 {
-                    let e = unsafe {
-                        ev.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
-                            .map_err(win)?
-                    };
+                    let e = next_event(self.watch.as_ref(), &ev)?;
                     self.event(&e, out)?;
                 }
                 unsafe { self.mft.ProcessInput(0, sample, 0).map_err(win)? };
@@ -289,16 +290,109 @@ impl Mft {
         match self.events.clone() {
             None => while self.pull(out)? {},
             Some(ev) => loop {
-                let e = unsafe {
-                    ev.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
-                        .map_err(win)?
-                };
+                let e = next_event(self.watch.as_ref(), &ev)?;
                 if self.event(&e, out)? {
                     break;
                 }
             },
         }
         Ok(())
+    }
+}
+
+/// How long an asynchronous encoder may keep quiet before it is taken for
+/// gone: far more than a frame of 8K takes.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// An encoder's shutdown, handed to the [`Watchdog`]'s thread. An
+/// asynchronous MFT is free-threaded (Media Foundation requires it), so it
+/// may be shut down from another thread.
+struct Shutdown(IMFShutdown);
+
+// SAFETY: asynchronous MFTs must be callable from any thread.
+unsafe impl Send for Shutdown {}
+
+/// Watches the waits for an asynchronous encoder's events: one that lasts
+/// longer than [`QUIET`] (the card reset under a heavy 4K render, its
+/// driver hung) shuts the encoder down, which ends the wait with an error,
+/// and the render fails with a message rather than wait for ever (the
+/// users'). The wait itself stays the system's: nothing is spent on it.
+struct Watchdog {
+    /// When the wait going on began (`None`: none).
+    since: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// It shut the encoder down.
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watchdog {
+    fn new(mft: &IMFTransform) -> Option<Watchdog> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let shutdown = Shutdown(mft.cast::<IMFShutdown>().ok()?);
+        let since: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+        let fired = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s, f, st) = (since.clone(), fired.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("bv-encoder-watch".into())
+            .spawn(move || {
+                let shutdown = shutdown;
+                while !st.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let late = s
+                        .lock()
+                        .ok()
+                        .and_then(|g| *g)
+                        .is_some_and(|t| t.elapsed() > QUIET);
+                    if late {
+                        f.store(true, Ordering::Relaxed);
+                        // SAFETY: a COM call on a free-threaded object.
+                        let _ = unsafe { shutdown.0.Shutdown() };
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Watchdog { since, fired, stop })
+    }
+
+    /// The next event of `ev`, the wait watched.
+    fn next_event(&self, ev: &IMFMediaEventGenerator) -> Result<IMFMediaEvent> {
+        use std::sync::atomic::Ordering;
+        if let Ok(mut g) = self.since.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+        let r = unsafe { ev.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) };
+        if let Ok(mut g) = self.since.lock() {
+            *g = None;
+        }
+        match r {
+            Ok(e) => Ok(e),
+            Err(_) if self.fired.load(Ordering::Relaxed) => Err(Error::Windows(
+                "the graphics card's encoder stopped answering (its driver may have restarted)"
+                    .into(),
+            )),
+            Err(e) => Err(win(e)),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The next event of an asynchronous encoder, its wait watched when there
+/// is a watchdog.
+fn next_event(watch: Option<&Watchdog>, ev: &IMFMediaEventGenerator) -> Result<IMFMediaEvent> {
+    match watch {
+        Some(w) => w.next_event(ev),
+        None => unsafe {
+            ev.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0))
+                .map_err(win)
+        },
     }
 }
 

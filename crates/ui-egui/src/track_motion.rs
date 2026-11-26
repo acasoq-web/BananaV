@@ -94,6 +94,9 @@ pub(crate) struct TrackMotionWindow {
     grid: f32,
     sections: [bool; 5],
     drag: Option<Drag>,
+    /// The cursor's time a drag (2D or 3D) began at: it edits the motion
+    /// there.
+    drag_at: Tick,
     /// The compositing mode is 3D Source Alpha: the box is in space.
     three_d: bool,
     /// The 3D box when a drag began, and the pane and zone dragged.
@@ -152,6 +155,7 @@ impl TrackMotionWindow {
             grid: 32.0,
             sections: [true, true, false, true, true],
             drag: None,
+            drag_at: Tick::ZERO,
             three_d: false,
             drag_3d: None,
             zone_3d: None,
@@ -631,6 +635,7 @@ impl TrackMotionWindow {
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             self.gesture += 1;
+            self.drag_at = t;
             self.drag = match fxw::hit(&sp, &vp, o, rotation) {
                 Hit::Handle(sx, sy) => Some(Drag::Resize { vp, sx, sy }),
                 Hit::Rotate => Some(Drag::Rotate {
@@ -640,6 +645,13 @@ impl TrackMotionWindow {
                 Hit::Inside => Some(Drag::Move { vp, from: o }),
                 Hit::Outside => None,
             };
+        }
+        // A drag edits the motion at the cursor's time it began at. The
+        // cursor gone elsewhere meanwhile (playback, a drag the system
+        // never let go of), it ends: it would set the box at every time the
+        // cursor passes, a keyframe at each.
+        if self.drag.is_some() && self.drag_at != t {
+            self.drag = None;
         }
         if resp.dragged()
             && let (Some(d), Some(p)) = (self.drag, pointer)
@@ -1162,6 +1174,11 @@ impl TrackMotionWindow {
         edits: &mut Vec<Edit>,
     ) {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        // As the 2D drags: one ends when the cursor leaves its time.
+        if self.drag_3d.is_some() && self.drag_at != t {
+            self.drag_3d = None;
+            self.zone_3d = None;
+        }
         let b0 = motion.space_at(t);
         let mut b = b0;
         for (i, pane) in self.layout.panes(rect).into_iter().enumerate() {
@@ -1202,6 +1219,7 @@ impl TrackMotionWindow {
                     });
             if resp.drag_started_by(PointerButton::Primary) && hover.is_some() {
                 self.gesture += 1;
+                self.drag_at = t;
                 self.drag_3d = Some(b0);
                 self.zone_3d = hover.map(|z| (i, z));
             }

@@ -6,7 +6,8 @@ use crate::app::BananaApp;
 use crate::egui::{self, Align2, FontId, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use crate::i18n::tr;
 use crate::keymap::{
-    Action, Binding, Context, DEFAULT_MAP, compact_names, default_bindings, registry,
+    Action, Binding, Context, DEFAULT_MAP, PREMIERE_MAP, compact_names, default_bindings,
+    premiere_bindings, registry,
 };
 use crate::theme;
 
@@ -27,6 +28,8 @@ pub struct KeyboardDialog {
     save_as: Option<String>,
     /// Scroll the list to the selected row on the next frame.
     reveal: bool,
+    /// The mods on: the commands of those off are not listed.
+    mods: crate::mods::Mods,
 }
 
 impl KeyboardDialog {
@@ -40,6 +43,7 @@ impl KeyboardDialog {
             captured: None,
             save_as: None,
             reveal: false,
+            mods: app.settings.mods,
         }
     }
 
@@ -48,7 +52,10 @@ impl KeyboardDialog {
         let filter = self.filter.to_lowercase();
         let mut rows = Vec::new();
         for (i, c) in registry().iter().enumerate() {
-            if c.context != self.context || !c.id.to_lowercase().contains(&filter) {
+            if c.context != self.context
+                || !c.id.to_lowercase().contains(&filter)
+                || !crate::keymap::action_on(c.action, &self.mods)
+            {
                 continue;
             }
             if self.bindings[i].is_empty() {
@@ -92,7 +99,11 @@ impl KeyboardDialog {
         // Keyboard map.
         ui.label(tr("Keyboard map:"));
         ui.horizontal(|ui| {
-            let shown = self.map.clone().unwrap_or_else(|| tr(DEFAULT_MAP).into());
+            let shown = match self.map.as_deref() {
+                None => tr(DEFAULT_MAP).to_string(),
+                Some(PREMIERE_MAP) => tr(PREMIERE_MAP).to_string(),
+                Some(n) => n.to_string(),
+            };
             let mut pick: Option<Option<String>> = None;
             egui::ComboBox::from_id_salt("mapa-teclado")
                 .width((ui.available_width() - 190.0).max(120.0))
@@ -103,6 +114,16 @@ impl KeyboardDialog {
                         .clicked()
                     {
                         pick = Some(None);
+                    }
+                    // Another editor's keys, for those who come from it.
+                    if ui
+                        .selectable_label(
+                            self.map.as_deref() == Some(PREMIERE_MAP),
+                            tr(PREMIERE_MAP),
+                        )
+                        .clicked()
+                    {
+                        pick = Some(Some(PREMIERE_MAP.to_string()));
                     }
                     for name in app.keymap.map_names() {
                         if ui
@@ -116,7 +137,13 @@ impl KeyboardDialog {
             if let Some(p) = pick {
                 self.bindings = match &p {
                     None => default_bindings(),
-                    Some(n) => app.keymap.map_bindings(n).unwrap_or_else(default_bindings),
+                    Some(n) => app.keymap.map_bindings(n).unwrap_or_else(|| {
+                        if n == PREMIERE_MAP {
+                            premiere_bindings()
+                        } else {
+                            default_bindings()
+                        }
+                    }),
                 };
                 self.map = p;
                 self.selected = None;
@@ -145,7 +172,8 @@ impl KeyboardDialog {
                 cancel = ui.button(tr("Cancel")).clicked();
             });
             let n = name.trim().to_string();
-            if ok && !n.is_empty() && n != DEFAULT_MAP && n != tr(DEFAULT_MAP) {
+            let reserved = [DEFAULT_MAP, tr(DEFAULT_MAP), PREMIERE_MAP, tr(PREMIERE_MAP)];
+            if ok && !n.is_empty() && !reserved.contains(&n.as_str()) {
                 match app.keymap.apply(Some(n.clone()), self.bindings.clone()) {
                     Ok(()) => self.map = Some(n),
                     Err(e) => app.report_error(trf!("Could not save the map: {}", e)),

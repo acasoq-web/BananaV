@@ -9,6 +9,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use crate::abi::{PluginObject, Rect, TEXT, TimeInfo, flags, op, text_of, time};
@@ -30,8 +31,10 @@ struct Run {
 pub struct Local {
     module: Arc<Module>,
     plugin: *mut PluginObject,
-    /// Pointed to by the plug-in's object: kept until it is closed.
-    host: Box<HostData>,
+    /// Pointed to by the plug-in's object: kept until it is closed (let go
+    /// of in `drop`, never when its library crashed: the object is left
+    /// then, still pointing at it).
+    host: ManuallyDrop<Box<HostData>>,
     name: String,
     run: Option<Run>,
     /// Parameter changes for the next block: from its first sample, and
@@ -80,7 +83,7 @@ impl Local {
         let mut local = Local {
             module: Arc::clone(module),
             plugin,
-            host,
+            host: ManuallyDrop::new(host),
             name: String::new(),
             run: None,
             pending: Vec::new(),
@@ -924,12 +927,50 @@ impl Local {
 impl Drop for Local {
     fn drop(&mut self) {
         if self.crashed() {
-            // Never called again, not even to close: its object is left.
+            // Never called again, not even to close: its object is left,
+            // and with it what it points at for its callbacks (a few bytes,
+            // once) — a timer or a thread of the plug-in's own may still
+            // call back. The window it resized is no longer its to resize.
+            self.host.set_resize(None);
             return;
         }
         self.close_editor();
         self.stop();
         // The object is the plug-in's to free from now on.
         self.dispatch("close", op::CLOSE, 0, 0, std::ptr::null_mut(), 0.0);
+        if !self.crashed() {
+            // SAFETY: dropped once, here: closed, the plug-in's object is
+            // gone and nothing points at its data any more.
+            unsafe { ManuallyDrop::drop(&mut self.host) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::host_op;
+
+    /// A plug-in whose library crashed is never closed: its object is left,
+    /// and with it what the object points at for its callbacks — a timer
+    /// or a thread of the plug-in's own may still call back.
+    #[test]
+    fn a_crashed_plug_ins_callbacks_still_find_their_data() {
+        let module = crate::linked("left-behind", bv_vst2_testplug::VSTPluginMain);
+        let module = module.expect("the test plug-in");
+        let local = Local::new(&module, 0).expect("made");
+        local.host.set_block(777);
+        let plugin = local.plugin;
+        module.crash(&local.name, "the test", 0, std::ptr::null_mut());
+        drop(local);
+        // Other instances' data, which would take its place were it freed.
+        let others: Vec<_> = (0..64).map(|_| HostData::new()).collect();
+        // SAFETY: the plug-in's object, left as it was, calling back as a
+        // thread of its own would.
+        let block = unsafe {
+            crate::host::callback(plugin, host_op::BLOCK_SIZE, 0, 0, std::ptr::null_mut(), 0.0)
+        };
+        assert_eq!(block, 777, "its own data, as it left it");
+        drop(others);
     }
 }

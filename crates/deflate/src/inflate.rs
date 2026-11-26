@@ -204,26 +204,38 @@ fn fixed_tables() -> (Huffman, Huffman) {
     )
 }
 
-/// Descomprime um fluxo deflate bruto.
+/// Decompresses a raw deflate stream.
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
-    inflate_with_len(data).map(|(out, _)| out)
+    inflate_limited(data, usize::MAX)
 }
 
-/// Descomprime e informa quantos bytes de entrada foram usados.
-pub(crate) fn inflate_with_len(data: &[u8]) -> Result<(Vec<u8>, usize)> {
+/// Like [`inflate`], for a stream known to unpack to `max_out` bytes at
+/// most: one that gives more is refused as soon as it does. A few bytes can
+/// be made to unpack into gigabytes, so readers of files pass the size the
+/// file's own header promises.
+pub fn inflate_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
+    inflate_with_len(data, max_out).map(|(out, _)| out)
+}
+
+/// What a stream that unpacks to more than its limit is refused with.
+const TOO_LONG: Error = Error::Corrupt("more data than expected");
+
+/// Decompresses (up to `max_out` bytes) and says how many bytes of the
+/// input were used.
+pub(crate) fn inflate_with_len(data: &[u8], max_out: usize) -> Result<(Vec<u8>, usize)> {
     let mut br = Bits::new(data);
-    let mut out = Vec::with_capacity(data.len() * 4);
+    let mut out = Vec::with_capacity(data.len().saturating_mul(4).min(max_out));
     loop {
         let last = br.bits(1)? == 1;
         match br.bits(2)? {
-            0 => stored(&mut br, &mut out)?,
+            0 => stored(&mut br, &mut out, max_out)?,
             1 => {
                 let (lit, dist) = fixed_tables();
-                codes(&mut br, &mut out, &lit, &dist)?;
+                codes(&mut br, &mut out, &lit, &dist, max_out)?;
             }
             2 => {
                 let (lit, dist) = dynamic_tables(&mut br)?;
-                codes(&mut br, &mut out, &lit, &dist)?;
+                codes(&mut br, &mut out, &lit, &dist, max_out)?;
             }
             _ => return Err(Error::Corrupt("tipo de bloco reservado")),
         }
@@ -234,7 +246,7 @@ pub(crate) fn inflate_with_len(data: &[u8]) -> Result<(Vec<u8>, usize)> {
     Ok((out, br.consumed()))
 }
 
-fn stored(br: &mut Bits<'_>, out: &mut Vec<u8>) -> Result<()> {
+fn stored(br: &mut Bits<'_>, out: &mut Vec<u8>, max_out: usize) -> Result<()> {
     br.align();
     let len = br.bits(16)?;
     let nlen = br.bits(16)?;
@@ -243,6 +255,9 @@ fn stored(br: &mut Bits<'_>, out: &mut Vec<u8>) -> Result<()> {
     }
     // Bytes ainda no acumulador vêm primeiro.
     let mut len = len as usize;
+    if len > max_out - out.len() {
+        return Err(TOO_LONG);
+    }
     while len > 0 && br.count >= 8 {
         out.push(br.bits(8)? as u8);
         len -= 1;
@@ -303,15 +318,31 @@ fn dynamic_tables(br: &mut Bits<'_>) -> Result<(Huffman, Huffman)> {
     ))
 }
 
-fn codes(br: &mut Bits<'_>, out: &mut Vec<u8>, lit: &Huffman, dist: &Huffman) -> Result<()> {
+/// Decodes a block's codes into `out`, which never grows past `max_out`
+/// (it is within it when the block starts).
+fn codes(
+    br: &mut Bits<'_>,
+    out: &mut Vec<u8>,
+    lit: &Huffman,
+    dist: &Huffman,
+    max_out: usize,
+) -> Result<()> {
     loop {
         let sym = lit.decode(br)?;
         match sym {
-            0..=255 => out.push(sym as u8),
+            0..=255 => {
+                if out.len() >= max_out {
+                    return Err(TOO_LONG);
+                }
+                out.push(sym as u8)
+            }
             256 => return Ok(()),
             257..=285 => {
                 let i = (sym - 257) as usize;
                 let len = LEN_BASE[i] as usize + br.bits(LEN_EXTRA[i] as u32)? as usize;
+                if len > max_out - out.len() {
+                    return Err(TOO_LONG);
+                }
                 let d = dist.decode(br)? as usize;
                 if d >= 30 {
                     return Err(Error::Corrupt("código de distância"));

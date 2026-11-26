@@ -874,8 +874,8 @@ impl Page {
             let extension = bv_vst2::preset::BANK_EXTENSION;
             let vendor = i.describe().vendor;
             let mut dialog = rfd::FileDialog::new()
-                .set_title(tr("Save VST Bank As"))
-                .add_filter(tr("VST 2 bank"), &[extension])
+                .set_title(crate::i18n::os_text(tr("Save VST Bank As")))
+                .add_filter(crate::i18n::os_text(tr("VST 2 bank")), &[extension])
                 .set_file_name(format!(
                     "{}.{extension}",
                     bv_vst3::preset::file_name(&v.name)
@@ -920,8 +920,8 @@ impl Page {
         };
         let folder = presets_folder(v.format, &vendor, &v.name);
         let mut dialog = rfd::FileDialog::new()
-            .set_title(tr("Save VST Preset As"))
-            .add_filter(filter, &[extension])
+            .set_title(crate::i18n::os_text(tr("Save VST Preset As")))
+            .add_filter(crate::i18n::os_text(filter), &[extension])
             .set_file_name(format!(
                 "{}.{extension}",
                 bv_vst3::preset::file_name(&v.name)
@@ -968,8 +968,8 @@ impl Page {
             ),
         };
         let mut dialog = rfd::FileDialog::new()
-            .set_title(title)
-            .add_filter(filter, extensions);
+            .set_title(crate::i18n::os_text(title))
+            .add_filter(crate::i18n::os_text(filter), extensions);
         if let Some(dir) = presets_folder(v.format, &vendor, &v.name).filter(|d| d.is_dir()) {
             dialog = dialog.set_directory(dir);
         }

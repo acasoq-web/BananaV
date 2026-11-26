@@ -455,6 +455,11 @@ fn paint_needle_head(p: &egui::Painter, x: f32, bottom: f32) {
 }
 
 impl KeyStrip {
+    /// Whether the needle or keyframes are being dragged in it.
+    pub(crate) fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
     /// The controller, under the workspace.
     pub(crate) fn show(&mut self, ui: &mut Ui, cx: &StripCtx<'_>) -> StripAnswer {
         let mut answer = StripAnswer::default();

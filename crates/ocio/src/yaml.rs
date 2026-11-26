@@ -39,6 +39,11 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// How deep blocks, and collections in brackets, may be nested: each level
+/// is read by a call inside a call, and a document of brackets alone (or
+/// of ever deeper indentation) would overflow the stack.
+const MAX_DEPTH: usize = 128;
+
 impl Node {
     fn new(value: Value) -> Node {
         Node { tag: None, value }
@@ -116,6 +121,7 @@ pub fn parse(text: &str) -> Result<Node> {
     let mut p = Parser {
         lines: lines(text)?,
         pos: 0,
+        depth: 0,
     };
     let Some(first) = p.next_line() else {
         return Ok(Node::new(Value::Null));
@@ -194,9 +200,22 @@ fn strip_comment(s: &str) -> &str {
 struct Parser {
     lines: Vec<Line>,
     pos: usize,
+    /// How many blocks deep the one being read is.
+    depth: usize,
 }
 
 impl Parser {
+    /// Reads a block inside the one being read, refused past [`MAX_DEPTH`].
+    fn deeper(&mut self, read: impl FnOnce(&mut Parser) -> Result<Node>) -> Result<Node> {
+        if self.depth >= MAX_DEPTH {
+            return self.err("blocks nested too deep");
+        }
+        self.depth += 1;
+        let node = read(self);
+        self.depth -= 1;
+        node
+    }
+
     fn err<T>(&self, message: impl Into<String>) -> Result<T> {
         let line = self
             .lines
@@ -311,7 +330,7 @@ impl Parser {
                 .next_line()
                 .is_some_and(|next| next.indent == indent && is_dash(&next.text));
             if sequence_here {
-                self.sequence(indent)?
+                self.deeper(|p| p.sequence(indent))?
             } else {
                 self.nested(indent)?
             }
@@ -360,7 +379,7 @@ impl Parser {
     /// none).
     fn nested(&mut self, indent: usize) -> Result<Node> {
         match self.next_line().map(|next| next.indent) {
-            Some(i) if i > indent => self.block(i),
+            Some(i) if i > indent => self.deeper(|p| p.block(i)),
             _ => Ok(Node::new(Value::Null)),
         }
     }
@@ -397,6 +416,7 @@ impl Parser {
         let mut f = Flow {
             s: text.as_bytes(),
             i: 0,
+            depth: 0,
         };
         let node = f.value().map_err(|message| Error {
             line: self
@@ -572,9 +592,26 @@ fn balanced(text: &str) -> bool {
 struct Flow<'a> {
     s: &'a [u8],
     i: usize,
+    /// How many collections deep the one being read is.
+    depth: usize,
 }
 
 impl Flow<'_> {
+    /// Reads a collection inside the one being read, refused past
+    /// [`MAX_DEPTH`].
+    fn deeper(
+        &mut self,
+        read: fn(&mut Self) -> std::result::Result<Node, String>,
+    ) -> std::result::Result<Node, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err("collections nested too deep".into());
+        }
+        self.depth += 1;
+        let node = read(self);
+        self.depth -= 1;
+        node
+    }
+
     fn space(&mut self) {
         while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
             self.i += 1;
@@ -606,8 +643,8 @@ impl Flow<'_> {
             self.space();
         }
         let mut node = match self.peek() {
-            Some(b'[') => self.seq()?,
-            Some(b'{') => self.map()?,
+            Some(b'[') => self.deeper(Self::seq)?,
+            Some(b'{') => self.deeper(Self::map)?,
             Some(b'"') | Some(b'\'') => Node::new(Value::Scalar(self.quoted()?)),
             _ => {
                 let s = self.plain(false);
@@ -898,6 +935,71 @@ escaped: \"a\\tb\"
         );
         assert_eq!(n.get("quoted").unwrap().str(), Some("it's"));
         assert_eq!(n.get("escaped").unwrap().str(), Some("a\tb"));
+    }
+
+    #[test]
+    fn collections_nested_too_deep_are_refused() {
+        let brackets = |n: usize| format!("a: {}1{}\n", "[".repeat(n), "]".repeat(n));
+        let e = parse(&brackets(100_000)).unwrap_err();
+        assert!(e.message.contains("too deep"), "{e}");
+        let braces = format!("a: {}{}\n", "{b: ".repeat(100_000), "}".repeat(100_000));
+        let e = parse(&braces).unwrap_err();
+        assert!(e.message.contains("too deep"), "{e}");
+        // What a configuration may well have still reads.
+        let doc = parse(&brackets(100)).unwrap();
+        let mut n = doc.get("a").unwrap();
+        for _ in 0..100 {
+            n = &n.seq().unwrap()[0];
+        }
+        assert_eq!(n.f64(), Some(1.0));
+    }
+
+    #[test]
+    fn blocks_nested_too_deep_are_refused() {
+        // A mapping inside a mapping, each a column deeper; then sequences
+        // of mappings, which go deeper another way.
+        let mappings = |n: usize| -> String {
+            (0..n)
+                .map(|i| format!("{}k:\n", " ".repeat(i)))
+                .collect::<String>()
+                + &format!("{}k: 1\n", " ".repeat(n))
+        };
+        let sequences = |n: usize| -> String {
+            (0..n)
+                .map(|i| format!("{}- k:\n", " ".repeat(i * 2)))
+                .collect::<String>()
+                + &format!("{}- 1\n", " ".repeat(n * 2))
+        };
+        for deep in [mappings(2000), sequences(2000)] {
+            let e = parse(&deep).unwrap_err();
+            assert!(e.message.contains("too deep"), "{e}");
+        }
+        let doc = parse(&mappings(100)).unwrap();
+        let mut n = &doc;
+        for _ in 0..=100 {
+            n = n.get("k").unwrap();
+        }
+        assert_eq!(n.f64(), Some(1.0));
+        assert!(parse(&sequences(100)).is_ok());
+    }
+
+    #[test]
+    fn the_deepest_document_fits_a_small_stack() {
+        // Blocks and brackets as deep as they go, one inside the other, on
+        // half of the megabyte a program's first thread has on Windows.
+        let mut doc: String = (0..MAX_DEPTH)
+            .map(|i| format!("{}k:\n", " ".repeat(i)))
+            .collect();
+        doc += &format!(
+            "{}k: {}1{}\n",
+            " ".repeat(MAX_DEPTH),
+            "[".repeat(MAX_DEPTH),
+            "]".repeat(MAX_DEPTH)
+        );
+        let reader = std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(move || parse(&doc).is_ok());
+        assert!(reader.unwrap().join().unwrap());
     }
 
     #[test]

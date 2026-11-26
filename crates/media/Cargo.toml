@@ -21,12 +21,17 @@ bv-image.workspace = true
 bv-wic.workspace = true
 bv-ac3.workspace = true
 bv-prores.workspace = true
+bv-quicktime.workspace = true
 bv-mf.workspace = true
 bv-mp4.workspace = true
 
 # OFX generators (plug-ins do not run in the browser build).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bv-ofx.workspace = true
+
+[dev-dependencies]
+# Gzipped SVG drawings made for the tests.
+bv-deflate.workspace = true
 
 [lints]
 workspace = true

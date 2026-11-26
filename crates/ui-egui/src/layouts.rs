@@ -62,7 +62,7 @@ pub fn write(path: &Path, layout: &SavedLayout) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    crate::safe_file::write(path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 pub fn read(path: &Path) -> Result<SavedLayout, String> {

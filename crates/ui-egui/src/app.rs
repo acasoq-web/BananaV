@@ -24,6 +24,7 @@ use crate::timeline::TimelineView;
 use crate::{menus, theme};
 
 pub(crate) mod actions;
+pub(crate) mod agents;
 mod cd_actions;
 mod display;
 pub(crate) mod key_actions;
@@ -51,6 +52,8 @@ pub(crate) enum Pending {
     /// File › Import › Final Cut Pro 7/DaVinci Resolve XML (`false`) or
     /// FCPXML (`true`): its sequence as a new project.
     ImportFcp(bool),
+    /// File › Import › VEG Project: the project as a new one.
+    ImportVeg,
 }
 
 /// Editing tool active on the timeline (Edit › Editing Tool).
@@ -75,9 +78,41 @@ pub enum Tool {
     Select,
     /// Click zooms in; right button zooms out.
     Zoom,
+    /// Track Select Forward (A), or Backward (`back`, Shift+A) — a mod
+    /// (Options › BananaV Mods…), as other editors have it: a press
+    /// selects every event from there to the end (to the start) on all
+    /// tracks, with Shift on its track only (Alt+Shift: its events' groups
+    /// left out); dragging one of them moves them all.
+    TrackSelect { back: bool },
 }
 
 impl Tool {
+    /// The editing modes of the Normal Edit Tool's menu, in its order.
+    pub const EDIT_MODES: [Tool; 6] = [
+        Tool::Edit,
+        Tool::Shuffle,
+        Tool::Slip,
+        Tool::Slide,
+        Tool::Stretch,
+        Tool::SplitTrim,
+    ];
+
+    /// An editing mode's icon (the Normal Edit Tool's button and menu).
+    pub fn icon(self) -> crate::icons::Icon {
+        use crate::icons::Icon;
+        match self {
+            Tool::Shuffle => Icon::ShuffleTool,
+            Tool::Slip => Icon::SlipTool,
+            Tool::Slide => Icon::SlideTool,
+            Tool::Stretch => Icon::StretchTool,
+            Tool::SplitTrim => Icon::SplitTrimTool,
+            Tool::Envelope => Icon::EnvelopeTool,
+            Tool::Select => Icon::SelectTool,
+            Tool::Zoom => Icon::ZoomTool,
+            Tool::Edit | Tool::TrackSelect { .. } => Icon::EditTool,
+        }
+    }
+
     /// Order used by "Next tool" (D) and "Previous tool" (Shift+D).
     pub const CYCLE: [Tool; 8] = [
         Tool::Edit,
@@ -101,6 +136,8 @@ impl Tool {
             Tool::Envelope => "Envelope",
             Tool::Select => tr("Selection"),
             Tool::Zoom => "Zoom",
+            Tool::TrackSelect { back: false } => tr("Track Select Forward Tool"),
+            Tool::TrackSelect { back: true } => tr("Track Select Backward Tool"),
         }
     }
 
@@ -214,6 +251,9 @@ pub struct BananaApp {
     pub(crate) hidden_selection: Option<TimeRange>,
     pub(crate) play_rate: f64,
     pub(crate) tool: Tool,
+    /// The editing mode the Normal Edit Tool's button stands for: the last
+    /// of [`Tool::EDIT_MODES`] in use (its menu picks it, as VEGAS's).
+    pub(crate) edit_mode: Tool,
     pub(crate) media_drag: Option<MediaDrag>,
     /// The media drag began with the right mouse button: letting it go
     /// on the timeline asks how to add it (Add as Takes among the ways).
@@ -252,6 +292,11 @@ pub struct BananaApp {
     pub(crate) fx_packages: crate::fx_packages::FxPackages,
     /// The docked window the last click was in: it has the keys.
     pub(crate) keys_tab: Option<crate::dock::Tab>,
+    /// The keys a list window (Explorer, Project Media, the plug-in
+    /// windows) took this frame: letters find, arrows move.
+    pub(crate) browse: crate::browse::Browse,
+    /// The Properties window's Pan/Crop keyframe controller.
+    pub(crate) properties_keys: crate::tabs::properties::PropsKeys,
     /// The Track Motion window (a track's, or a parent's Parent Motion).
     pub(crate) track_motion: Option<crate::track_motion::TrackMotionWindow>,
     /// Tools › Multicamera › Enable Multicamera Editing.
@@ -276,8 +321,20 @@ pub struct BananaApp {
     /// (`dock::floating_windows`).
     pub(crate) floating_panels: Vec<Tab>,
     pub(crate) project_path: Option<PathBuf>,
-    pub(crate) saved: Project,
+    /// The project as it was last saved (or opened): see [`Self::set_saved`].
+    saved_state: Project,
+    /// Moves when `saved_state` changes: the memo of `is_dirty` is kept by
+    /// it and the history's revision.
+    saved_epoch: u64,
+    dirty_memo: std::cell::Cell<Option<(u64, u64, bool)>>,
+    /// The history's revision the engine has (`None`: never given).
+    engine_synced: Option<u64>,
+    /// A copy of the project, made at most once per change (the history's
+    /// revision): what the timeline and windows hold while they draw.
+    snapshot: std::cell::RefCell<Option<(u64, std::sync::Arc<Project>)>>,
     status: Option<(String, Instant, bool)>,
+    /// What AI agents have going on (`crate::agents`).
+    pub(crate) agents: agents::AgentState,
     /// Waiting for the "Save changes?" answer before doing this.
     confirm: Option<Pending>,
     /// A question waiting for its answer (see `ask.rs`), and the ones
@@ -463,6 +520,13 @@ pub struct BananaApp {
     pub(crate) dock_maximized: Option<crate::dock::Maximized>,
     /// What a key or a button asked of the layout, done where it is drawn.
     pub(crate) dock_request: Option<crate::dock::DockRequest>,
+    /// Tabs asked for (and whether to close one already open) while the
+    /// layout was being drawn — by a docked window or the timeline, which
+    /// draw with the layout out of the app: shown once it is back.
+    tab_requests: Vec<(Tab, bool)>,
+    /// The layout's tabs while it is being drawn (it is out of the app
+    /// then): what `is_tab_open` answers from meanwhile.
+    drawn_tabs: Vec<Tab>,
     /// Ctrl+Alt+Shift+F11: the timeline maximized (the docking areas
     /// hidden and the track headers folded by it).
     pub(crate) timeline_maximized: bool,
@@ -624,6 +688,15 @@ impl std::fmt::Debug for BananaApp {
 
 impl BananaApp {
     pub fn new(ctx: egui::Context) -> BananaApp {
+        // The keys are the keyboard map's alone. Left to itself egui closes
+        // the window on Ctrl+Q (with Shift and Alt too) and zooms the
+        // interface on Ctrl+Plus, Ctrl+Minus and Ctrl+0 whenever no one
+        // took the key — Insert › Audio Track's key with the keys in
+        // another window closed BananaV.
+        ctx.options_mut(|o| {
+            o.quit_shortcuts.clear();
+            o.zoom_with_keyboard = false;
+        });
         let repaint_ctx = ctx.clone();
         let engine = Engine::new(Arc::new(move || repaint_ctx.request_repaint()));
         let project = Project::default();
@@ -642,6 +715,7 @@ impl BananaApp {
             hidden_selection: None,
             play_rate: 1.0,
             tool: Tool::Edit,
+            edit_mode: Tool::Edit,
             media_drag: None,
             media_drag_secondary: false,
             clipboard: None,
@@ -668,6 +742,8 @@ impl BananaApp {
                 crate::fx_packages::FxPackages::load()
             },
             keys_tab: None,
+            browse: Default::default(),
+            properties_keys: Default::default(),
             track_motion: None,
             multicam: false,
             first_pick: None,
@@ -679,8 +755,13 @@ impl BananaApp {
             selected_media: None,
             dock: Some(dock::default_layout()),
             project_path: None,
-            saved: project,
+            saved_state: project,
+            saved_epoch: 0,
+            dirty_memo: std::cell::Cell::new(None),
+            engine_synced: None,
+            snapshot: std::cell::RefCell::new(None),
             status: None,
+            agents: agents::AgentState::default(),
             confirm: None,
             ask: None,
             asks_later: std::collections::VecDeque::new(),
@@ -767,6 +848,8 @@ impl BananaApp {
             docks_hidden: None,
             dock_maximized: None,
             dock_request: None,
+            tab_requests: Vec::new(),
+            drawn_tabs: Vec::new(),
             timeline_maximized: false,
             dock_away_since: None,
             stats: None,
@@ -846,7 +929,7 @@ impl BananaApp {
         }
         let p = app.blank_project();
         app.history.reset(p.clone());
-        app.saved = p;
+        app.set_saved(p);
         app
     }
 
@@ -1102,6 +1185,12 @@ impl BananaApp {
             }
         }
         self.offer_recovery();
+        if let Some(aside) = self.settings.damaged.take() {
+            self.report_error(trf!(
+                "The settings file could not be read: BananaV started with its defaults and kept the file as {}",
+                aside.display()
+            ));
+        }
         self.check_associations();
         // OFX plug-ins: the cache's at once, new ones in the background.
         self.ofx.scan(&self.settings.ofx_folders);
@@ -1207,6 +1296,30 @@ impl BananaApp {
             return;
         };
         for id in ids.split(';').map(str::trim) {
+            // What the screen tests set up, to look at in the real windows:
+            // the demonstration project, a transition's window and the
+            // Video Media Generators window.
+            match id {
+                "Review.Demo" => {
+                    self.load_demo();
+                    continue;
+                }
+                "Review.Transition" => {
+                    self.transition_for_review(true);
+                    continue;
+                }
+                "Review.GeneratedMedia" => {
+                    self.generated_media_for_review();
+                    continue;
+                }
+                // A parameter of each animated (a keyframe at its start):
+                // their keyframe controllers show.
+                "Review.Animated" => {
+                    self.animated_for_review();
+                    continue;
+                }
+                _ => {}
+            }
             let commands = crate::keymap::registry();
             let action = commands
                 .iter()
@@ -1219,6 +1332,39 @@ impl BananaApp {
                 _ => {}
             }
         }
+    }
+
+    /// For review: the demonstration project's transition (3D Fly In/Out)
+    /// and its gradient's generator each with a parameter animated — a
+    /// keyframe at its start —, as their Animate buttons leave them.
+    pub fn animated_for_review(&mut self) {
+        use bv_timeline::{KeyCurve, PluginKey, PluginParam, PluginValue};
+        let keyed = |v: f64| PluginParam {
+            value: PluginValue::Num(vec![v]),
+            keys: vec![PluginKey {
+                at: Tick::ZERO,
+                value: PluginValue::Num(vec![v]),
+                curve: KeyCurve::Linear,
+                handles: Vec::new(),
+            }],
+        };
+        self.modify(|p| {
+            for t in &mut p.tracks {
+                for c in &mut t.clips {
+                    if let Some(fx) = c.transition_fx.as_mut() {
+                        fx.params.insert("farX".into(), keyed(0.8));
+                    }
+                }
+            }
+            for m in &mut p.media {
+                if let bv_timeline::MediaSource::Generated(bv_timeline::Generator::Plugin(fx)) =
+                    &mut m.source
+                    && fx.id == "org.bananav.ColorGradient"
+                {
+                    fx.params.insert("aspectRatioAngle".into(), keyed(-90.0));
+                }
+            }
+        });
     }
 
     /// Switches the interface language and remembers it.
@@ -1256,6 +1402,7 @@ impl BananaApp {
         &mut self,
         f: impl FnOnce(&mut Project) -> Result<R, E>,
     ) -> Option<R> {
+        self.end_timeline_gesture();
         match self.history.apply(f) {
             Ok(r) => Some(r),
             Err(e) => {
@@ -1267,6 +1414,7 @@ impl BananaApp {
 
     /// Edição que não falha.
     pub(crate) fn modify<R>(&mut self, f: impl FnOnce(&mut Project) -> R) -> R {
+        self.end_timeline_gesture();
         match self
             .history
             .apply(|p| Ok::<_, std::convert::Infallible>(f(p)))
@@ -1279,7 +1427,22 @@ impl BananaApp {
     /// A change that makes no undo: undo and redo keep it (see
     /// `History::apply_everywhere`).
     pub(crate) fn modify_untracked(&mut self, f: impl Fn(&mut Project)) {
+        self.end_timeline_gesture();
         self.history.apply_everywhere(f);
+    }
+
+    /// An edit made while an event is being dragged on the timeline (a key,
+    /// a menu, a window): the drag ends where it is first, as one undo. Its
+    /// gesture rebuilds the project from where it began at every move,
+    /// which dropped the edit and left its undo behind. The timeline's own
+    /// edits are not concerned: while it draws, `self.timeline` is a
+    /// stand-in holding no gesture.
+    fn end_timeline_gesture(&mut self) {
+        if let Some(g) = self.timeline.gesture.take() {
+            self.history.commit_gesture(g);
+            self.timeline.drag = None;
+            self.timeline.snap_line = None;
+        }
     }
 
     /// An effect's parameters set: one undo while they are dragged, or none
@@ -1323,6 +1486,7 @@ impl BananaApp {
         key: egui::Id,
         f: impl FnOnce(&mut Project) -> R,
     ) -> R {
+        self.end_timeline_gesture();
         self.history.apply_merged(key.value(), f)
     }
 
@@ -1335,7 +1499,45 @@ impl BananaApp {
     }
 
     pub(crate) fn is_dirty(&self) -> bool {
-        *self.project() != self.saved
+        // Kept until the project or the saved one changes: the title asks
+        // every frame, and comparing two whole projects grows with them.
+        let key = (self.history.revision(), self.saved_epoch);
+        if let Some((rev, epoch, dirty)) = self.dirty_memo.get()
+            && (rev, epoch) == key
+        {
+            return dirty;
+        }
+        let dirty = *self.project() != self.saved_state;
+        self.dirty_memo.set(Some((key.0, key.1, dirty)));
+        dirty
+    }
+
+    /// Records `p` as the project as saved (a save, a project opened).
+    pub(crate) fn set_saved(&mut self, p: Project) {
+        self.saved_state = p;
+        self.saved_epoch += 1;
+    }
+
+    /// Records `p` as the project as saved and gives back the one before.
+    pub(crate) fn replace_saved(&mut self, p: Project) -> Project {
+        self.saved_epoch += 1;
+        std::mem::replace(&mut self.saved_state, p)
+    }
+
+    /// A copy of the project to hold while drawing (the interface's windows
+    /// read it while they edit the project through `self`): made again only
+    /// when the project changed, not every frame.
+    pub(crate) fn project_snapshot(&self) -> std::sync::Arc<Project> {
+        let rev = self.history.revision();
+        let mut kept = self.snapshot.borrow_mut();
+        match &*kept {
+            Some((at, p)) if *at == rev => p.clone(),
+            _ => {
+                let p = std::sync::Arc::new(self.project().clone());
+                *kept = Some((rev, p.clone()));
+                p
+            }
+        }
     }
 
     pub(crate) fn frame_rate(&self) -> bv_core::FrameRate {
@@ -1553,7 +1755,15 @@ impl BananaApp {
         self.scrub_rate = 0.0;
     }
 
-    /// Reinicia o playback com as opções atuais (loop, taxa).
+    /// Play's speed from now on, also while it plays (it goes on without a
+    /// stop).
+    pub(crate) fn set_play_rate(&mut self, rate: f64) {
+        self.play_rate = rate.clamp(0.1, 4.0);
+        self.engine.set_play_rate(self.play_rate);
+    }
+
+    /// Plays again from where it is with the options as they are now (the
+    /// loop region).
     pub(crate) fn restart_if_playing(&mut self) {
         if self.is_playing()
             && let Some(pos) = self.engine.position()
@@ -1664,10 +1874,26 @@ impl BananaApp {
         // Options › Preferences › Editing: "Cut, copy, and delete grouped
         // events".
         let grouped = self.settings.prefs.group_edits;
+        // Options › BananaV Mods: the envelope points picked along go too.
+        let points: Vec<_> = std::mem::take(&mut self.timeline.env_with)
+            .into_iter()
+            .map(|k| (k.owner(), k.kind, k.indices(self.project())))
+            .collect();
+        let drop_points = |p: &mut Project| {
+            for (owner, kind, ix) in &points {
+                let _ = p.remove_envelope_points(*owner, *kind, ix);
+            }
+        };
         if ripple {
-            self.edit(|p| p.delete_events_rippled(&ids, scope, grouped));
+            self.edit(|p| {
+                drop_points(p);
+                p.delete_events_rippled(&ids, scope, grouped)
+            });
         } else {
-            self.edit(|p| p.delete_events(&ids, false, grouped));
+            self.edit(|p| {
+                drop_points(p);
+                p.delete_events(&ids, false, grouped)
+            });
         }
         self.selection.clear();
     }
@@ -1888,12 +2114,14 @@ impl BananaApp {
     }
 
     pub(crate) fn undo(&mut self) {
+        self.end_timeline_gesture();
         if self.history.undo() {
             self.prune_selection();
         }
     }
 
     pub(crate) fn redo(&mut self) {
+        self.end_timeline_gesture();
         if self.history.redo() {
             self.prune_selection();
         }
@@ -2297,7 +2525,7 @@ impl BananaApp {
     }
 
     pub(crate) fn import_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new().set_title(tr("Import Media"));
+        let dialog = rfd::FileDialog::new().set_title(crate::i18n::os_text(tr("Import Media")));
         if let Some(paths) = crate::media_files::media_filters(dialog).pick_files() {
             self.import_paths(&paths);
         }
@@ -2318,7 +2546,7 @@ impl BananaApp {
         self.closing_project();
         let p = self.blank_project();
         self.history.reset(p.clone());
-        self.saved = p;
+        self.set_saved(p);
         self.project_path = None;
         self.selection.clear();
         self.cursor = Tick::ZERO;
@@ -2332,13 +2560,13 @@ impl BananaApp {
         p.settings.height = height;
         p.settings.frame_rate = rate;
         self.history.reset(p.clone());
-        self.saved = p;
+        self.set_saved(p);
     }
 
     /// File › Open: a project replaces the current one; a media file goes
     /// into the project as an event at the cursor (as in VEGAS).
     pub(crate) fn open_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new().set_title(tr("Open"));
+        let dialog = rfd::FileDialog::new().set_title(crate::i18n::os_text(tr("Open")));
         let Some(path) = crate::media_files::open_filters(dialog).pick_file() else {
             return;
         };
@@ -2377,9 +2605,9 @@ impl BananaApp {
         let loaded = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|s| Project::from_json(&s).map_err(|e| e.to_string()))
-            .and_then(|p| p.check_invariants().map(|_| p));
+            .and_then(mended);
         match loaded {
-            Ok(mut p) => {
+            Ok((mut p, mends)) => {
                 // VST 3 effects read from another editor's project whose
                 // plug-in was not found then: looked for again.
                 let folders = self.settings.prefs.vst_folders.clone();
@@ -2387,13 +2615,21 @@ impl BananaApp {
                 self.stop();
                 self.closing_project();
                 self.history.reset(p.clone());
-                self.saved = p;
+                if mends.is_empty() {
+                    self.set_saved(p);
+                } else {
+                    // Changed: saved, the file is mended too.
+                    self.set_saved(Project::default());
+                }
                 self.settings.touch_recent(&path);
                 self.project_path = Some(path);
                 self.selection.clear();
                 self.cursor = Tick::ZERO;
                 self.fit_timeline = true;
                 self.find_proxies();
+                if !mends.is_empty() {
+                    self.report_error(said_mends(&mends));
+                }
             }
             Err(e) => self.report_error(trf!("Could not open the project: {}", e)),
         }
@@ -2405,7 +2641,7 @@ impl BananaApp {
         self.stop();
         self.closing_project();
         self.history.reset(p.clone());
-        self.saved = self.blank_project();
+        self.set_saved(self.blank_project());
         self.project_path = None;
         self.selection.clear();
         self.cursor = Tick::ZERO;
@@ -2421,8 +2657,8 @@ impl BananaApp {
             (Some(p), false) => p.clone(),
             _ => {
                 let Some(p) = rfd::FileDialog::new()
-                    .set_title(tr("Save Project"))
-                    .add_filter(tr("BananaV Project"), &["bvproj"])
+                    .set_title(crate::i18n::os_text(tr("Save Project")))
+                    .add_filter(crate::i18n::os_text(tr("BananaV Project")), &["bvproj"])
                     .set_file_name(tr("Untitled.bvproj"))
                     .save_file()
                 else {
@@ -2431,9 +2667,12 @@ impl BananaApp {
                 p
             }
         };
-        match std::fs::write(&path, self.project().to_json()) {
+        // Whole or not at all, the last save kept beside it (`.bak`).
+        match crate::safe_file::save(&path, self.project().to_json().as_bytes()) {
             Ok(()) => {
-                self.saved = self.project().clone();
+                self.set_saved(self.project().clone());
+                // The copy saved automatically is of changes saved now.
+                self.autosave_forget_copy();
                 self.notify(trf!("Project saved to {}", path.display()));
                 self.settings.touch_recent(&path);
                 self.project_path = Some(path);
@@ -2531,13 +2770,21 @@ impl BananaApp {
 
     pub(crate) fn is_tab_open(&self, tab: Tab) -> bool {
         self.floating_panels.contains(&tab)
-            || self
-                .dock
-                .as_ref()
-                .is_some_and(|d| d.find_tab(&tab).is_some())
+            || match &self.dock {
+                Some(d) => d.find_tab(&tab).is_some(),
+                // Asked by a window of the layout while it is drawn.
+                None => self.drawn_tabs.contains(&tab),
+            }
     }
 
-    /// Mostra (ou foca) uma aba; com `toggle`, fecha se já estiver aberta.
+    /// What waits for the answer to "Save changes?" (tests).
+    #[cfg(test)]
+    pub(crate) fn waiting_for_save(&self) -> Option<&Pending> {
+        self.confirm.as_ref()
+    }
+
+    /// Shows (or brings to the front) a tab; with `toggle`, closes it when
+    /// it is open.
     pub(crate) fn show_tab(&mut self, tab: Tab, toggle: bool) {
         // Floating in a window of its own: closed with `toggle`, else left
         // there.
@@ -2547,7 +2794,12 @@ impl BananaApp {
             }
             return;
         }
-        let Some(dock) = &mut self.dock else { return };
+        let Some(dock) = &mut self.dock else {
+            // The layout is being drawn (a docked window's button, a menu
+            // of the timeline): done as soon as it is back.
+            self.tab_requests.push((tab, toggle));
+            return;
+        };
         match dock.find_tab(&tab) {
             Some(path) if toggle => {
                 dock.remove_tab(path);
@@ -2574,9 +2826,11 @@ impl BananaApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         // The Project Media thumbnail under the pointer last frame.
         let hovered = self.media_window.hovered.take();
+        self.browse.clear();
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        let cursor_before = self.cursor;
         // I and O over a thumbnail set its part's ends.
         self.media_part_keys(ctx, hovered);
         // Project Media's Quick Tags: Ctrl and a number while it has the
@@ -2588,6 +2842,8 @@ impl BananaApp {
         self.multicam_keys(ctx);
         // The Marker Tool takes the arrows and Delete while it is on.
         self.marker_tool_keys(ctx);
+        // A list window with the keys: letters find, arrows move.
+        self.browse.take_input(ctx, self.keys_tab);
         crate::keymap::dispatch(self, ctx);
         // Keys that are not menu items (transport, markers, snapping…).
         let cmd = Modifiers::COMMAND;
@@ -2598,21 +2854,9 @@ impl BananaApp {
             self.import_dialog();
         }
         let none = Modifiers::NONE;
-        let shift = Modifiers::SHIFT;
-        if pressed(shift, Key::Space) {
-            self.play_from_start();
-        }
-        if pressed(none, Key::Space) {
-            self.space_bar();
-        }
-        if pressed(none, Key::Enter) {
-            self.enter_key();
-        }
+        self.transport_keys(ctx);
         if pressed(none, Key::Escape) {
-            // Esc stops, as VEGAS's Transport.Stop: the edit cursor stays.
-            if self.engine.is_recording() || self.is_playing() || self.scrub_rate != 0.0 {
-                self.stop();
-            } else if self.timeline.edge_trim.is_some() {
+            if self.timeline.edge_trim.is_some() {
                 // Out of edge-trimming or Expanded Edit Mode.
                 self.timeline.edge_trim = None;
             } else {
@@ -2625,6 +2869,41 @@ impl BananaApp {
         }
         if pressed(none, Key::ArrowDown) {
             self.timeline.zoom_around(1.25, self.display_time());
+        }
+        // The view goes with a cursor a key moved (the Marker Tool's
+        // arrows too).
+        if self.cursor != cursor_before {
+            self.timeline.reveal_cursor = true;
+        }
+    }
+
+    /// The transport's keys that are not the keyboard map's: Shift+Space
+    /// plays from the start, Space and Enter play and pause or stop, Esc
+    /// stops (as VEGAS's Transport.Stop: the edit cursor stays) while
+    /// something plays, records or shuttles. Taken from `ctx`'s input
+    /// before anything is drawn (a button with the keyboard's focus would
+    /// take Space and Enter as clicks): the main window's, or a dialog's in
+    /// an OS window of its own whose keys are the program's (the FX
+    /// window's, where Pan/Crop's keyframes are).
+    pub(crate) fn transport_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |m: Modifiers, k: Key| {
+            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)))
+        };
+        let none = Modifiers::NONE;
+        // Shift's first: the plain key's would take it too.
+        if pressed(Modifiers::SHIFT, Key::Space) {
+            self.play_from_start();
+        }
+        if pressed(none, Key::Space) {
+            self.space_bar();
+        }
+        if pressed(none, Key::Enter) {
+            self.enter_key();
+        }
+        if (self.engine.is_recording() || self.is_playing() || self.scrub_rate != 0.0)
+            && pressed(none, Key::Escape)
+        {
+            self.stop();
         }
     }
 
@@ -2657,6 +2936,7 @@ impl BananaApp {
             crate::multicam::status(self, ui);
             crate::stabilize_ui::status(self, ui);
             crate::mask_tracking::status(self, ui);
+            self.agents_status(ui);
             if let Some((msg, at, error)) = &self.status {
                 if at.elapsed() < Duration::from_secs(8) {
                     let color = if *error {
@@ -2697,20 +2977,22 @@ impl BananaApp {
             .map_or(tr("Untitled").to_string(), |s| {
                 s.to_string_lossy().to_string()
             });
-        // The version too, as "Untitled — BananaV 0.3.0".
+        // The version too, as "Untitled — BananaV 0.4.0".
         let mut title = format!(
             "{name}{} — BananaV {}",
             if self.is_dirty() { "*" } else { "" },
             env!("CARGO_PKG_VERSION")
         );
-        // While rendering, its progress first ("3% - Untitled — BananaV 0.3.0").
+        // While rendering, its progress first ("3% - Untitled — BananaV 0.4.0").
         if let Some(p) = self.engine.render_progress()
             && !p.finished
         {
             title = format!("{}% - {title}", (p.fraction() * 100.0).floor());
         }
         if title != self.title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(crate::i18n::os_text(
+                title.clone(),
+            )));
             crate::floating::set_main_title(&title);
             self.title = title;
         }
@@ -2982,7 +3264,7 @@ impl BananaApp {
         self.stop();
         self.closing_project();
         self.history.reset(p.clone());
-        self.saved = p;
+        self.set_saved(p);
         self.project_path = None;
         self.selection.clear();
         self.select_clip(g, false);
@@ -3009,6 +3291,9 @@ impl BananaApp {
     /// reach, point size, squares) in use, as if just set (screen tests;
     /// nothing is saved unless OK is pressed).
     pub fn envelope_look_for_review(&mut self, look: (f32, f32, f32, bool)) {
+        // Its mod on (never saved).
+        self.settings = self.settings.unsaved();
+        self.settings.mods.envelope_look = true;
         self.open_envelope_look();
         let (line, grab, point, square) = look;
         self.settings.prefs.envelope_look = crate::envelope_look::EnvelopeLook {
@@ -3040,6 +3325,9 @@ impl BananaApp {
     /// The Transform mode on and its window open beside the browsers
     /// (screen tests).
     pub fn transform_window_for_review(&mut self) {
+        // Its mod on (never saved).
+        self.settings = self.settings.unsaved();
+        self.settings.mods.transform = true;
         self.preview.transform = true;
         self.show_tab(crate::dock::Tab::Transform, false);
     }
@@ -3053,6 +3341,11 @@ impl BananaApp {
     /// for the frame budget's test; its title, `None` past the last.
     pub fn show_window_for_review(&mut self, n: usize) -> Option<&'static str> {
         let tab = *crate::dock::Tab::ALL.get(n)?;
+        // A mod's window with its mod on (never saved).
+        if tab == crate::dock::Tab::Transform {
+            self.settings = self.settings.unsaved();
+            self.settings.mods.transform = true;
+        }
         self.show_tab(tab, false);
         Some(tab.title())
     }
@@ -4413,13 +4706,23 @@ impl BananaApp {
             });
         }
         self.track_selection_history();
+        // What the mods switched off leave out (Options › BananaV Mods…).
+        self.follow_mods();
+        // AI agents' calls (Options › BananaV Mods › AI agents), before the
+        // project goes to the engine: their edits show in this frame.
+        self.serve_agents(&ctx);
         // A render stops playback and keeps it stopped, as VEGAS's: the
         // processor and the graphics card go to the render.
         if self.is_playing() && self.engine.render_progress().is_some_and(|p| !p.finished) {
             self.stop();
         }
 
-        self.engine.set_project(self.history.current());
+        // Given again only when it changed (the engine compares the whole
+        // project otherwise, every frame).
+        if self.engine_synced != Some(self.history.revision()) {
+            self.engine.set_project(self.history.current());
+            self.engine_synced = Some(self.history.revision());
+        }
         if self.engine.poll_finished().is_some() {
             self.playhead = None;
         }
@@ -4564,6 +4867,9 @@ impl BananaApp {
         }
         let dock_hidden = self.settings.prefs.auto_hide_dock && !self.dock_peek;
         let mut dock = self.dock.take().unwrap_or_else(dock::default_layout);
+        self.drawn_tabs.clear();
+        self.drawn_tabs
+            .extend(dock.iter_all_tabs().map(|(_, tab)| *tab));
         self.console_drawn = false;
         dock::ensure_timeline(&mut dock, self.timeline_top);
         if dock_hidden {
@@ -4589,6 +4895,10 @@ impl BananaApp {
             self.follow_dock_peek(&ctx, area, dock::timeline_rect(&dock));
         }
         self.dock = Some(dock);
+        // The tabs its windows asked for while it was drawn.
+        for (tab, toggle) in std::mem::take(&mut self.tab_requests) {
+            self.show_tab(tab, toggle);
+        }
         // Windows floating in windows of their own.
         dock::floating_windows(&ctx, self);
         self.keep_session(&ctx);
@@ -4606,6 +4916,9 @@ impl BananaApp {
         self.finish_os_drop();
         let mut menu_dialogs = std::mem::take(&mut self.menu_dialogs);
         menu_dialogs.show(&ctx, self);
+        // The windows those windows opened (Burn Disc's job, Customize
+        // Toolbar's Help) went to the app's set, a stand-in meanwhile.
+        menu_dialogs.absorb(std::mem::take(&mut self.menu_dialogs));
         self.menu_dialogs = menu_dialogs;
         // Text a window copied (Edit Details' Copy) goes to the clipboard.
         if let Some(text) = self.to_clipboard.take() {
@@ -4732,7 +5045,7 @@ impl BananaApp {
         crate::title_bar::resize_edges(ui, window);
     }
 
-    /// The window's title ("Untitled* — BananaV 0.3.0"), which the title bar
+    /// The window's title ("Untitled* — BananaV 0.4.0"), which the title bar
     /// shows.
     pub(crate) fn window_title(&self) -> &str {
         &self.title
@@ -5002,4 +5315,65 @@ fn merge_windows(
 pub(crate) fn preview_range(cursor: Tick, seconds: f64) -> TimeRange {
     let half = Tick::from_seconds_f64(seconds.max(0.1) / 2.0);
     TimeRange::from_bounds((cursor - half).max(Tick::ZERO), cursor + half)
+}
+
+/// A project as read, checked: what the checks refuse is mended where it
+/// can be (`Project::repair`), the lines saying what was; refused when it
+/// still does not hold together.
+pub(crate) fn mended(mut p: Project) -> Result<(Project, Vec<String>), String> {
+    if p.check_invariants().is_ok() {
+        return Ok((p, Vec::new()));
+    }
+    let mends = p.repair();
+    p.check_invariants()?;
+    Ok((p, mends))
+}
+
+/// The message for a project mended as it opened.
+pub(crate) fn said_mends(mends: &[String]) -> String {
+    let lines: Vec<&str> = mends.iter().map(|m| tr(m)).collect();
+    trf!(
+        "The project was damaged and was mended to open; save it to keep the mends. {}",
+        lines.join(" ")
+    )
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    /// A project file the checks refuse (fades longer than their event, as
+    /// an older BananaV could save) opens mended, as a changed project,
+    /// saying what was mended; it did not open at all before.
+    #[test]
+    fn a_damaged_project_opens_mended() {
+        let dir = std::env::temp_dir().join(format!("bananav-mended-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let mut app = BananaApp::new(egui::Context::default());
+        app.load_demo();
+        let mut p = app.project().clone();
+        let c = p
+            .tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .next()
+            .expect("an event");
+        c.fade_in = c.duration;
+        c.fade_out = c.duration;
+        assert!(p.check_invariants().is_err(), "damaged");
+        let path = dir.join("Damaged.bvproj");
+        std::fs::write(&path, p.to_json()).expect("written");
+        let mut app = BananaApp::new(egui::Context::default());
+        app.open_path(path.clone());
+        assert_eq!(app.project_path.as_deref(), Some(path.as_path()), "opened");
+        assert!(app.project().check_invariants().is_ok());
+        assert!(app.is_dirty(), "to be saved mended");
+        let said = app.status.as_ref().map(|s| s.0.clone()).unwrap_or_default();
+        assert!(
+            said.contains("Fades longer than their event were shortened."),
+            "{said}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

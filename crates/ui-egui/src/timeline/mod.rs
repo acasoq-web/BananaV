@@ -39,10 +39,13 @@ pub(crate) const HEADER_W: f32 = 232.0;
 /// and the widest.
 pub(crate) const MIN_HEADER_W: f32 = 26.0;
 pub(crate) const MAX_HEADER_W: f32 = 4000.0;
-const LOOP_H: f32 = 12.0;
+/// The bars over the tracks, from the top, as VEGAS's (measured on the
+/// user's print): the marker bar, 24 points; the loop region's, 7 — the
+/// markers' flags end in it —; then the ruler.
+const MARKER_H: f32 = 24.0;
+const LOOP_H: f32 = 7.0;
 const RULER_H: f32 = 24.0;
-const MARKER_H: f32 = 16.0;
-const TOP_H: f32 = LOOP_H + RULER_H + MARKER_H;
+const TOP_H: f32 = MARKER_H + LOOP_H + RULER_H;
 const SCROLL_H: f32 = 16.0;
 const TOOLBAR_H: f32 = 34.0;
 const VSCROLL_W: f32 = 12.0;
@@ -56,6 +59,33 @@ const MAX_TICKS_PER_PX: f64 = 4.0e12;
 pub(crate) const MIN_TRACK_H: f32 = 26.0;
 /// The tallest a track gets by dragging its edge.
 pub(crate) const MAX_TRACK_H: f32 = 600.0;
+
+/// The room kept between the edit cursor and the view's edge it reached
+/// by a key.
+const FOLLOW_ROOM: f32 = 16.0;
+
+/// The view's start that shows the cursor at `cursor` again, when a view
+/// `width` points wide starting at `start` does not (or has it nearer an
+/// edge than [`FOLLOW_ROOM`]): the cursor that much inside the edge it
+/// passed. `None`: the view stays.
+pub(crate) fn follow_start(
+    start: Tick,
+    ticks_per_px: f64,
+    width: f32,
+    cursor: Tick,
+) -> Option<Tick> {
+    let room = FOLLOW_ROOM.min(width / 4.0).max(0.0);
+    let span = |px: f32| Tick((f64::from(px) * ticks_per_px).round() as i64);
+    let (low, high) = (start + span(room), start + span(width - room));
+    let new = if cursor < low {
+        (cursor - span(room)).max(Tick::ZERO)
+    } else if cursor > high {
+        (cursor - span(width - room)).max(Tick::ZERO)
+    } else {
+        return None;
+    };
+    (new != start).then_some(new)
+}
 
 pub(crate) fn track_height(kind: TrackKind, compact: bool) -> f32 {
     match (kind, compact) {
@@ -262,6 +292,15 @@ pub struct TimelineView {
     pub(crate) ofx_set_to: Option<ofx_envelopes::OfxSetTo>,
     /// A track envelope point's Set To…: its value typed at the point.
     pub(crate) env_set_to: Option<envelopes::SetTo>,
+    /// The envelope points picked (Ctrl and Shift pick more than one).
+    pub(crate) env_picks: Option<envelopes::Picks>,
+    /// The track envelopes' points picked along with events (Options ›
+    /// BananaV Mods: Envelope points with events), by the selection
+    /// rectangle or the Track Select tools; those when a Ctrl rectangle
+    /// began; how far a move drag took them so far.
+    pub(crate) env_with: Vec<envelopes::Picks>,
+    pub(crate) env_with_base: Option<Vec<envelopes::Picks>>,
+    pub(crate) env_with_moved: Tick,
     /// Where the envelopes' points and the keyframes areas' envelopes were
     /// drawn last (screen tests).
     pub(crate) ofx_painted: Vec<(usize, egui::Pos2)>,
@@ -300,6 +339,9 @@ pub struct TimelineView {
     pub(crate) layer_starts: std::collections::HashMap<TrackId, Vec<Tick>>,
     pub(crate) drag: Option<lanes::Drag>,
     pub(crate) bar_drag: Option<bars::BarDrag>,
+    /// A command moved the edit cursor (a key, a menu, a button): the view
+    /// follows it at the next frame (`follow_cursor`).
+    pub(crate) reveal_cursor: bool,
     /// The Marker Tool (the button at the top right).
     pub(crate) marker_tool: marker_tool::MarkerTool,
     /// The needle grabbed on the ruler.
@@ -434,6 +476,39 @@ fn edge_speed(into: f32) -> f32 {
 }
 
 impl TimelineView {
+    /// The project closes: what this view keeps by its tracks, busses and
+    /// effects (heights, layers, sends shown, envelopes hidden) and any
+    /// gesture or edit under way go — the next project's ids are the same
+    /// numbers for other things.
+    pub(crate) fn forget_project(&mut self) {
+        self.track_keys.clear();
+        self.ofx_hidden.clear();
+        self.bus_heights.clear();
+        self.layers.clear();
+        self.layer_starts.clear();
+        self.send_targets.clear();
+        self.track_heights.clear();
+        self.track_restore.clear();
+        self.ofx_drag = None;
+        self.surround_drag = None;
+        self.surround_pick = None;
+        self.surround_menu = None;
+        self.output_key_drag = None;
+        self.output_key_menu = None;
+        self.bus_drag = None;
+        self.bus_point = None;
+        self.edge_trim = None;
+        self.drag = None;
+        self.bar_drag = None;
+        self.gesture = None;
+        self.drop = None;
+        self.new_track = None;
+        self.renaming = None;
+        self.renaming_group = None;
+        self.value_edit = None;
+        self.track_drag = None;
+    }
+
     pub(crate) fn switches(&self) -> TimelineSwitches {
         TimelineSwitches {
             take_info: self.show_take_info,
@@ -537,6 +612,10 @@ impl Default for TimelineView {
             ofx_hidden: Default::default(),
             ofx_set_to: None,
             env_set_to: None,
+            env_picks: None,
+            env_with: Vec::new(),
+            env_with_base: None,
+            env_with_moved: Tick::ZERO,
             ofx_painted: Vec::new(),
             ofx_areas: Vec::new(),
             wheel_sliders: Vec::new(),
@@ -556,6 +635,7 @@ impl Default for TimelineView {
             layer_starts: Default::default(),
             drag: None,
             bar_drag: None,
+            reveal_cursor: false,
             marker_tool: Default::default(),
             needle: None,
             gesture: None,
@@ -879,14 +959,16 @@ impl TimelineView {
         };
         let top_h = TOP_H + cd_h + command_h;
         let tc_box = Rect::from_min_max(rect.min, pos2(list_right, top + top_h));
-        let loop_bar =
-            Rect::from_min_max(pos2(lanes_left, top), pos2(right - VSCROLL_W, top + LOOP_H));
-        let ruler = Rect::from_min_max(
-            pos2(lanes_left, top + LOOP_H),
-            pos2(right - VSCROLL_W, top + LOOP_H + RULER_H),
-        );
         let marker_bar = Rect::from_min_max(
-            pos2(lanes_left, top + LOOP_H + RULER_H),
+            pos2(lanes_left, top),
+            pos2(right - VSCROLL_W, top + MARKER_H),
+        );
+        let loop_bar = Rect::from_min_max(
+            pos2(lanes_left, top + MARKER_H),
+            pos2(right - VSCROLL_W, top + MARKER_H + LOOP_H),
+        );
+        let ruler = Rect::from_min_max(
+            pos2(lanes_left, top + MARKER_H + LOOP_H),
             pos2(right - VSCROLL_W, top + TOP_H),
         );
         let cd_bar = Rect::from_min_max(
@@ -897,10 +979,8 @@ impl TimelineView {
             pos2(lanes_left, cd_bar.bottom()),
             pos2(right - VSCROLL_W, cd_bar.bottom() + command_h),
         );
-        let marker_tool = Rect::from_min_max(
-            pos2(right - VSCROLL_W, top + LOOP_H + RULER_H),
-            pos2(right, top + TOP_H),
-        );
+        let marker_tool =
+            Rect::from_min_max(pos2(right - VSCROLL_W, top), pos2(right, top + MARKER_H));
         let headers = Rect::from_min_max(pos2(left, top + top_h), pos2(list_right, scroll_top));
         let lanes = Rect::from_min_max(
             pos2(lanes_left, top + top_h),
@@ -1324,6 +1404,23 @@ impl TimelineView {
         }
     }
 
+    /// The edit cursor a key took out of sight (or to the view's very
+    /// edge) comes back into it: the view goes with the cursor, which
+    /// stays a little inside the edge it reached, as VEGAS's.
+    fn follow_cursor(&mut self, app: &BananaApp, l: &Layout) {
+        if !std::mem::take(&mut self.reveal_cursor) || app.is_playing() || self.drag.is_some() {
+            return;
+        }
+        if let Some(start) = follow_start(
+            self.view_start,
+            self.ticks_per_px,
+            l.lanes.width(),
+            app.cursor,
+        ) {
+            self.view_start = start;
+        }
+    }
+
     fn follow_playhead(&mut self, app: &BananaApp, l: &Layout) {
         if !app.is_playing() || self.drag.is_some() {
             return;
@@ -1349,7 +1446,7 @@ impl TimelineView {
             HEADER_W
         };
         self.lanes_width = (rect.width() - self.header_w - SPLIT_W - VSCROLL_W).max(50.0);
-        let project = app.project().clone();
+        let project = app.project_snapshot();
         if std::mem::take(&mut app.fit_timeline) {
             self.fit(project.duration());
         }
@@ -1360,6 +1457,7 @@ impl TimelineView {
         self.snap_override = ui.input(|i| i.modifiers.shift);
         ui.painter().rect_filled(rect, 0.0, theme::bg());
         self.follow_playhead(app, &l);
+        self.follow_cursor(app, &l);
         self.track_focus(ui, app, &l);
 
         // Interações (podem editar o projeto).
@@ -1374,7 +1472,7 @@ impl TimelineView {
         toolbar::scrollbars(self, ui, app, &l);
 
         // Desenha o estado já atualizado.
-        let project = app.project().clone();
+        let project = app.project_snapshot();
         self.follow_layers(&project);
         let l = self.layout(rect, &project);
         let prerendered = app.engine.prerendered().to_vec();
@@ -1395,6 +1493,12 @@ impl TimelineView {
         self.paint_cursor(ui, app, &l);
         self.more_menu_ui(ui, app);
         ui.allocate_rect(rect, egui::Sense::hover());
+    }
+
+    /// The time at the view's left edge and how many points show (tests).
+    #[cfg(test)]
+    pub(crate) fn view_for_test(&self) -> (Tick, f32) {
+        (self.view_start, self.lanes_width)
     }
 
     /// The lanes' left edge and the headers' width the layout gives (tests).
@@ -1733,6 +1837,30 @@ mod tests {
         during
     }
 
+    /// The view goes with a cursor a key took out of it, the cursor a
+    /// little inside the edge it reached; a cursor well in sight moves no
+    /// view.
+    #[test]
+    fn the_view_starts_where_the_cursor_shows_again() {
+        let s = Tick::from_seconds;
+        // 100 points a second, 1,000 points wide: ten seconds show.
+        let per_px = s(1).0 as f64 / 100.0;
+        let follow = |start: i64, cursor: f64| {
+            follow_start(s(start), per_px, 1000.0, Tick::from_seconds_f64(cursor))
+        };
+        assert_eq!(follow(0, 5.0), None, "in sight");
+        assert_eq!(follow(20, 25.0), None);
+        // Past the right edge: the cursor 16 points inside it.
+        let right = follow(0, 12.0).expect("the view moves");
+        assert_eq!(right, Tick::from_seconds_f64(12.0 - 9.84));
+        // Past the left edge: 16 points inside it.
+        let left = follow(20, 18.0).expect("the view moves");
+        assert_eq!(left, Tick::from_seconds_f64(18.0 - 0.16));
+        // Never before the project's start.
+        assert_eq!(follow(20, 0.05), Some(Tick::ZERO));
+        assert_eq!(follow(0, 0.0), None, "already at the start");
+    }
+
     /// The timeline's zones show VEGAS's pointers, drawn by BananaV: the
     /// splitters' (the track list's border, a track's and a bus track's
     /// bottom edges, the bus tracks' top), ↔ on the loop region's edges, the
@@ -1824,5 +1952,49 @@ mod tests {
             Some(Cursor::SplitterNs)
         );
         assert!(h.state().timeline.bus_area > area, "the bus area grew");
+    }
+}
+
+#[cfg(test)]
+mod zoom_cost_tests {
+    use super::*;
+
+    /// Zoomed in, a waveform is drawn from the media's samples: each
+    /// event's columns are one mesh, and a column reads its samples a
+    /// block at a time — it took 20 ms a frame (5,500 shapes) at a few
+    /// hundred pixels a second, one shape and one look-up a sample.
+    #[test]
+    fn zoomed_in_waveforms_cost_a_shape_an_event() {
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let shapes = |app: &mut BananaApp| {
+            let mut n = 0;
+            for _ in 0..4 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1920.0, 1080.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+                out.textures_delta.clear();
+                n = out.shapes.len();
+            }
+            n
+        };
+        for tpp in [1.0e9, 1.0e8, 1.0e7] {
+            app.timeline.ticks_per_px = tpp;
+            app.timeline.show_waveforms = false;
+            let without = shapes(&mut app);
+            app.timeline.show_waveforms = true;
+            let with = shapes(&mut app);
+            assert!(
+                with <= without + 40,
+                "{tpp:e}: {with} shapes, {without} without waveforms"
+            );
+        }
     }
 }

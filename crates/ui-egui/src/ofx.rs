@@ -133,6 +133,23 @@ pub fn group_of(info: &PluginInfo) -> String {
     say(bv_engine::plugins::is_own(info), &group)
 }
 
+/// The line about one of BananaV's own plug-ins at the bottom of the
+/// choosers: the pack's say it is it, and their group in it.
+pub fn own_about(info: &PluginInfo, name: &str, category: &str) -> String {
+    if bv_engine::plugins::is_banana_split(info) {
+        return trf!(
+            "{}: Banana Split, 32-bit floating point, GPU accelerated, group {}",
+            name,
+            group_of(info)
+        );
+    }
+    trf!(
+        "{}: BananaV, 32-bit floating point, group {}",
+        name,
+        category
+    )
+}
+
 /// Who made another maker's plug-in, for the Third Party categories'
 /// Filter: the name of the bundle it comes in ("Sapphire" for
 /// `Sapphire.ofx.bundle`) — each maker's plug-ins come in their own, and
@@ -186,6 +203,9 @@ pub struct OfxUi {
     /// The overlay took the last press on the preview: a double click
     /// there is its (Mesh Warp's point put back), not the preview's zoom.
     pen_took: bool,
+    /// The mouse's presses over the preview: each starts an undo step of
+    /// its own.
+    presses: u64,
     /// The standard overlay's position dragged (its parameter, and where
     /// the pen took it from the point, in screen points), and the one
     /// under the pen.
@@ -268,6 +288,7 @@ impl Default for OfxUi {
             pen: false,
             pen_at: None,
             pen_took: false,
+            presses: 0,
             position_drag: None,
             position_hover: None,
             pictures: Default::default(),
@@ -331,6 +352,16 @@ impl OfxUi {
 
     pub fn scan_state(&self) -> ScanState {
         self.scan.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// What the scan's cache knows of the plug-ins, at once, no binary
+    /// described again (a BananaV without a window for agents: the
+    /// program's own scan keeps the cache).
+    pub(crate) fn known_from_cache(&self) {
+        if let Some(path) = cache_path() {
+            let cache = bv_ofx::scan::Cache::load(&path);
+            bv_ofx::registry().set_scanned(cache.plugins().into_iter().cloned().collect());
+        }
     }
 
     /// Finds the plug-ins in the standard folders and `extra` ones, in the
@@ -3373,7 +3404,7 @@ fn current_fx(p: &Project, key: &EditorKey) -> Option<PluginFx> {
 
 /// Gives the project `fx` where `key` says (an edit of its settings).
 fn set_fx(app: &mut BananaApp, key: &EditorKey, fx: PluginFx) {
-    let id = egui::Id::new(("ofx-overlay", key.clone()));
+    let id = egui::Id::new(("ofx-overlay", key.clone(), app.ofx.presses));
     let index = key.index;
     match key.owner {
         EditorOwner::Fx(target) => {
@@ -3873,6 +3904,9 @@ pub fn overlay_ui(ui: &Ui, app: &mut BananaApp, nav: &egui::Response, frame: Rec
     let Some((key, place)) = app.ofx.overlay.clone() else {
         return;
     };
+    if ui.input(|i| i.pointer.primary_pressed()) {
+        app.ofx.presses += 1;
+    }
     stabilization_points(ui, app, &key, &place, frame, area);
     position_handles(ui, app, &key, &place, nav, frame, area);
     let Some(instance) = app

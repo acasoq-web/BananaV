@@ -146,6 +146,11 @@ fn wave_codec(b: &[u8]) -> Result<(Codec, u16, u32)> {
         (WAVE_FORMAT_ALAW, 8) => Codec::ALaw,
         (WAVE_FORMAT_IMA_ADPCM, 4) => {
             let ch = channels.max(1) as usize;
+            // A block holds at least each channel's 4-byte header: a
+            // shorter one (or none) has nothing to decode.
+            if align < 4 * ch {
+                return Err(Error::Corrupt("ADPCM block size".into()));
+            }
             let computed = (align.saturating_sub(4 * ch)) * 8 / (4 * ch) + 1;
             let per = per_block();
             Codec::Ima {
@@ -155,6 +160,10 @@ fn wave_codec(b: &[u8]) -> Result<(Codec, u16, u32)> {
         }
         (WAVE_FORMAT_ADPCM, 4) => {
             let ch = channels.max(1) as usize;
+            // The same for each channel's 7-byte header.
+            if align < 7 * ch {
+                return Err(Error::Corrupt("ADPCM block size".into()));
+            }
             let per = per_block();
             let n = if b.len() >= 22 {
                 u16le(&b[20..]) as usize
@@ -346,7 +355,15 @@ fn wave64<R: Read + Seek>(r: &mut R, end: u64) -> Result<WavInfo> {
             let bytes = end.saturating_sub(body).min(size - 24);
             return info(Container::Wave64, codec, channels, rate, body, bytes);
         }
-        pos += size.div_ceil(8) * 8;
+        // A chunk longer than what is left of the file is damage: stepping
+        // over it would wrap the position around and never end the walk.
+        if size > end.saturating_sub(pos) {
+            return Err(Error::Corrupt("Wave64 chunk size".into()));
+        }
+        pos = size
+            .checked_next_multiple_of(8)
+            .and_then(|step| pos.checked_add(step))
+            .ok_or_else(|| Error::Corrupt("Wave64 chunk size".into()))?;
     }
 }
 
@@ -504,10 +521,21 @@ fn caf<R: Read + Seek>(r: &mut R, end: u64) -> Result<WavInfo> {
                 let channels = u32be(&b[24..]) as u16;
                 let bits = u32be(&b[28..]) as u16;
                 let (float, little) = (flags & 1 != 0, flags & 2 != 0);
+                // Only the sample sizes the decoder has a layout for: any
+                // other would divide by zero or read past a sample.
+                let whole = bits.div_ceil(8).saturating_mul(8);
+                let known = if float {
+                    matches!(bits, 32 | 64)
+                } else {
+                    matches!(whole, 8 | 16 | 24 | 32)
+                };
+                if id == b"lpcm" && !known {
+                    return Err(Error::Unsupported(format!("CAF of {bits} bits")));
+                }
                 let codec = match id {
                     b"lpcm" if float => Codec::Float { bits, big: !little },
                     b"lpcm" => Codec::Int {
-                        bits: bits.div_ceil(8) * 8,
+                        bits: whole,
                         big: !little,
                         unsigned8: false,
                     },
@@ -694,16 +722,16 @@ fn sample(codec: &Codec, s: &[u8]) -> f32 {
     }
 }
 
-/// G.711 µ-law to 16-bit linear.
-fn mulaw(b: u8) -> i16 {
+/// G.711 µ-law to 16-bit linear (also QuickTime's `ulaw` sound).
+pub fn mulaw(b: u8) -> i16 {
     let u = !b;
     let t = (((u & 0x0f) as i32) << 3) + 0x84;
     let t = t << ((u & 0x70) >> 4);
     (if u & 0x80 != 0 { 0x84 - t } else { t - 0x84 }) as i16
 }
 
-/// G.711 A-law to 16-bit linear.
-fn alaw(b: u8) -> i16 {
+/// G.711 A-law to 16-bit linear (also QuickTime's `alaw` sound).
+pub fn alaw(b: u8) -> i16 {
     let a = b ^ 0x55;
     let mut t = ((a & 0x0f) as i32) << 4;
     let seg = ((a & 0x70) >> 4) as i32;
@@ -726,6 +754,40 @@ const IMA_STEPS: [i32; 89] = [
     10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 ];
 const IMA_INDEX: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+
+/// One channel's QuickTime IMA 4:1 packet (`ima4`): two big-endian bytes —
+/// the predictor's top nine bits and the step's index in the low seven —
+/// then 32 bytes of 64 samples, each byte's low nibble first.
+pub fn ima4_packet(b: &[u8; 34]) -> [i16; 64] {
+    let head = u16::from_be_bytes([b[0], b[1]]);
+    let mut pred = i32::from((head & 0xFF80) as i16);
+    let mut index = i32::from(head & 0x7F).clamp(0, 88);
+    let mut out = [0i16; 64];
+    for (i, &byte) in b[2..].iter().enumerate() {
+        for (k, nibble) in [byte & 15, byte >> 4].into_iter().enumerate() {
+            let step = IMA_STEPS[index as usize];
+            let mut diff = step >> 3;
+            if nibble & 4 != 0 {
+                diff += step;
+            }
+            if nibble & 2 != 0 {
+                diff += step >> 1;
+            }
+            if nibble & 1 != 0 {
+                diff += step >> 2;
+            }
+            pred = if nibble & 8 != 0 {
+                pred - diff
+            } else {
+                pred + diff
+            }
+            .clamp(-32768, 32767);
+            index = (index + IMA_INDEX[usize::from(nibble)]).clamp(0, 88);
+            out[2 * i + k] = pred as i16;
+        }
+    }
+    out
+}
 
 /// One IMA/DVI ADPCM block (WAV layout): each channel's first sample and
 /// step, then 4 bytes (8 samples) of each channel in turn.
@@ -839,6 +901,25 @@ fn ms_block(b: &[u8], ch: usize, per_block: usize, coefs: &[(i32, i32)], out: &m
 mod tests {
     use super::*;
 
+    /// QuickTime's IMA 4:1: a silent packet stays silent; nibbles of 7
+    /// climb by the steps' table.
+    #[test]
+    fn ima4_packets_expand() {
+        assert_eq!(ima4_packet(&[0; 34]), [0; 64]);
+        let mut b = [0x77u8; 34];
+        b[0] = 0;
+        b[1] = 0;
+        let out = ima4_packet(&b);
+        // Step 7: 7/8 + 7 + 7/2 + 7/4 = 11; index 8, step 16: 2 + 16 + 8 + 4.
+        assert_eq!(&out[..2], &[11, 41]);
+        // A predictor of 256 from the header's top nine bits, index 5 (step
+        // 12): the first nibble, 0, adds 12/8.
+        let mut b = [0u8; 34];
+        b[..2].copy_from_slice(&(256u16 | 5).to_be_bytes());
+        assert_eq!(ima4_packet(&b)[0], 257);
+    }
+    use std::io::Cursor;
+
     #[test]
     fn g711_tables() {
         // Known values of the G.711 tables.
@@ -855,5 +936,95 @@ mod tests {
         // 44100 as an 80-bit extended float.
         let b = [0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0];
         assert_eq!(extended(&b), 44100);
+    }
+
+    /// Opens `file` and reads its first frames.
+    fn open_and_read(file: Vec<u8>) -> Result<Vec<Vec<f32>>> {
+        WavReader::new(Cursor::new(file))?.read_planar(0, 8)
+    }
+
+    /// A WAV file of mono samples: its format's code, block size and bits,
+    /// then `data`.
+    fn wav_file(tag: u16, align: u16, bits: u16, data: &[u8]) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend(tag.to_le_bytes());
+        fmt.extend(1u16.to_le_bytes());
+        fmt.extend(8000u32.to_le_bytes());
+        fmt.extend(8000u32.to_le_bytes());
+        fmt.extend(align.to_le_bytes());
+        fmt.extend(bits.to_le_bytes());
+        let mut file = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        file.extend((fmt.len() as u32).to_le_bytes());
+        file.extend(fmt);
+        file.extend(b"data");
+        file.extend((data.len() as u32).to_le_bytes());
+        file.extend(data);
+        file
+    }
+
+    /// A CAF file of mono linear PCM: its format flags and bits per
+    /// channel, then `data`.
+    fn caf_file(flags: u32, bits: u32, data: &[u8]) -> Vec<u8> {
+        let mut file = b"caff\0\x01\0\0desc".to_vec();
+        file.extend(32i64.to_be_bytes());
+        file.extend(8000f64.to_be_bytes());
+        file.extend(b"lpcm");
+        file.extend(flags.to_be_bytes());
+        file.extend((bits / 8).to_be_bytes());
+        file.extend(1u32.to_be_bytes());
+        file.extend(1u32.to_be_bytes());
+        file.extend(bits.to_be_bytes());
+        file.extend(b"data");
+        file.extend((4 + data.len() as i64).to_be_bytes());
+        file.extend([0u8; 4]);
+        file.extend(data);
+        file
+    }
+
+    #[test]
+    fn a_wave64_chunk_longer_than_the_file_is_refused() {
+        let mut file = Vec::new();
+        file.extend(crate::w64::RIFF);
+        file.extend(0u64.to_le_bytes());
+        file.extend(crate::w64::WAVE);
+        // A chunk whose size, rounded up to eight bytes, wraps to nothing.
+        file.extend([0x55u8; 16]);
+        file.extend(u64::MAX.to_le_bytes());
+        assert!(matches!(
+            read_info(&mut Cursor::new(file)),
+            Err(Error::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn adpcm_blocks_too_short_for_their_headers_are_refused() {
+        for (tag, short) in [(WAVE_FORMAT_IMA_ADPCM, 3), (WAVE_FORMAT_ADPCM, 6)] {
+            for align in [0, short] {
+                let file = wav_file(tag, align, 4, &[0u8; 64]);
+                assert!(
+                    matches!(open_and_read(file), Err(Error::Corrupt(_))),
+                    "format {tag:#x} in blocks of {align} bytes"
+                );
+            }
+            // The shortest block there is still reads.
+            let file = wav_file(tag, short + 1, 4, &[0u8; 64]);
+            assert_eq!(open_and_read(file).unwrap()[0].len(), 8);
+        }
+    }
+
+    #[test]
+    fn caf_sample_sizes_without_a_layout_are_refused() {
+        // Integers of no bits, floats of 16 bits; bit 0 of the flags: floats.
+        for (flags, bits) in [(0, 0), (0, 40), (1, 16), (1, 0)] {
+            let file = caf_file(flags, bits, &[0u8; 64]);
+            assert!(
+                matches!(open_and_read(file), Err(Error::Unsupported(_))),
+                "flags {flags}, {bits} bits"
+            );
+        }
+        for (flags, bits) in [(0, 8), (0, 16), (0, 24), (0, 32), (1, 32), (1, 64)] {
+            let file = caf_file(flags, bits, &[0u8; 64]);
+            assert_eq!(open_and_read(file).unwrap()[0].len(), 8);
+        }
     }
 }

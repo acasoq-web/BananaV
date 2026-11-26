@@ -80,6 +80,7 @@ impl BananaApp {
             Pending::Exit => self.exit_now = true,
             Pending::ImportOtio => crate::otio_ui::import_dialog(self),
             Pending::ImportFcp(fcpxml) => crate::otio_ui::import_fcp(self, fcpxml),
+            Pending::ImportVeg => crate::veg_ui::import(self),
         }
     }
 
@@ -118,14 +119,14 @@ impl BananaApp {
     /// file open.
     pub(crate) fn export_project_copy(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Export BananaV Project"))
-            .add_filter(tr("BananaV Project"), &["bvproj"])
+            .set_title(crate::i18n::os_text(tr("Export BananaV Project")))
+            .add_filter(crate::i18n::os_text(tr("BananaV Project")), &["bvproj"])
             .set_file_name(tr("Copy.bvproj"))
             .save_file()
         else {
             return;
         };
-        match std::fs::write(&path, self.project().to_json()) {
+        match crate::safe_file::save(&path, self.project().to_json().as_bytes()) {
             Ok(()) => self.notify(trf!("Project copy saved to {}", path.display())),
             Err(e) => self.report_error(trf!("Could not export: {}", e)),
         }
@@ -707,9 +708,9 @@ impl BananaApp {
         let ids = self.selected();
         self.modify(|p| {
             for id in ids {
-                if let Some(c) = p.clip_mut(id) {
-                    c.looped = on;
-                }
+                // Off, an event before its media's start keeps its picture
+                // in place (what Loop repeated there goes).
+                let _ = p.set_looped(id, on);
             }
         });
     }
@@ -721,8 +722,8 @@ impl BananaApp {
         self.modify(|p| {
             for id in ids {
                 let video = p.clip_track(id).is_some_and(|t| t.kind == TrackKind::Video);
+                let _ = p.set_looped(id, looped);
                 if let Some(c) = p.clip_mut(id) {
-                    c.looped = looped;
                     c.all_frames = false;
                     if !looped && video {
                         c.hold_last = true;

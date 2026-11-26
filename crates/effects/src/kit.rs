@@ -574,7 +574,7 @@ impl Buf {
 
 /// Works out `data` in chunks of `len` items (each chunk's number and its
 /// items) on the host's threads.
-pub(crate) fn for_chunks<T: Send>(data: &mut [T], len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+pub fn for_chunks<T: Send>(data: &mut [T], len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     if len == 0 {
         return;
     }

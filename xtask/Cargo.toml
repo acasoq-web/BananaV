@@ -13,6 +13,8 @@ layer = "tool"
 
 [dependencies]
 serde_json.workspace = true
+# Banana Split's kernels written as Rust (crates/banana/gen/gen.rs).
+naga = { version = "30", features = ["wgsl-in"] }
 
 [lints]
 workspace = true

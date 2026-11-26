@@ -152,7 +152,10 @@ impl Own for TrackEq {
                 }
             }
         }
-        if sections != self.sections {
+        // Other values keep the filters' memory (a slider dragged or FX
+        // automation would click otherwise); another number of sections
+        // starts it again.
+        if sections.len() != self.sections.len() {
             self.memory.clear();
         }
         self.sections = sections;
@@ -338,6 +341,33 @@ mod tests {
         e.process(&mut ch);
         assert_eq!(ch[1], x);
         assert_ne!(ch[0], x);
+    }
+
+    /// A value changed while it plays (a slider dragged, FX automation)
+    /// keeps the filters' memory: the sound goes on from where it was
+    /// instead of starting again from silence, which would click.
+    #[test]
+    fn track_eq_keeps_its_memory_when_its_values_change() {
+        // Band 1, a low shelf at 100 Hz, 12 dB down on a 50 Hz tone; its
+        // gain moved a tenth of a dB (or not) where the tone is at its top.
+        let x = sine(50.0, 9600);
+        let second_half = |gain: Option<f32>| {
+            let mut e = track_eq(&[(te::GAIN, -12.0)]);
+            let mut a = vec![x[..5040].to_vec()];
+            e.process(&mut a);
+            if let Some(db) = gain {
+                let mut p: Vec<f32> = te::PARAMS.iter().map(|s| s.default).collect();
+                p[te::GAIN] = db;
+                e.set(&p);
+            }
+            let mut b = vec![x[5040..].to_vec()];
+            e.process(&mut b);
+            b.remove(0)
+        };
+        let (same, moved) = (second_half(None), second_half(Some(-12.1)));
+        for (i, (a, b)) in same.iter().zip(&moved).enumerate() {
+            assert!((a - b).abs() < 0.01, "sample {i}: {a} {b}");
+        }
     }
 
     fn paragraphic(values: &[(usize, f32)]) -> ParagraphicEq {

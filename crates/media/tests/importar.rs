@@ -411,6 +411,20 @@ fn refused_with_their_names() {
     );
     let dts = make("audio.dts", &[AUDIO], &["-c:a", "dca", "-strict", "-2"]);
     let flv = make("video.flv", &[VIDEO], &["-c:v", "flv"]);
+    let dv = make(
+        "dv.mov",
+        &[VIDEO],
+        &[
+            "-c:v",
+            "dvvideo",
+            "-pix_fmt",
+            "yuv411p",
+            "-vf",
+            "scale=720:480",
+            "-r",
+            "30000/1001",
+        ],
+    );
     if !cfg!(windows) {
         // FFmpeg reads them all.
         check_frames(&dnxhr);
@@ -436,6 +450,14 @@ fn refused_with_their_names() {
         }
     );
     assert_eq!(refused(&flv), MediaError::UnsupportedFile("flv".into()));
+    // The name a MOV's sample entry gives (the system's comes turned round).
+    assert_eq!(
+        refused(&dv),
+        MediaError::UnsupportedCodec {
+            codec: "DV".into(),
+            video: true
+        }
+    );
 }
 
 #[test]
@@ -480,4 +502,221 @@ fn wide_pixels_are_read() {
             "{name}: {par:?}"
         );
     }
+}
+
+/// ffmpeg's frames as 8-bit RGBA (turned as their files say), each once;
+/// Y′CbCr ones converted as BT.709's when `bt709` (untagged files are
+/// BT.601's to ffmpeg; BananaV takes HD ones for BT.709).
+fn ffmpeg_rgba(path: &str, bt709: bool) -> Vec<u8> {
+    let mut c = Command::new("ffmpeg");
+    c.args(["-v", "error", "-i", path, "-fps_mode", "passthrough"]);
+    if bt709 {
+        c.args(["-vf", "scale=in_color_matrix=bt709:in_range=tv"]);
+    }
+    c.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()
+        .unwrap()
+        .stdout
+}
+
+/// Our frames' colors and alpha against ffmpeg's in a few frames: at most
+/// `mean_max` levels apart on average (colors where they show).
+fn check_colors(path: &str, mean_max: f64, bt709: bool) {
+    let info = bv_media::probe_file(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let v = info.video.expect("video");
+    let (w, h) = (v.width as usize, v.height as usize);
+    let frames = ffmpeg_rgba(path, bt709);
+    let len = w * h * 4;
+    let count = frames.len() / len;
+    assert!(count > 4, "{path}: ffmpeg frames");
+    let mut r = bv_media::open_video(&info).unwrap();
+    let mut worst = 0f64;
+    for n in [2, count / 2, count - 2] {
+        let t = v.frame_rate.frame_start(n as i64) + Tick(v.frame_rate.frame_duration().0 / 4);
+        let img = r
+            .frame_at(t)
+            .unwrap_or_else(|e| panic!("{path} frame {n}: {e}"));
+        assert_eq!((img.width as usize, img.height as usize), (w, h), "{path}");
+        let theirs = &frames[n * len..(n + 1) * len];
+        let (mut sum, mut values) = (0f64, 0usize);
+        for (p, q) in img.data.iter().zip(theirs.as_chunks::<4>().0) {
+            let a = p[3].clamp(0.0, 1.0);
+            sum += (f64::from(a) * 255.0 - f64::from(q[3])).abs();
+            values += 1;
+            if a > 0.05 {
+                for c in 0..3 {
+                    let e = bv_color::transfer::linear_to_bt709((p[c] / a).clamp(0.0, 1.0)) * 255.0;
+                    sum += (f64::from(e) - f64::from(q[c])).abs();
+                    values += 1;
+                }
+            }
+        }
+        worst = worst.max(sum / values as f64);
+    }
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    println!("{name:28} {worst:.2} levels from ffmpeg's frames on average");
+    assert!(
+        worst <= mean_max,
+        "{path}: {worst:.2} levels from ffmpeg's frames"
+    );
+}
+
+/// QuickTime's own formats in `.mov` files (BananaV's decoders on Windows,
+/// FFmpeg's on Linux): each frame in its place, its colors and alpha as
+/// ffmpeg's; µ-law, A-law and IMA 4:1 sound as the tone made; a phone's
+/// portrait video standing up.
+#[test]
+#[ignore = "needs ffmpeg"]
+fn mov_formats() {
+    const HALF_SEEN: &str = "testsrc2=size=320x240:rate=25:duration=2:alpha=128";
+    const HD: &str = "testsrc2=size=1280x720:rate=25:duration=1";
+    let bt709 = [
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+    ];
+    // Name, source, ffmpeg's options, the mean difference allowed (4:2:2's
+    // colors are widened otherwise than ffmpeg's at the pattern's sharp
+    // edges; 4:4:4's come out the same).
+    let cases: Vec<(&str, &str, Vec<&str>, f64)> = vec![
+        (
+            "qtrle24.mov",
+            VIDEO,
+            vec!["-c:v", "qtrle", "-pix_fmt", "rgb24"],
+            0.6,
+        ),
+        (
+            "qtrle32.mov",
+            HALF_SEEN,
+            vec!["-c:v", "qtrle", "-pix_fmt", "argb"],
+            0.6,
+        ),
+        (
+            "qtrle16.mov",
+            VIDEO,
+            vec!["-c:v", "qtrle", "-pix_fmt", "rgb555be"],
+            0.6,
+        ),
+        (
+            "qtrle_gray.mov",
+            VIDEO,
+            vec!["-c:v", "qtrle", "-pix_fmt", "gray"],
+            0.6,
+        ),
+        (
+            "raw_rgb24.mov",
+            VIDEO,
+            vec!["-c:v", "rawvideo", "-pix_fmt", "rgb24"],
+            0.6,
+        ),
+        (
+            "raw_argb.mov",
+            HALF_SEEN,
+            vec!["-c:v", "rawvideo", "-pix_fmt", "argb"],
+            0.6,
+        ),
+        ("r210.mov", VIDEO, vec!["-c:v", "r210"], 0.6),
+        ("png.mov", VIDEO, vec!["-c:v", "png"], 0.6),
+        (
+            "png_alpha.mov",
+            HALF_SEEN,
+            vec!["-c:v", "png", "-pix_fmt", "rgba"],
+            0.6,
+        ),
+        ("tiff.mov", VIDEO, vec!["-c:v", "tiff"], 0.6),
+        (
+            "2vuy.mov",
+            HD,
+            [&["-c:v", "rawvideo", "-pix_fmt", "uyvy422"][..], &bt709].concat(),
+            2.0,
+        ),
+        (
+            "yuv2.mov",
+            HD,
+            [
+                &["-c:v", "rawvideo", "-pix_fmt", "yuyv422", "-tag:v", "yuv2"][..],
+                &bt709,
+            ]
+            .concat(),
+            2.0,
+        ),
+        (
+            "v210.mov",
+            HD,
+            [&["-c:v", "v210"][..], &bt709].concat(),
+            2.0,
+        ),
+        (
+            "v410.mov",
+            HD,
+            [&["-c:v", "v410"][..], &bt709].concat(),
+            1.0,
+        ),
+        (
+            "v308.mov",
+            HD,
+            [&["-c:v", "v308"][..], &bt709].concat(),
+            1.0,
+        ),
+        (
+            "v408.mov",
+            HD,
+            [&["-c:v", "v408"][..], &bt709].concat(),
+            1.0,
+        ),
+    ];
+    for (name, src, args, mean) in &cases {
+        let p = make(name, &[src], args);
+        check_frames(&p);
+        check_colors(&p, *mean, *src == HD);
+    }
+    for (name, codec) in [
+        ("ulaw.mov", "pcm_mulaw"),
+        ("alaw.mov", "pcm_alaw"),
+        ("ima4.mov", "adpcm_ima_qt"),
+    ] {
+        let p = make(
+            name,
+            &[VIDEO, AUDIO],
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", codec],
+        );
+        check_audio(&p, 0);
+    }
+    // A phone's portrait video: stored lying, its matrix turning it a
+    // quarter clockwise (ffmpeg's -90°).
+    let lying = make(
+        "lying.mov",
+        &[VIDEO],
+        &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+    );
+    let standing = dir().join("standing.mov");
+    if !standing.exists() {
+        let st = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-display_rotation",
+                "-90",
+                "-i",
+                &lying,
+                "-c",
+                "copy",
+            ])
+            .arg(&standing)
+            .status()
+            .expect("ffmpeg on the PATH");
+        assert!(st.success(), "ffmpeg turned it");
+    }
+    let standing = standing.to_string_lossy().to_string();
+    let v = bv_media::probe_file(&standing)
+        .expect("the turned video")
+        .video
+        .expect("video");
+    assert_eq!((v.width, v.height), (240, 320), "standing up");
+    assert_eq!(v.reading.rotation, bv_timeline::MediaRotation::Clockwise);
+    check_frames(&standing);
 }

@@ -2530,11 +2530,14 @@ impl Kind {
                         let r = &w[k * 5..k * 5 + 5];
                         r[0] * c[0] + r[1] * c[1] + r[2] * c[2] + r[3] * c[3] + r[4]
                     };
-                    let a = out(3).clamp(0.0, 1.0);
+                    // `max`/`min`, not `clamp`: a value that is not a
+                    // number (a NaN in the picture) becomes 0, not a panic.
+                    let a = out(3);
+                    let a = if a > 0.0 { a.min(1.0) } else { 0.0 };
                     [
-                        out(0).clamp(0.0, a) as f32,
-                        out(1).clamp(0.0, a) as f32,
-                        out(2).clamp(0.0, a) as f32,
+                        out(0).max(0.0).min(a) as f32,
+                        out(1).max(0.0).min(a) as f32,
+                        out(2).max(0.0).min(a) as f32,
                         a as f32,
                     ]
                 })

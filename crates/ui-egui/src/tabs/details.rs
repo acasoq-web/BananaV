@@ -1049,7 +1049,7 @@ fn table(
     values: &[Vec<Value>],
     window: Rect,
 ) {
-    let project = app.project().clone();
+    let project = app.project_snapshot();
     let id = ui.id().with("detalhes-tabela");
     let resp = ui.interact(g.visible, id, Sense::click_and_drag());
     let pointer = ui.input(|i| i.pointer.latest_pos());

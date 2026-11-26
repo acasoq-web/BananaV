@@ -213,7 +213,11 @@ impl<Tab> DockArea<'_, Tab> {
             .hidden_tab_bar_drag_height
             .is_none_or(|h| h > 0.0);
         if self.draggable_tabs && drag_enabled && !on_button {
-            if drag_response.hovered() {
+            // BananaV: the arrow over it; the moving pointer only while it
+            // is held (a press that may drag the tab elsewhere).
+            if drag_response.is_pointer_button_down_on()
+                && ui.input(|i| i.pointer.primary_down())
+            {
                 ui.output_mut(|o| o.cursor_icon = CursorIcon::Grab);
             }
             let is_being_dragged = ui.ctx().is_being_dragged(drag_id)
@@ -1212,8 +1216,13 @@ impl<Tab> DockArea<'_, Tab> {
 
         let (_, tab_rect) = ui.allocate_space(vec2(tab_width, ui.available_height()));
         let mut response = ui.interact(tab_rect, id, Sense::click_and_drag());
-        if ui.ctx().dragged_id().is_none() && self.draggable_tabs {
-            response = response.on_hover_cursor(CursorIcon::Grab);
+        // BananaV: the arrow over a tab; the moving pointer only while the
+        // tab is held (a press that may drag it elsewhere).
+        if self.draggable_tabs
+            && response.is_pointer_button_down_on()
+            && ui.input(|i| i.pointer.primary_down())
+        {
+            ui.output_mut(|o| o.cursor_icon = CursorIcon::Grab);
         }
         if galley.elided
             && let Some(full) = full_title

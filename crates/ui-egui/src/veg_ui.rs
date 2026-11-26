@@ -465,9 +465,9 @@ fn locate(path: &str, beside: &Path) -> PathBuf {
 /// File › Import › VEG Project.
 pub(crate) fn import(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Import VEG Project"))
-        .add_filter(tr("VEG Project"), &["veg"])
-        .add_filter(tr("All Files"), &["*"])
+        .set_title(crate::i18n::os_text(tr("Import VEG Project")))
+        .add_filter(crate::i18n::os_text(tr("VEG Project")), &["veg"])
+        .add_filter(crate::i18n::os_text(tr("All Files")), &["*"])
         .pick_file()
     else {
         return;
@@ -624,13 +624,22 @@ pub(crate) fn export(app: &mut BananaApp) {
             |s| s.to_string_lossy().into_owned(),
         );
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Export VEG Project"))
-        .add_filter(tr("VEG Project"), &["veg"])
+        .set_title(crate::i18n::os_text(tr("Export VEG Project")))
+        .add_filter(crate::i18n::os_text(tr("VEG Project")), &["veg"])
         .set_file_name(format!("{stem}.veg"))
         .save_file()
     else {
         return;
     };
+    match write_to(app, &path) {
+        Ok(()) => app.notify(trf!("Exported to {}", path.display())),
+        Err(e) => app.report_error(trf!("Could not export: {}", e)),
+    }
+}
+
+/// The project written as a `.veg` to `path` (File › Export › VEG
+/// Project's file; AI agents' too).
+pub(crate) fn write_to(app: &BananaApp, path: &Path) -> std::io::Result<()> {
     let rate = app.project().settings.frame_rate;
     let options = veg::WriteOptions {
         path: path.to_string_lossy().into_owned(),
@@ -639,10 +648,7 @@ pub(crate) fn export(app: &mut BananaApp) {
         generator: &|fx| crate::veg_generators::generator_out(fx, rate),
     };
     let bytes = veg::write(app.project(), &options);
-    match std::fs::write(&path, bytes) {
-        Ok(()) => app.notify(trf!("Exported to {}", path.display())),
-        Err(e) => app.report_error(trf!("Could not export: {}", e)),
-    }
+    std::fs::write(path, bytes)
 }
 
 #[cfg(test)]

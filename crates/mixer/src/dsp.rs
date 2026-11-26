@@ -287,6 +287,9 @@ pub struct Processor {
     kind: EffectKind,
     params: Vec<f32>,
     vst: Option<VstKey>,
+    /// The number of the effect it runs ([`Effect::id`]: 0 for one FX
+    /// automation never numbered).
+    id: u32,
     state: State,
 }
 
@@ -297,6 +300,7 @@ impl Processor {
                 kind: e.kind,
                 params: e.params.clone(),
                 vst: None,
+                id: e.id,
                 state: State::Own(own),
             };
         }
@@ -392,6 +396,7 @@ impl Processor {
             kind: e.kind,
             params: e.params.clone(),
             vst: vst_key(e),
+            id: e.id,
             state,
         }
     }
@@ -438,6 +443,16 @@ impl Processor {
         match &mut self.state {
             #[cfg(not(target_family = "wasm"))]
             State::Vst(run) => run.restart(),
+            _ => false,
+        }
+    }
+
+    /// Whether a VST plug-in's last block had sound that is not a number,
+    /// silenced there (asked once a block).
+    fn spoiled(&mut self) -> bool {
+        match &mut self.state {
+            #[cfg(not(target_family = "wasm"))]
+            State::Vst(run) => run.spoiled(),
             _ => false,
         }
     }
@@ -706,6 +721,49 @@ pub struct Chain {
 /// VST 3 plug-in follows the envelope between them).
 const RAMP_STEP: usize = 32;
 
+/// Takes from `old` the processor of the effect at `place` in `effects`:
+/// the one of its number (FX automation numbers the effects it works on:
+/// [`Effect::id`]); else the one that was at its place (`places`: each
+/// processor's, at the last sync); else the first of its kind — never
+/// one that is another effect's, by its number or by an effect of its
+/// kind still being at its place. So an effect bypassed, or put elsewhere
+/// in the list, leaves the others with what they hold.
+fn claim(
+    old: &mut [Option<Processor>],
+    places: &[usize],
+    effects: &[&Effect],
+    place: usize,
+) -> Option<Processor> {
+    let e = effects.get(place)?;
+    let rank = |k: usize, p: &Processor| -> u8 {
+        let was_at = places.get(k).copied();
+        if !p.same_effect(e) {
+            0
+        } else if e.id != 0 && p.id == e.id {
+            3
+        } else if p.id != 0 && effects.iter().any(|other| other.id == p.id) {
+            0
+        } else if was_at == Some(place) {
+            2
+        } else if was_at
+            .and_then(|at| effects.get(at))
+            .is_some_and(|other| p.same_effect(other))
+        {
+            0
+        } else {
+            1
+        }
+    };
+    let mut best = (0, None);
+    for (k, p) in old.iter().enumerate() {
+        let r = p.as_ref().map_or(0, |p| rank(k, p));
+        if r > best.0 {
+            best = (r, Some(k));
+        }
+    }
+    old[best.1?].take()
+}
+
 impl Chain {
     /// How many samples late the chain's output comes: its effects'
     /// latencies (those on) summed.
@@ -726,14 +784,17 @@ impl Chain {
             .copied()
             .filter(|e| e.kind.is_audio() && (e.enabled || keep_bypassed))
             .collect();
+        // Where each processor's effect was in the list at the last sync.
+        let places = std::mem::take(&mut self.slots);
         self.slots = effects
             .iter()
             .enumerate()
             .filter(|(_, e)| e.kind.is_audio() && (e.enabled || keep_bypassed))
             .map(|(i, _)| i)
             .collect();
-        // Each effect in its place keeps its processor while it matches
-        // (and follows what it can); the others are made again.
+        // Each effect keeps its own processor (`claim`: an effect bypassed
+        // before it does not take it away) while it matches, and follows
+        // what it can; the others are made again.
         let mut old: Vec<Option<Processor>> = if self.rate == rate && self.channels == channels {
             std::mem::take(&mut self.procs)
                 .into_iter()
@@ -751,9 +812,9 @@ impl Chain {
         };
         self.procs = wanted
             .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let p = match old.get_mut(i).and_then(Option::take) {
+            .zip(&self.slots)
+            .map(|(e, &place)| {
+                let mut p = match claim(&mut old, &places, effects, place) {
                     // After a seek a plug-in is kept, its sound cleared (it
                     // takes long to start); the others are made anew.
                     Some(mut p) if cleared && p.same_effect(e) => {
@@ -777,6 +838,7 @@ impl Chain {
                     }
                     _ => made(e),
                 };
+                p.id = e.id;
                 (p, e.enabled)
             })
             .collect();
@@ -888,6 +950,11 @@ impl Chain {
                 // Bypassed, kept running: on a copy nobody hears.
                 let mut unheard = channels.to_vec();
                 p.process(&mut unheard);
+            }
+            // A plug-in's sound that was not a number may have come of
+            // what the effects before it hold: all start again.
+            if p.spoiled() {
+                self.cleared = true;
             }
             if let Some(input) = input {
                 crate::modern_eq::note(rate, &input, channels);
@@ -1162,6 +1229,85 @@ mod tests {
         };
         assert!(tail(true) > 0.0, "the tail goes on");
         assert_eq!(tail(false), 0.0, "rebuilt from nothing");
+    }
+
+    /// The chain keeps each effect's processor whatever its place among
+    /// those that run: with the effect before it bypassed, then on again,
+    /// an echo still holds the click it is to repeat — the effect before
+    /// it of another kind or an echo too, and its own values changed in
+    /// the same block (FX automation finds it by its number).
+    #[test]
+    fn bypassing_an_effect_keeps_the_state_of_those_after_it() {
+        // A click, then silence: what comes out of the silence, `before`
+        // bypassed for its first 25 ms (the echo's mix halved then, when
+        // `numbered`) and on again for the rest.
+        let after = |mut before: Option<Effect>, numbered: bool| {
+            let mut echo = Effect::new(EffectKind::Delay);
+            for (i, v) in [(0, 100.0), (1, 0.0), (2, 1.0)] {
+                echo.set_param(i, v);
+            }
+            echo.id = u32::from(numbered);
+            let mut chain = Chain::default();
+            let mut block = |before: &Option<Effect>, echo: &Effect, x: Vec<f32>| {
+                let effects: Vec<&Effect> = before.iter().chain([echo]).collect();
+                chain.sync(&effects, 48_000, 1, false);
+                let mut ch = vec![x];
+                chain.process(&mut ch);
+                ch.remove(0)
+            };
+            let mut click = vec![0.0f32; 2400];
+            click[0] = 1.0;
+            block(&before, &echo, click);
+            if let Some(b) = &mut before {
+                b.enabled = false;
+            }
+            if numbered {
+                echo.set_param(2, 0.5);
+            }
+            let mut out = block(&before, &echo, vec![0.0; 1200]);
+            if let Some(b) = &mut before {
+                b.enabled = true;
+            }
+            out.extend(block(&before, &echo, vec![0.0; 3600]));
+            out
+        };
+        let alone = after(None, false);
+        assert!(alone.iter().any(|s| (s - 1.0).abs() < 1e-6), "no echo");
+        assert_eq!(after(Some(Effect::new(EffectKind::Gain)), false), alone);
+        // Another echo before it, one that adds nothing.
+        let mut other = Effect::new(EffectKind::Delay);
+        other.set_param(0, 30.0);
+        other.set_param(2, 0.0);
+        assert_eq!(after(Some(other), false), alone);
+        let halved = after(None, true);
+        assert!(halved.iter().any(|s| (s - 0.5).abs() < 1e-6), "no echo");
+        assert_eq!(after(Some(Effect::new(EffectKind::Gain)), true), halved);
+    }
+
+    /// A plug-in's sound that is not a number (a NaN, an infinity) is
+    /// silence in the chain, which then starts again: whatever comes
+    /// before or after the plug-in plays on in the next block.
+    #[test]
+    fn a_plug_ins_sound_that_is_not_a_number_is_silenced() {
+        use bv_vst3_testplug as plug;
+        let gain = test_vst(plug::GAIN, "BananaV Test Gain");
+        let mut low = Effect::new(EffectKind::LowPass);
+        low.set_param(0, 5000.0);
+        let tone = sine(440.0, 48_000.0, 4800, 0.5);
+        for effects in [[&gain, &low], [&low, &gain]] {
+            let mut chain = Chain::default();
+            chain.sync(&effects, 48_000, 1, false);
+            let mut ch = vec![tone.clone()];
+            ch[0][100] = f32::NAN;
+            ch[0][200] = f32::INFINITY;
+            chain.process(&mut ch);
+            assert!(ch[0].iter().all(|s| s.is_finite()), "the block it came in");
+            chain.sync(&effects, 48_000, 1, false);
+            let mut ch = vec![tone.clone()];
+            chain.process(&mut ch);
+            assert!(ch[0].iter().all(|s| s.is_finite()), "the next block");
+            assert!(rms(&ch[0][2400..]) > 0.3, "{}", rms(&ch[0][2400..]));
+        }
     }
 
     #[test]

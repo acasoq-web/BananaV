@@ -74,6 +74,13 @@ pub(crate) enum Cursor {
     EnvelopeTool,
     /// The Zoom tool's.
     Magnifier,
+    /// The Track Select tools' (a mod): every event from the pointer to
+    /// the end — or, `back`, to the start —, on all tracks or, `single`
+    /// (Shift held), on its own: a bar at the point and arrows its way.
+    TrackSelect {
+        back: bool,
+        single: bool,
+    },
     /// Zooms in (Pan/Crop's Zoom tool).
     ZoomIn,
     /// Zooms out (the same, the right button down).
@@ -259,7 +266,7 @@ pub(crate) enum Cursor {
 impl Cursor {
     /// Every one, for looking at them together.
     #[cfg(test)]
-    pub(crate) const ALL: [Cursor; 90] = [
+    pub(crate) const ALL: [Cursor; 94] = [
         Cursor::TrimStart,
         Cursor::TrimEnd,
         Cursor::FadeIn,
@@ -280,6 +287,22 @@ impl Cursor {
         Cursor::SelectTool,
         Cursor::EnvelopeTool,
         Cursor::Magnifier,
+        Cursor::TrackSelect {
+            back: false,
+            single: false,
+        },
+        Cursor::TrackSelect {
+            back: false,
+            single: true,
+        },
+        Cursor::TrackSelect {
+            back: true,
+            single: false,
+        },
+        Cursor::TrackSelect {
+            back: true,
+            single: true,
+        },
         Cursor::ZoomIn,
         Cursor::ZoomOut,
         Cursor::MoveFrame,
@@ -380,8 +403,18 @@ impl Cursor {
             ArrowNo | CrosshairRectNo => CursorIcon::NoDrop,
             ScrollUp | ScrollRight | ScrollDown | ScrollLeft | ScrollUpRight | ScrollDownRight
             | ScrollUpLeft | ScrollDownLeft | ScrollStopAll | OriginAll => CursorIcon::AllScroll,
-            EnvelopeTool | Arrow | ArrowMirrored | Drag | ArrowMinus | ArrowCross | DragC
-            | DragP | DragM | ArrowL | ArrowR => CursorIcon::Default,
+            EnvelopeTool
+            | Arrow
+            | ArrowMirrored
+            | Drag
+            | ArrowMinus
+            | ArrowCross
+            | DragC
+            | DragP
+            | DragM
+            | ArrowL
+            | ArrowR
+            | TrackSelect { .. } => CursorIcon::Default,
         }
     }
 }
@@ -705,6 +738,30 @@ fn double(a: P, b: P, shaft: f32, head: f32, long: f32) -> Shape {
         at(b, -long, -shaft / 2.0),
         at(a, long, -shaft / 2.0),
         at(a, long, -head / 2.0),
+    ])
+}
+
+/// An arrow from `a` to its head at `b`: its shaft `shaft` wide, its
+/// head `head` wide and `long` long.
+fn one_way(a: P, b: P, shaft: f32, head: f32, long: f32) -> Shape {
+    let d = sub(b, a);
+    let l = len(d).max(1e-3);
+    let u = [d[0] / l, d[1] / l];
+    let n = [-u[1], u[0]];
+    let at = |o: P, along: f32, across: f32| {
+        [
+            o[0] + u[0] * along + n[0] * across,
+            o[1] + u[1] * along + n[1] * across,
+        ]
+    };
+    Shape::Poly(vec![
+        at(a, 0.0, shaft / 2.0),
+        at(b, -long, shaft / 2.0),
+        at(b, -long, head / 2.0),
+        b,
+        at(b, -long, -head / 2.0),
+        at(b, -long, -shaft / 2.0),
+        at(a, 0.0, -shaft / 2.0),
     ])
 }
 
@@ -1059,6 +1116,22 @@ impl Cursor {
                     [18.0, 26.5],
                 ]))
                 .w(small_arrows([17.5, 11.5], [30.5, 11.5])),
+            TrackSelect { back: true, single } => TrackSelect {
+                back: false,
+                single,
+            }
+            .drawing()
+            .mirror(),
+            TrackSelect {
+                back: false,
+                single,
+            } => {
+                // The point clicked: a bar, the arrows going on from it.
+                let d = Drawing::at(4.0, 16.0).w(bar(4.0, 4.0, 28.0));
+                let rows: &[f32] = if single { &[16.0] } else { &[10.5, 21.5] };
+                rows.iter()
+                    .fold(d, |d, &y| d.w(one_way([8.0, y], [29.5, y], 2.6, 8.0, 6.0)))
+            }
             SelectTool => {
                 let mut d = dashed(2.5, 2.5, 13.5, 13.5);
                 d.hotspot = [9.0, 9.0];
@@ -1506,7 +1579,13 @@ mod tests {
         for c in Cursor::ALL {
             let img = image(c, 64);
             let png = bv_png::encode_rgba8(64, 64, &img.rgba, 6);
-            std::fs::write(dir.join("ponteiros").join(format!("{c:?}.png")), png).unwrap();
+            // Its name as a file's (a pointer with fields has braces and
+            // colons).
+            let name: String = format!("{c:?}")
+                .chars()
+                .filter(|ch| ch.is_alphanumeric())
+                .collect();
+            std::fs::write(dir.join("ponteiros").join(format!("{name}.png")), png).unwrap();
         }
     }
 }

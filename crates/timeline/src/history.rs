@@ -17,6 +17,8 @@ pub struct History<T: Clone> {
     moves: u64,
     /// Undo steps recorded, less those joined (see [`History::join_since`]).
     stacked: u64,
+    /// See [`History::revision`].
+    revision: u64,
 }
 
 impl<T: Clone + PartialEq> History<T> {
@@ -30,7 +32,16 @@ impl<T: Clone + PartialEq> History<T> {
             edits: 0,
             moves: 0,
             stacked: 0,
+            revision: 0,
         }
+    }
+
+    /// A number that changes whenever the state may have changed (never
+    /// the same for two different states): what is worked out from the
+    /// state is kept by it — the engine's copy, the title's star, a
+    /// frame's snapshot — instead of comparing whole states every frame.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// How many edits were recorded so far (each `apply`, merged run or
@@ -76,6 +87,7 @@ impl<T: Clone + PartialEq> History<T> {
         match edit(&mut self.current) {
             Ok(r) => {
                 if self.current != before {
+                    self.revision += 1;
                     self.push_undo(before);
                 }
                 Ok(r)
@@ -91,6 +103,7 @@ impl<T: Clone + PartialEq> History<T> {
     /// arrastar um controle deslizante): só a primeira cria entrada de
     /// desfazer. Qualquer outra edição encerra o agrupamento.
     pub fn apply_merged<R>(&mut self, key: u64, edit: impl FnOnce(&mut T) -> R) -> R {
+        self.revision += 1;
         if self.merge_key == Some(key) && self.redo.is_empty() {
             return edit(&mut self.current);
         }
@@ -108,6 +121,7 @@ impl<T: Clone + PartialEq> History<T> {
     /// (a change that makes no undo of its own). Where a state has nothing
     /// for it to change, `edit` leaves it as it is.
     pub fn apply_everywhere(&mut self, edit: impl Fn(&mut T)) {
+        self.revision += 1;
         edit(&mut self.current);
         for s in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             edit(s);
@@ -118,6 +132,7 @@ impl<T: Clone + PartialEq> History<T> {
     /// the edit that made it needed (Auto Normalize's gain after a trim),
     /// and undo goes back past both.
     pub fn amend(&mut self, edit: impl FnOnce(&mut T)) {
+        self.revision += 1;
         edit(&mut self.current);
     }
 
@@ -132,6 +147,7 @@ impl<T: Clone + PartialEq> History<T> {
 
     /// Altera o estado durante um gesto, sem registrar no histórico.
     pub fn preview(&mut self, gesture: &Gesture<T>, edit: impl FnOnce(&mut T)) {
+        self.revision += 1;
         self.current = gesture.before.clone();
         edit(&mut self.current);
     }
@@ -144,6 +160,7 @@ impl<T: Clone + PartialEq> History<T> {
     }
 
     pub fn cancel_gesture(&mut self, gesture: Gesture<T>) {
+        self.revision += 1;
         self.current = gesture.before;
     }
 
@@ -201,6 +218,7 @@ impl<T: Clone + PartialEq> History<T> {
         match self.undo.pop() {
             Some(prev) => {
                 self.moves += 1;
+                self.revision += 1;
                 self.redo.push(std::mem::replace(&mut self.current, prev));
                 true
             }
@@ -213,6 +231,7 @@ impl<T: Clone + PartialEq> History<T> {
         match self.redo.pop() {
             Some(next) => {
                 self.moves += 1;
+                self.revision += 1;
                 self.undo.push(std::mem::replace(&mut self.current, next));
                 true
             }
@@ -223,6 +242,7 @@ impl<T: Clone + PartialEq> History<T> {
     /// Substitui o estado sem histórico (ex.: ao abrir um projeto).
     pub fn reset(&mut self, state: T) {
         self.moves += 1;
+        self.revision += 1;
         self.current = state;
         self.undo.clear();
         self.redo.clear();
@@ -245,6 +265,58 @@ impl<T> Gesture<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every way the state changes moves the revision; looking at it, or
+    /// an edit that changes nothing, does not.
+    #[test]
+    fn the_revision_moves_with_every_change() {
+        let mut h = History::new(0);
+        let mut seen = h.revision();
+        let mut moved = |h: &History<i32>, should: bool| {
+            let now = h.revision();
+            assert_eq!(now != seen, should, "{seen} -> {now}");
+            seen = now;
+        };
+        h.apply(|v| {
+            *v = 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        moved(&h, true);
+        h.apply(|v| {
+            *v = 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        moved(&h, false);
+        let _ = h.apply(|v| {
+            *v = 5;
+            Err::<(), _>(())
+        });
+        moved(&h, false);
+        h.apply_merged(7, |v| *v = 2);
+        moved(&h, true);
+        h.apply_merged(7, |v| *v = 3);
+        moved(&h, true);
+        h.amend(|v| *v = 4);
+        moved(&h, true);
+        h.apply_everywhere(|v| *v += 1);
+        moved(&h, true);
+        let g = h.begin_gesture();
+        moved(&h, false);
+        h.preview(&g, |v| *v = 9);
+        moved(&h, true);
+        h.cancel_gesture(g);
+        moved(&h, true);
+        h.undo();
+        moved(&h, true);
+        h.redo();
+        moved(&h, true);
+        h.reset(0);
+        moved(&h, true);
+        assert!(!h.undo(), "nothing to undo");
+        moved(&h, false);
+    }
 
     #[test]
     fn a_change_everywhere_survives_undo_and_redo() {

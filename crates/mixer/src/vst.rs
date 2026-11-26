@@ -158,6 +158,8 @@ pub(crate) struct Run {
     tail: Option<u32>,
     /// Samples in a row its input and output were silent.
     quiet: usize,
+    /// Its last block had sound that is not a number, silenced.
+    spoiled: bool,
 }
 
 impl Run {
@@ -183,6 +185,7 @@ impl Run {
             channels,
             tail,
             quiet: 0,
+            spoiled: false,
         })
     }
 
@@ -231,11 +234,26 @@ impl Run {
             return;
         }
         self.plugin.process(channels);
+        // Sound that is not a number (a NaN, an infinity) would stay in
+        // every filter after the plug-in: silence in its place.
+        for s in channels.iter_mut().flatten() {
+            if !s.is_finite() {
+                *s = 0.0;
+                self.spoiled = true;
+            }
+        }
         if quiet_in && silent(channels) {
             self.quiet = self.quiet.saturating_add(n);
         } else {
             self.quiet = 0;
         }
+    }
+
+    /// Whether its last block had sound that is not a number (silenced):
+    /// asked once, by the chain, which then starts again — the plug-in
+    /// too ([`Self::restart`]), whatever it holds cleared.
+    pub(crate) fn spoiled(&mut self) -> bool {
+        std::mem::take(&mut self.spoiled)
     }
 
     /// After a seek: its sound cleared (its delay lines and reverb tails

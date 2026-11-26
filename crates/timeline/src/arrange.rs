@@ -4,7 +4,7 @@
 
 use bv_core::Tick;
 
-use crate::edit::{EditError, clamp_fades};
+use crate::edit::{EditError, clamp_fades, start_at_media};
 use crate::model::{Clip, ClipId, GroupId, Project, TrackKind};
 
 type Result<T> = std::result::Result<T, EditError>;
@@ -95,10 +95,13 @@ impl Project {
     pub fn shuffle_events(&mut self, id: ClipId, to: Tick) -> Result<()> {
         let c = self.clip(id).ok_or(EditError::UnknownClip(id))?.clone();
         let members = self.group_members(id);
-        let lanes: Vec<usize> = members
+        // The group's tracks, each once (two of its events may share one).
+        let mut lanes: Vec<usize> = members
             .iter()
             .filter_map(|&m| self.find_clip(m).map(|(t, _)| t))
             .collect();
+        lanes.sort_unstable();
+        lanes.dedup();
         if members
             .iter()
             .filter_map(|&m| self.clip(m))
@@ -135,6 +138,14 @@ impl Project {
                 .unwrap_or(e);
             (b - e, e, b, -len)
         };
+        // No event of the group before the timeline's start, as a move.
+        let earliest = members
+            .iter()
+            .filter_map(|&m| self.clip(m))
+            .map(|m| m.start)
+            .min()
+            .unwrap_or(s);
+        let delta = delta.max(-earliest);
         if delta == Tick::ZERO {
             return Ok(());
         }
@@ -168,9 +179,28 @@ impl Project {
         let clip = &mut self.tracks[t].clips[c];
         clip.all_frames = on;
         if on {
-            clip.looped = false;
             clip.hold_last = false;
-            self.fit_all_frames(t, c);
+            self.set_looped(id, false)?;
+            // Its start may have moved: where it is on its track now.
+            if let Some((t, c)) = self.find_clip(id) {
+                self.fit_all_frames(t, c);
+            }
+        }
+        Ok(())
+    }
+
+    /// Edit › Switches › Loop on event `id` (`on`), or off. Off, an event
+    /// that starts before its media's start — where Loop repeated it —
+    /// keeps its picture in place and loses that part: it starts where its
+    /// media does (or, all of it before its media, plays from its media's
+    /// start).
+    pub fn set_looped(&mut self, id: ClipId, on: bool) -> Result<()> {
+        let min = self.min_clip_duration();
+        let (t, c) = self.find_clip(id).ok_or(EditError::UnknownClip(id))?;
+        let clip = &mut self.tracks[t].clips[c];
+        clip.looped = on;
+        if start_at_media(clip, min) {
+            self.tracks[t].sort();
         }
         Ok(())
     }
@@ -322,6 +352,111 @@ mod tests {
         p.shuffle_events(ids[2], Tick::from_seconds(9)).unwrap();
         assert_eq!(start(&p, ids[1]), Tick::from_seconds(4));
         assert_eq!(start(&p, ids[2]), Tick::from_seconds(8));
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn shuffling_a_group_moves_each_event_once_and_none_before_zero() {
+        let s = Tick::from_seconds;
+        let mut p = Project::default();
+        let (v, a) = (p.tracks[0].id, p.tracks[1].id);
+        let m = movie(&mut p, 60);
+        let place = |p: &mut Project, at: i64| {
+            let id = p.insert_media(m, s(at), Some(v), None).unwrap()[0];
+            p.trim_end(id, s(at + 4)).unwrap();
+            id
+        };
+        let start = |p: &Project, id| p.clip(id).unwrap().start;
+        // Two events of one group on the same track, after another event:
+        // dropped at the start, they go there once.
+        let first = place(&mut p, 0);
+        let (x, y) = (place(&mut p, 4), place(&mut p, 8));
+        p.group_clips(&[x, y]);
+        let mut q = p.clone();
+        q.shuffle_events(x, Tick::ZERO).unwrap();
+        assert_eq!((start(&q, x), start(&q, y)), (Tick::ZERO, s(4)));
+        assert_eq!(start(&q, first), s(4));
+        q.check_invariants().unwrap();
+        // A group mate on another track that starts 3 s before the event:
+        // the group goes back as far as the timeline's start lets it.
+        p.ungroup_clips(&[x, y]);
+        let sound = p.insert_media(m, s(1), None, Some(a)).unwrap()[0];
+        p.trim_end(sound, s(5)).unwrap();
+        p.group_clips(&[x, sound]);
+        p.shuffle_events(x, Tick::ZERO).unwrap();
+        assert_eq!((start(&p, sound), start(&p, x)), (Tick::ZERO, s(3)));
+        assert_eq!(start(&p, first), s(4));
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn all_frames_on_an_event_looped_before_its_media_start_at_the_media() {
+        let s = Tick::from_seconds;
+        let mut p = Project::default();
+        let v = p.tracks[0].id;
+        let m = movie(&mut p, 20);
+        let id = p.insert_media(m, s(4), Some(v), None).unwrap()[0];
+        // With Loop, slipped to start 2 s before its media.
+        p.slip_clip(id, s(2)).unwrap();
+        assert_eq!(p.clip(id).unwrap().source_in, s(-2));
+        // Loop goes off: it starts where its media does, and holds all
+        // of it.
+        p.set_all_frames(id, true).unwrap();
+        let c = p.clip(id).unwrap();
+        assert_eq!(
+            (c.start, c.source_in, c.duration),
+            (s(6), Tick::ZERO, s(20))
+        );
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn loop_switched_off_takes_what_was_before_the_media() {
+        let s = Tick::from_seconds;
+        let mut p = Project::default();
+        let v = p.tracks[0].id;
+        let m = movie(&mut p, 20);
+        let place = |p: &mut Project, from: i64, to: i64| {
+            let id = p.insert_media(m, s(from), Some(v), None).unwrap()[0];
+            p.trim_end(id, s(to)).unwrap();
+            id
+        };
+        // 4 to 14 s, slipped to start 2 s before its media (Loop shows the
+        // media's end there); another event starts in those 2 s.
+        let id = place(&mut p, 4, 14);
+        let over = place(&mut p, 5, 7);
+        p.slip_clip(id, s(2)).unwrap();
+        let shown = p.clip(id).unwrap().source_time(s(9));
+        assert_eq!(shown, s(3));
+        // Loop off: those 2 s go, and the rest shows what it showed.
+        p.set_looped(id, false).unwrap();
+        let c = p.clip(id).unwrap();
+        assert!(!c.looped);
+        assert_eq!((c.start, c.duration, c.source_in), (s(6), s(8), Tick::ZERO));
+        assert_eq!(c.source_time(s(9)), shown);
+        let order: Vec<ClipId> = p.tracks[0].clips.iter().map(|c| c.id).collect();
+        assert_eq!(order, vec![over, id], "in the order of their starts");
+        p.check_invariants().unwrap();
+        // On and off again: nothing more to take.
+        p.set_looped(id, true).unwrap();
+        assert!(p.clip(id).unwrap().looped);
+        p.set_looped(id, false).unwrap();
+        assert_eq!(p.clip(id).unwrap().start, s(6));
+        // All of an event before its media: it stays where it is and
+        // plays from its media's start.
+        let early = place(&mut p, 30, 33);
+        p.slip_clip(early, s(5)).unwrap();
+        p.set_looped(early, false).unwrap();
+        let c = p.clip(early).unwrap();
+        assert_eq!(
+            (c.start, c.duration, c.source_in),
+            (s(30), s(3), Tick::ZERO)
+        );
+        // An event within its media only loses the switch.
+        p.set_looped(over, false).unwrap();
+        let c = p.clip(over).unwrap();
+        assert_eq!((c.looped, c.start, c.duration), (false, s(5), s(2)));
+        assert!(p.set_looped(ClipId(999_999), false).is_err());
         p.check_invariants().unwrap();
     }
 

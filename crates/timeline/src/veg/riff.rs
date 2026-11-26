@@ -132,7 +132,10 @@ fn chunks(file: &[u8], start: usize, end: usize, depth: u32) -> Result<Vec<Chunk
         let body = at + 24;
         let stop = at + size;
         let chunk = if guid == RIFF || guid == LIST {
-            let kind = guid_at(file, body).ok_or(VegError::Damaged("a list's type"))?;
+            // A list has room for its type's 16 bytes at least.
+            let kind = guid_at(file, body)
+                .filter(|_| size >= 40)
+                .ok_or(VegError::Damaged("a list's type"))?;
             Chunk {
                 guid: kind,
                 list: true,
@@ -260,5 +263,37 @@ mod tests {
         let list = root.list(l).unwrap();
         assert_eq!(list.block(a).unwrap().data[..3], [2; 3]);
         assert!(parse(b"not a riff at all, not at all, not at all").is_err());
+    }
+
+    #[test]
+    fn a_list_with_no_room_for_its_type_is_damaged() {
+        let kind = Guid::parse("46C429EF-904A-11D2-8722-00C04F8EDB8A");
+        // The riff, then a list of `size` bytes and `after` bytes more.
+        let file = |size: u64, after: usize| {
+            let mut file = Vec::new();
+            file.extend_from_slice(&RIFF.0);
+            file.extend_from_slice(&(40 + 40 + after as u64).to_le_bytes());
+            file.extend_from_slice(&kind.0);
+            file.extend_from_slice(&LIST.0);
+            file.extend_from_slice(&size.to_le_bytes());
+            file.extend_from_slice(&kind.0);
+            file.extend(std::iter::repeat_n(0u8, after));
+            file
+        };
+        // Its header alone, or part of its type: the bytes after it are
+        // not its type.
+        for size in [24, 31, 32, 39] {
+            assert_eq!(
+                parse(&file(size, 64)).unwrap_err(),
+                VegError::Damaged("a list's type"),
+                "{size}"
+            );
+        }
+        // With its type and nothing else: an empty list.
+        let empty = file(40, 0);
+        let root = parse(&empty).unwrap();
+        assert_eq!(root.kids.len(), 1);
+        assert!(root.kids[0].list && root.kids[0].data.is_empty());
+        assert_eq!(root.kids[0].guid, kind);
     }
 }

@@ -17,6 +17,23 @@ pub(crate) struct PrerenderDialog {
     options: PrerenderOptions,
 }
 
+/// Deletes a prerendered part's file — only one BananaV made: the path
+/// comes from the project file, and a damaged or edited one could name any
+/// file of the computer.
+fn remove_prerendered(file: &std::path::Path) {
+    if is_prerendered(file) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+/// A file named as the engine names prerendered parts
+/// (`prerender_<fingerprint>_<frame>.mp4` or `.mov`).
+fn is_prerendered(file: &std::path::Path) -> bool {
+    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    name.starts_with("prerender_") && matches!(ext, "mp4" | "mov")
+}
+
 impl BananaApp {
     /// Where prerendered parts go: File › Properties › Video's folder, or
     /// BananaV's in the temporary files folder.
@@ -167,7 +184,7 @@ impl BananaApp {
         self.engine.cancel_prerender();
         let n = self.project().prerenders.len();
         for part in &self.project().prerenders {
-            let _ = std::fs::remove_file(&part.file);
+            remove_prerendered(std::path::Path::new(&part.file));
         }
         self.modify_untracked(|p| p.prerenders.clear());
         self.notify(trn!(
@@ -185,11 +202,29 @@ impl BananaApp {
         // The parent timelines waiting go with it (they were saved).
         self.parent_timelines.clear();
         self.engine.cancel_prerender();
+        // Its copy saved automatically goes with it too.
+        self.autosave_forget_copy();
+        // And what was of it: ids are counted in each project, so the next
+        // one's events, tracks and media have the same numbers — an
+        // analysis finishing would write into them, events copied would
+        // paste with other media, the tracks would take these heights.
+        self.engine.cancel_scene_detection();
+        self.engine.cancel_audio_sync();
+        self.engine.cancel_beat_detection();
+        self.engine.cancel_ducking_analysis();
+        self.engine.cancel_nonrealtime_fx();
+        self.engine.cancel_loudness_scan();
+        self.copy_job = None;
+        self.clipboard = None;
+        self.proxy_checks.clear();
+        self.auto_normalized.clear();
+        self.stabilization_points.clear();
+        self.timeline.forget_project();
         if self.settings.prefs.keep_prerenders {
             return;
         }
         for part in &self.project().prerenders {
-            let _ = std::fs::remove_file(&part.file);
+            remove_prerendered(std::path::Path::new(&part.file));
         }
     }
 }
@@ -200,6 +235,82 @@ mod tests {
     use bv_core::{FrameRate, Tick, TimeRange};
     use bv_timeline::{Effect, EffectKind, Generator, MediaInfo, Project, ProjectSettings};
     use std::time::{Duration, Instant};
+
+    /// What the view and the app keep by a project's ids goes with it: the
+    /// next project's tracks and events have the same numbers.
+    #[test]
+    fn what_was_kept_of_a_project_goes_with_it() {
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.load_demo();
+        let track = app.project().tracks[0].id;
+        app.timeline.track_heights.insert(track, 200.0);
+        app.timeline.layers.insert(track);
+        app.selection = app.project().tracks[0].clips.iter().map(|c| c.id).collect();
+        app.copy();
+        assert!(app.clipboard.is_some());
+        app.new_project();
+        assert!(app.timeline.track_heights.is_empty());
+        assert!(app.timeline.layers.is_empty());
+        assert!(app.clipboard.is_none(), "nothing to paste with other media");
+    }
+
+    /// A key pressed while an event is dragged: the drag ends where it is
+    /// (one undo) and the key's edit stays (the drag's next move used to
+    /// rebuild the project from where it began, the edit lost, its undo
+    /// left behind).
+    #[test]
+    fn an_edit_during_a_drag_ends_the_drag_and_stays() {
+        let s = Tick::from_seconds;
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.load_demo();
+        let before = app.project().markers.len();
+        let g = app.history.begin_gesture();
+        app.history.preview(&g, |p| {
+            p.add_marker(s(3));
+        });
+        app.timeline.gesture = Some(g);
+        app.modify(|p| {
+            p.add_marker(s(7));
+        });
+        assert!(app.timeline.gesture.is_none(), "the drag ended");
+        assert_eq!(app.project().markers.len(), before + 2, "both stay");
+        app.undo();
+        assert_eq!(
+            app.project().markers.len(),
+            before + 1,
+            "the key's edit undone"
+        );
+        app.undo();
+        assert_eq!(app.project().markers.len(), before, "then the drag");
+    }
+
+    /// Only BananaV's own prerendered files are deleted: the project names
+    /// them, and a damaged project could name any file.
+    #[test]
+    fn only_prerendered_files_are_deleted() {
+        assert!(is_prerendered(std::path::Path::new(
+            "C:/Temp/BananaV/Prerender/prerender_00ab12cd34ef5678_0000120.mp4"
+        )));
+        assert!(is_prerendered(std::path::Path::new("prerender_1_2.mov")));
+        assert!(!is_prerendered(std::path::Path::new(
+            "C:/Users/me/Thesis.docx"
+        )));
+        assert!(!is_prerendered(std::path::Path::new(
+            "C:/Users/me/Holiday.mp4"
+        )));
+        assert!(!is_prerendered(std::path::Path::new("prerender_notes.txt")));
+        let dir = std::env::temp_dir().join(format!("bananav-prerender-rm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let mine = dir.join("Holiday.mp4");
+        std::fs::write(&mine, b"x").expect("written");
+        remove_prerendered(&mine);
+        assert!(mine.exists(), "the user's file stays");
+        let part = dir.join("prerender_0000000000000001_0000000.mp4");
+        std::fs::write(&part, b"x").expect("written");
+        remove_prerendered(&part);
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Inverted color bars, the first second selected.
     fn app(folder: &std::path::Path) -> BananaApp {

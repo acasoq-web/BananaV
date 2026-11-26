@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Makes BananaV.app and its disk image for macOS (run on a Mac).
 
-    python3 packaging/macos/make_app.py --version 0.3.0 \
+    python3 packaging/macos/make_app.py --version 0.4.0 \
         --arch arm64 <bananav built for arm64> <its FFmpeg prefix> \
         --arch x86_64 <bananav built for x86_64> <its FFmpeg prefix> \
-        --out dist [--dmg BananaV-0.3.0-macos-universal.dmg] [--docs <folder>]
+        --out dist [--dmg BananaV-0.4.0-macos-universal.dmg] [--docs <folder>]
 
 - One program for both of the Mac's processors (Apple's chips and Intel):
   each processor's build put together (`lipo`); one `--arch` makes a

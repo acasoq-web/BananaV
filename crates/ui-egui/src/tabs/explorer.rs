@@ -64,6 +64,10 @@ pub struct ExplorerState {
     loaded: Option<PathBuf>,
     error: Option<String>,
     selected: Option<PathBuf>,
+    /// The entry the keys picked, to scroll into view; the list's scroll
+    /// and height last drawn.
+    reveal: Option<usize>,
+    scrolled: (f32, f32),
     /// Every file and folder picked (Ctrl and Shift add to them);
     /// `selected` is the one clicked last, which previews and panels follow.
     picked: Vec<PathBuf>,
@@ -301,6 +305,8 @@ impl ExplorerState {
             loaded: None,
             error: None,
             selected: None,
+            reveal: None,
+            scrolled: (0.0, 0.0),
             picked: Vec::new(),
             anchor: None,
             all_files: false,
@@ -550,13 +556,13 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
             (contents.bottom() - panel_h * panels as f32).max(contents.top() + 60.0),
         ),
     );
-    let mut act = None;
+    let mut act = keys_ui(app, list, thumbnails, auto_preview);
     ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
-        act = if thumbnails {
+        act = act.take().or(if thumbnails {
             thumbnails_ui(ui, app, &favorites, auto_preview)
         } else {
             contents_ui(ui, &mut app.explorer, &favorites, auto_preview)
-        };
+        });
     });
     // While the folder's files are read in the background, the system's
     // arrow with its busy mark over them, as VEGAS's Explorer while it
@@ -1064,6 +1070,41 @@ fn tree_row(
     }
 }
 
+/// The keys while the Explorer has them (`crate::browse`): a name's
+/// letters, the arrows, Home, End and the pages pick an entry as a click
+/// does (previewing it with Auto Preview), and it scrolls into view.
+fn keys_ui(app: &mut BananaApp, list: Rect, thumbnails: bool, auto_preview: bool) -> Option<Act> {
+    let keys = app.browse.take(crate::dock::Tab::Explorer);
+    let st = &mut app.explorer;
+    if keys.is_empty() || st.entries.is_empty() {
+        return None;
+    }
+    let (columns, page) = if thumbnails {
+        let across = ((list.width() - 6.0 + 10.0) / (THUMB.x + 10.0)).floor();
+        (across.max(1.0) as usize, 2)
+    } else {
+        (
+            1,
+            ((list.height() / ROW_H) as usize).saturating_sub(1).max(1),
+        )
+    };
+    let at = st
+        .selected
+        .as_ref()
+        .and_then(|p| st.entries.iter().position(|e| &e.path == p));
+    let to = if keys.find.is_empty() {
+        crate::browse::step(st.entries.len(), at, &keys.moves, columns, page)
+    } else {
+        crate::browse::find(st.entries.iter().map(|e| e.name.as_str()), at, &keys.find)
+    }?;
+    let e = &st.entries[to];
+    let path = e.path.clone();
+    let file = !e.is_dir && crate::media_files::kind_of(&path).is_some();
+    st.click(&path, egui::Modifiers::NONE);
+    st.reveal = Some(to);
+    (auto_preview && file && Some(to) != at).then_some(Act::Preview(path))
+}
+
 /// The open folder's contents: a list, or details with sortable columns.
 fn contents_ui(
     ui: &mut Ui,
@@ -1082,107 +1123,111 @@ fn contents_ui(
         header(ui, st);
     }
     let details = st.view == View::Details;
-    egui::ScrollArea::vertical()
+    let mut area = egui::ScrollArea::vertical()
         .id_salt("explorer-contents")
-        .auto_shrink([false, false])
-        .show_rows(ui, ROW_H, st.entries.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            let rows = st.entries[range].to_vec();
-            for e in &rows {
-                let (rect, resp) = ui.allocate_exact_size(
-                    vec2(ui.available_width(), ROW_H),
-                    Sense::click_and_drag(),
-                );
-                let painter = ui.painter_at(rect);
-                let selected = st.is_picked(&e.path);
-                if selected {
-                    painter.rect_filled(rect, 0.0, theme::selection());
-                } else if resp.hovered() {
-                    painter.rect_filled(rect, 0.0, theme::hover());
+        .auto_shrink([false, false]);
+    // A row the keys picked, in view.
+    if let Some(i) = st.reveal.take() {
+        let (offset, height) = st.scrolled;
+        area = area.vertical_scroll_offset(crate::browse::reveal(i, ROW_H, height, offset));
+    }
+    let shown = area.show_rows(ui, ROW_H, st.entries.len(), |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let rows = st.entries[range].to_vec();
+        for e in &rows {
+            let (rect, resp) =
+                ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
+            let painter = ui.painter_at(rect);
+            let selected = st.is_picked(&e.path);
+            if selected {
+                painter.rect_filled(rect, 0.0, theme::selection());
+            } else if resp.hovered() {
+                painter.rect_filled(rect, 0.0, theme::hover());
+            }
+            let supported = e.is_dir || crate::media_files::kind_of(&e.path).is_some();
+            let color = if selected {
+                Color32::WHITE
+            } else if supported {
+                theme::text()
+            } else {
+                theme::text_dim()
+            };
+            let glyph = if e.is_dir {
+                Glyph::Icon(Icon::Folder)
+            } else {
+                file_glyph(&e.path)
+            };
+            glyph.paint(
+                &painter,
+                Rect::from_min_size(rect.min + vec2(6.0, 3.0), vec2(16.0, 16.0)),
+                if e.is_dir { theme::banana() } else { color },
+            );
+            let columns = columns(rect.width());
+            let name_room = if details {
+                columns[0] - 30.0
+            } else {
+                rect.width() - 34.0
+            };
+            crate::widgets::fit_text(
+                &painter,
+                rect.left_center() + vec2(28.0, 0.0),
+                Align2::LEFT_CENTER,
+                &e.name,
+                FontId::proportional(13.0),
+                color,
+                name_room,
+            );
+            if details {
+                let small = FontId::proportional(12.0);
+                let mut x = rect.left() + columns[0];
+                let size = if e.is_dir {
+                    String::new()
+                } else {
+                    human_size(e.size)
+                };
+                let date = e.modified.map(crate::fmt::date_time).unwrap_or_default();
+                for (text, w) in [
+                    (size, columns[1]),
+                    (type_text(e), columns[2]),
+                    (date, columns[3]),
+                ] {
+                    crate::widgets::fit_text(
+                        &painter,
+                        pos2(x + 6.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        &text,
+                        small.clone(),
+                        if selected {
+                            Color32::WHITE
+                        } else {
+                            theme::text_dim()
+                        },
+                        w - 10.0,
+                    );
+                    x += w;
                 }
-                let supported = e.is_dir || crate::media_files::kind_of(&e.path).is_some();
-                let color = if selected {
-                    Color32::WHITE
-                } else if supported {
-                    theme::text()
-                } else {
-                    theme::text_dim()
-                };
-                let glyph = if e.is_dir {
-                    Glyph::Icon(Icon::Folder)
-                } else {
-                    file_glyph(&e.path)
-                };
-                glyph.paint(
-                    &painter,
-                    Rect::from_min_size(rect.min + vec2(6.0, 3.0), vec2(16.0, 16.0)),
-                    if e.is_dir { theme::banana() } else { color },
-                );
-                let columns = columns(rect.width());
-                let name_room = if details {
-                    columns[0] - 30.0
-                } else {
-                    rect.width() - 34.0
-                };
-                crate::widgets::fit_text(
-                    &painter,
-                    rect.left_center() + vec2(28.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    &e.name,
-                    FontId::proportional(13.0),
-                    color,
-                    name_room,
-                );
-                if details {
-                    let small = FontId::proportional(12.0);
-                    let mut x = rect.left() + columns[0];
-                    let size = if e.is_dir {
-                        String::new()
-                    } else {
-                        human_size(e.size)
-                    };
-                    let date = e.modified.map(crate::fmt::date_time).unwrap_or_default();
-                    for (text, w) in [
-                        (size, columns[1]),
-                        (type_text(e), columns[2]),
-                        (date, columns[3]),
-                    ] {
-                        crate::widgets::fit_text(
-                            &painter,
-                            pos2(x + 6.0, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &text,
-                            small.clone(),
-                            if selected {
-                                Color32::WHITE
-                            } else {
-                                theme::text_dim()
-                            },
-                            w - 10.0,
-                        );
-                        x += w;
-                    }
-                }
-                if let Some(a) = row_acts(st, e, &resp, supported, auto_preview) {
+            }
+            if let Some(a) = row_acts(st, e, &resp, supported, auto_preview) {
+                act = Some(a);
+            }
+            if resp.double_clicked() && e.is_dir {
+                navigate = Some(e.path.clone());
+            }
+            let resp = if supported {
+                resp
+            } else {
+                resp.on_hover_text(tr("Format not supported by BananaV yet"))
+            };
+            let path = e.path.clone();
+            let is_dir = e.is_dir;
+            resp.context_menu(|ui| {
+                if let Some(a) = entry_menu(ui, &path, is_dir, supported, favorites) {
                     act = Some(a);
                 }
-                if resp.double_clicked() && e.is_dir {
-                    navigate = Some(e.path.clone());
-                }
-                let resp = if supported {
-                    resp
-                } else {
-                    resp.on_hover_text(tr("Format not supported by BananaV yet"))
-                };
-                let path = e.path.clone();
-                let is_dir = e.is_dir;
-                resp.context_menu(|ui| {
-                    if let Some(a) = entry_menu(ui, &path, is_dir, supported, favorites) {
-                        act = Some(a);
-                    }
-                });
-            }
-        });
+            });
+        }
+    });
+    st.scrolled = (shown.state.offset.y, shown.inner_rect.height());
     if let Some(d) = navigate {
         st.go(d);
     }
@@ -1295,7 +1340,8 @@ fn add_file(app: &mut BananaApp, p: PathBuf, trim: bool) {
         crate::media_files::kind_of(&p),
         Some(FileKind::Project | FileKind::Timeline)
     ) {
-        app.open_path(p);
+        // It replaces the project: after "Save changes?" when it has any.
+        app.request(crate::app::Pending::OpenPath(p));
     } else if let Some(&id) = app.import_paths(&[p]).first() {
         app.selected_media = Some(id);
         // To the Trimmer, or to the tracks at the cursor (Options ›
@@ -1341,11 +1387,15 @@ fn thumbnails_ui(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
                 ui.add_space(6.0);
-                for e in &entries {
+                for (k, e) in entries.iter().enumerate() {
                     let (rect, resp) = ui.allocate_exact_size(
                         vec2(THUMB.x, THUMB.y + 34.0),
                         Sense::click_and_drag(),
                     );
+                    if app.explorer.reveal == Some(k) {
+                        app.explorer.reveal = None;
+                        ui.scroll_to_rect(rect, None);
+                    }
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
@@ -1762,6 +1812,45 @@ impl BananaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project double-clicked in the Explorer replaces the one open: with
+    /// changes not saved, only after the question (it used to replace it
+    /// at once, the changes and their undo history gone).
+    #[test]
+    fn a_project_opened_from_the_explorer_asks_about_unsaved_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("bananav-explorer-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder");
+        let other = dir.join("Other.bvproj");
+        std::fs::write(&other, bv_timeline::Project::default().to_json()).expect("written");
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.load_demo();
+        app.modify(|p| {
+            p.add_marker(bv_core::Tick::from_seconds(1));
+        });
+        assert!(app.is_dirty());
+        let mine = app.project().clone();
+        add_file(&mut app, other.clone(), false);
+        assert_eq!(*app.project(), mine, "still the project being worked on");
+        assert_eq!(
+            app.waiting_for_save(),
+            Some(&crate::app::Pending::OpenPath(other))
+        );
+        // The same from File › Import › VEG Project.
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.load_demo();
+        app.modify(|p| {
+            p.add_marker(bv_core::Tick::from_seconds(1));
+        });
+        assert!(app.is_dirty());
+        crate::commands::Cmd::ImportVeg.run(&mut app);
+        assert_eq!(
+            app.waiting_for_save(),
+            Some(&crate::app::Pending::ImportVeg)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Ctrl adds to the picks and takes from them, Shift picks a run from
     /// the last click; actions on one of several take them all.

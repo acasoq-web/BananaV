@@ -10,7 +10,7 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::ffi::{CStr, c_uint, c_void};
+use std::ffi::{CStr, c_int, c_uint, c_void};
 use std::sync::{Arc, Mutex};
 
 use bv_ofx_sys::names::*;
@@ -23,8 +23,8 @@ use crate::plugin::Binary;
 pub struct Crash {
     /// Its binary's file.
     pub binary: std::path::PathBuf,
-    /// What it was doing: the action, or a thread of the multi-thread
-    /// suite.
+    /// What it was doing: the action, its binary's function listing its
+    /// plug-ins, or a thread of the multi-thread suite.
     pub doing: String,
     /// The exception's code.
     pub code: u32,
@@ -69,13 +69,24 @@ unsafe extern "C" {
         arg: *mut c_void,
         address: *mut *mut c_void,
     ) -> std::ffi::c_ulong;
+    fn bv_ofx_guarded_count(
+        f: OfxGetNumberOfPluginsFn,
+        n: *mut c_int,
+        address: *mut *mut c_void,
+    ) -> std::ffi::c_ulong;
+    fn bv_ofx_guarded_get(
+        f: OfxGetPluginFn,
+        nth: c_int,
+        plugin: *mut *mut OfxPlugin,
+        address: *mut *mut c_void,
+    ) -> std::ffi::c_ulong;
 }
 
 /// macOS: the guard's calls as Windows' `guard.c` has them, through
 /// `bv_apple::guard` (the bodies hold nothing to drop).
 #[cfg(all(bv_ofx_guard, target_os = "macos"))]
 mod mac {
-    use std::ffi::{c_uint, c_ulong, c_void};
+    use std::ffi::{c_int, c_uint, c_ulong, c_void};
 
     use bv_ofx_sys::*;
 
@@ -116,10 +127,31 @@ mod mac {
         let outcome = unsafe { bv_apple::guard::run(&mut || f(index, max, arg)) };
         code(outcome, address)
     }
+
+    pub(super) unsafe fn bv_ofx_guarded_count(
+        f: OfxGetNumberOfPluginsFn,
+        n: *mut c_int,
+        address: *mut *mut c_void,
+    ) -> c_ulong {
+        // SAFETY: as the guard's caller promises.
+        let outcome = unsafe { bv_apple::guard::run(&mut || *n = f()) };
+        code(outcome, address)
+    }
+
+    pub(super) unsafe fn bv_ofx_guarded_get(
+        f: OfxGetPluginFn,
+        nth: c_int,
+        plugin: *mut *mut OfxPlugin,
+        address: *mut *mut c_void,
+    ) -> c_ulong {
+        // SAFETY: as the guard's caller promises.
+        let outcome = unsafe { bv_apple::guard::run(&mut || *plugin = f(nth)) };
+        code(outcome, address)
+    }
 }
 
 #[cfg(all(bv_ofx_guard, target_os = "macos"))]
-use mac::{bv_ofx_guarded_entry, bv_ofx_guarded_thread};
+use mac::{bv_ofx_guarded_count, bv_ofx_guarded_entry, bv_ofx_guarded_get, bv_ofx_guarded_thread};
 
 /// Runs `binary`'s entry point `f` for `action`: its status, or
 /// `kOfxStatFailed` when the binary is switched off or crashes now.
@@ -173,6 +205,84 @@ pub(crate) unsafe fn entry(
         Err((code, address)) => {
             crashed(binary, action.to_string_lossy().into_owned(), code, address);
             kOfxStatFailed
+        }
+    }
+}
+
+/// Runs `binary`'s function `f` counting its plug-ins: their number, or
+/// `None` when the binary is switched off or crashes now.
+///
+/// # Safety
+/// `f` is the binary's `OfxGetNumberOfPlugins`.
+pub(crate) unsafe fn count(binary: &Arc<Binary>, f: OfxGetNumberOfPluginsFn) -> Option<c_int> {
+    if binary.crashed() {
+        return None;
+    }
+    RUNNING.with_borrow_mut(|r| r.push(binary.clone()));
+    #[cfg(bv_ofx_guard)]
+    let outcome = {
+        let mut n = 0;
+        let mut address = std::ptr::null_mut();
+        // SAFETY: as the caller promises; the guard only adds a handler.
+        let code = unsafe { bv_ofx_guarded_count(f, &mut n, &mut address) };
+        if code == 0 {
+            Ok(n)
+        } else {
+            Err((code as u32, address))
+        }
+    };
+    #[cfg(not(bv_ofx_guard))]
+    // SAFETY: as the caller promises.
+    let outcome: Result<c_int, (u32, *mut c_void)> = Ok(unsafe { f() });
+    RUNNING.with_borrow_mut(|r| {
+        r.pop();
+    });
+    match outcome {
+        Ok(n) => Some(n),
+        Err((code, address)) => {
+            crashed(binary, "OfxGetNumberOfPlugins".into(), code, address);
+            None
+        }
+    }
+}
+
+/// Runs `binary`'s function `f` giving its plug-in `nth`: the plug-in's
+/// structure, or `None` when the binary is switched off or crashes now.
+///
+/// # Safety
+/// `f` is the binary's `OfxGetPlugin`.
+pub(crate) unsafe fn get(
+    binary: &Arc<Binary>,
+    f: OfxGetPluginFn,
+    nth: c_int,
+) -> Option<*mut OfxPlugin> {
+    if binary.crashed() {
+        return None;
+    }
+    RUNNING.with_borrow_mut(|r| r.push(binary.clone()));
+    #[cfg(bv_ofx_guard)]
+    let outcome = {
+        let mut plugin = std::ptr::null_mut();
+        let mut address = std::ptr::null_mut();
+        // SAFETY: as the caller promises; the guard only adds a handler.
+        let code = unsafe { bv_ofx_guarded_get(f, nth, &mut plugin, &mut address) };
+        if code == 0 {
+            Ok(plugin)
+        } else {
+            Err((code as u32, address))
+        }
+    };
+    #[cfg(not(bv_ofx_guard))]
+    // SAFETY: as the caller promises.
+    let outcome: Result<*mut OfxPlugin, (u32, *mut c_void)> = Ok(unsafe { f(nth) });
+    RUNNING.with_borrow_mut(|r| {
+        r.pop();
+    });
+    match outcome {
+        Ok(plugin) => Some(plugin),
+        Err((code, address)) => {
+            crashed(binary, "OfxGetPlugin".into(), code, address);
+            None
         }
     }
 }

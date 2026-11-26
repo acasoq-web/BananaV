@@ -207,3 +207,54 @@ fn heavy_video_decodes_faster_on_the_card() {
     }
     bv_mf::set_hardware_decoding(HardwareDecoding::Off);
 }
+
+/// A file whose sound lasts longer than its pictures (recordings often):
+/// past the last picture, it stays, each frame there at once — they were
+/// each decoded again from the last keyframe (a 4K render crawled at
+/// every event that reached such an end).
+#[test]
+#[ignore = "needs ffmpeg"]
+fn past_the_last_picture_it_stays_at_once() {
+    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test-media/generated/hardware");
+    std::fs::create_dir_all(&d).unwrap();
+    let p = d.join("short-video-long-sound.mp4");
+    if !p.exists() {
+        let st = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=1280x720:r=30:d=2",
+            ])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=3"])
+            .args([
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "300", "-c:a", "aac",
+            ])
+            .arg(&p)
+            .status()
+            .expect("ffmpeg on the PATH");
+        assert!(st.success());
+    }
+    for (h, name) in [
+        (HardwareDecoding::Off, "processor"),
+        (HardwareDecoding::Auto, "card"),
+    ] {
+        let mut dec = open(p.to_str().unwrap(), h);
+        let frame = Tick::from_seconds(1).0 / 30;
+        let last = dec
+            .frame_at(Tick(frame * 59))
+            .expect("the last picture")
+            .pts;
+        let started = Instant::now();
+        for n in 60..90 {
+            let f = dec.frame_at(Tick(frame * n)).expect("past the end");
+            assert_eq!(f.pts, last, "{name}: the last picture stays");
+        }
+        let took = started.elapsed().as_secs_f64();
+        println!("{name}: 30 frames past the end in {:.1} ms", took * 1000.0);
+        assert!(took < 0.2, "{name}: {took} s");
+    }
+}

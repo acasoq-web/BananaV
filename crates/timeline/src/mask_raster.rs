@@ -1,9 +1,11 @@
-//! A Pan/Crop mask's 8-bit picture, the same as VEGAS's rendered frames pixel by
-//! pixel (`pan_crop_renders` checks it): its paths' curves cut
-//! into pieces going one way down, those followed line by line (sixteen
-//! bands a line with anti-aliasing) and filled from one crossing to the next;
-//! a feather is a recursive Gaussian over the filled path, a one-way one
-//! bent by a curve; the paths then add up or take away, each as far as its
+//! A Pan/Crop mask's picture, the same as VEGAS's rendered frames pixel by
+//! pixel where no feather reaches (`pan_crop_renders` checks it): its
+//! paths' curves cut into pieces going one way down, those followed line by
+//! line (sixteen bands a line with anti-aliasing) and filled from one
+//! crossing to the next, in 8-bit steps; a feather is a recursive Gaussian
+//! over the filled path, a one-way one bent by a curve, kept at full
+//! precision so it fades without bands (BananaV's own: VEGAS's comes out in
+//! whole steps); the paths then add up or take away, each as far as its
 //! opacity says.
 
 use crate::mask::{MaskAnchor, MaskFeather, MaskMode, MaskPath};
@@ -510,18 +512,85 @@ const ONE_WAY: [u8; 129] = [
     253, 253, 253, 254, 254, 254, 254, 254, 255,
 ];
 
-fn bent_out(v: u8) -> u8 {
-    ONE_WAY.get(usize::from(v)).copied().unwrap_or(255)
+/// Steps of the bend's samples in a level of the blur.
+const FINE: usize = 32;
+
+/// The one-way bend sampled every `FINE`th of a level over the blur's
+/// levels the table covers: a smooth curve that keeps rising (a monotone
+/// cubic) through the measured points where they rise — their repeats,
+/// whole levels' flat steps, left out; never more than a level from them.
+static BEND: std::sync::LazyLock<Vec<f32>> = std::sync::LazyLock::new(|| {
+    let mut knots = vec![(0.0f64, f64::from(ONE_WAY[0]))];
+    for (i, &v) in ONE_WAY.iter().enumerate().skip(1) {
+        if f64::from(v) > knots[knots.len() - 1].1 {
+            knots.push((i as f64, f64::from(v)));
+        }
+    }
+    let n = knots.len();
+    let secant: Vec<f64> = knots
+        .windows(2)
+        .map(|k| (k[1].1 - k[0].1) / (k[1].0 - k[0].0))
+        .collect();
+    // Each knot's slope: the secants' weighted harmonic mean (Fritsch and
+    // Butland's), the secant itself at the ends.
+    let mut slope = vec![0.0f64; n];
+    slope[0] = secant[0];
+    slope[n - 1] = secant[n - 2];
+    for k in 1..n - 1 {
+        let (h0, h1) = (knots[k].0 - knots[k - 1].0, knots[k + 1].0 - knots[k].0);
+        let (w0, w1) = (h1 + h1 + h0, h1 + h0 + h0);
+        slope[k] = (w0 + w1) / (w0 / secant[k - 1] + w1 / secant[k]);
+    }
+    let last = ONE_WAY.len() - 1;
+    let mut k = 0;
+    (0..=last * FINE)
+        .map(|i| {
+            let x = i as f64 / FINE as f64;
+            while k + 2 < n && knots[k + 1].0 <= x {
+                k += 1;
+            }
+            let ((x0, y0), (x1, y1)) = (knots[k], knots[k + 1]);
+            let h = x1 - x0;
+            let t = ((x - x0) / h).clamp(0.0, 1.0);
+            let (t2, t3) = (t * t, t * t * t);
+            let v = (t3 + t3 - t2 - t2 - t2 + 1.0) * y0
+                + (t3 - t2 - t2 + t) * h * slope[k]
+                + (t2 + t2 + t2 - t3 - t3) * y1
+                + (t3 - t2) * h * slope[k + 1];
+            v as f32
+        })
+        .collect()
+});
+
+/// The one-way bend of a blurred level `v` (0–255, any fraction), going out
+/// of the shape, smooth all along: a feather's levels keep changing pixel
+/// by pixel (the blur taken in whole levels through the table came out in
+/// steps up to five levels apart, with flat bands between them).
+fn bent_out(v: f64) -> f64 {
+    let last = ONE_WAY.len() - 1;
+    if v.is_nan() || v <= 0.0 {
+        return 0.0;
+    }
+    if v >= last as f64 {
+        return 255.0;
+    }
+    let x = v * FINE as f64;
+    let i = x as usize;
+    let (a, b) = (f64::from(BEND[i]), f64::from(BEND[i + 1]));
+    (b - a) * (x - i as f64) + a
 }
 
-fn bent_in(v: u8) -> u8 {
-    255 - bent_out(255 - v)
+fn bent_in(v: f64) -> f64 {
+    255.0 - bent_out(255.0 - v)
 }
 
-/// A filled path feathered in place.
-fn feather(buf: &mut [u8], w: usize, h: usize, style: MaskFeather, radius: [f64; 2]) {
+/// A filled path feathered: how much of each pixel it keeps (0–255), at
+/// full precision — never cut down to whole levels on the way, so a wide
+/// feather fades without bands. Both passes run on every core: the one
+/// down goes along the picture's columns, each a line of its own.
+fn feather(buf: &[u8], w: usize, h: usize, style: MaskFeather, radius: [f64; 2]) -> Vec<f32> {
     let (mut rx, mut ry) = (radius[0].abs(), radius[1].abs());
-    let bend: Option<fn(u8) -> u8> = match style {
+    let bend: Option<fn(f64) -> f64> = match style {
         MaskFeather::In => Some(bent_in),
         MaskFeather::Out => Some(bent_out),
         _ => None,
@@ -530,11 +599,10 @@ fn feather(buf: &mut [u8], w: usize, h: usize, style: MaskFeather, radius: [f64;
         rx += rx;
         ry += ry;
     }
-    let longest = w.max(h);
     let across = Gaussian::new(rx);
     let mut blurred = vec![0.0f32; w * h];
     bv_color::par_rows(&mut blurred, w, |l, row| {
-        let (mut y, mut z) = (vec![0.0; longest], vec![0.0; longest]);
+        let (mut y, mut z) = (vec![0.0; w], vec![0.0; w]);
         let line = &buf[l * w..(l + 1) * w];
         across.run(
             w,
@@ -544,31 +612,64 @@ fn feather(buf: &mut [u8], w: usize, h: usize, style: MaskFeather, radius: [f64;
             |j, v| row[j] = v as f32,
         );
     });
+    // Down: column `c` of the picture is line `c` here.
     let down = Gaussian::new(ry);
-    let (mut y, mut z) = (vec![0.0; longest], vec![0.0; longest]);
-    for c in 0..w {
+    let mut columns = vec![0.0f32; w * h];
+    bv_color::par_rows(&mut columns, h, |c, column| {
+        let (mut y, mut z) = (vec![0.0; h], vec![0.0; h]);
         down.run(
             h,
             |i| f64::from(blurred[i * w + c]),
             &mut y,
             &mut z,
-            |j, v| {
-                let q = to_level(v);
-                buf[j * w + c] = bend.map_or(q, |b| b(q));
-            },
+            |j, v| column[j] = v as f32,
         );
+    });
+    // Back to lines, bent: `blurred` is not needed any more.
+    bv_color::par_rows(&mut blurred, w, |l, row| {
+        for (c, v) in row.iter_mut().enumerate() {
+            let x = clamp8(f64::from(columns[c * h + l]));
+            *v = bend.map_or(x, |b| b(x)) as f32;
+        }
+    });
+    blurred
+}
+
+/// What a path keeps of each pixel, 0–255: its fill as it is (whole levels,
+/// the edges' bands summed) or feathered (any fraction).
+enum Cover<'a> {
+    Filled(&'a [u8]),
+    Feathered(Vec<f32>),
+}
+
+impl Cover<'_> {
+    /// Each pixel's value through `f` (with whether it is feathered) into
+    /// `out`.
+    fn each(&self, out: &mut [f32], f: impl Fn(f32, f32, bool) -> f32) {
+        match self {
+            Cover::Filled(b) => {
+                for (o, &t) in out.iter_mut().zip(b.iter()) {
+                    *o = f(*o, f32::from(t), false);
+                }
+            }
+            Cover::Feathered(v) => {
+                for (o, &t) in out.iter_mut().zip(v) {
+                    *o = f(*o, t, true);
+                }
+            }
+        }
     }
 }
 
-/// One path filled into `buf`, zero before.
-fn fill_path(
-    buf: &mut [u8],
+/// One path filled into `buf` (zero before), then feathered when it is.
+fn fill_path<'a>(
+    buf: &'a mut [u8],
     w: usize,
     h: usize,
     path: &MaskPath,
     scale: [f64; 2],
     radius: [f64; 2],
-) {
+) -> Cover<'a> {
     let groups = groups_of(&path.anchors, scale);
     let smooth = path.anti_alias;
     bv_color::par_rows(buf, w, |l, row| {
@@ -588,24 +689,35 @@ fn fill_path(
         }
     });
     if path.feather != MaskFeather::None && path.feather_pct > 0.0 {
-        feather(buf, w, h, path.feather, radius);
+        return Cover::Feathered(feather(buf, w, h, path.feather, radius));
     }
+    Cover::Filled(buf)
 }
 
 /// `paths`, in order, on a picture `w` × `h` of the media, whose pixels are
 /// its own times `scale` and `aspect` wide: how much of each pixel they keep,
-/// 0–255.
+/// 0–255 — in whole levels where no feather reaches, any fraction where one
+/// does.
 pub(crate) fn alpha(
     paths: &[MaskPath],
     w: usize,
     h: usize,
     scale: [f64; 2],
     aspect: f64,
-) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
     let mut first = true;
     let mut scratch = Vec::new();
     let shorter = w.min(h) as f64;
+    // A sum of a path's and what was there: whole levels for a fill,
+    // as it comes for a feather.
+    let level = |v: f64, soft: bool| {
+        if soft {
+            clamp8(v) as f32
+        } else {
+            f32::from(to_level(v))
+        }
+    };
     for path in paths {
         if !path.closed || path.anchors.len() < 2 || path.mode == MaskMode::Disabled {
             continue;
@@ -617,7 +729,7 @@ pub(crate) fn alpha(
         }
         let apart = !first || negative;
         if first && negative {
-            out.fill(255);
+            out.fill(255.0);
         }
         if opacity > 0.0 {
             let r = shorter * path.feather_pct / 100.0;
@@ -626,33 +738,30 @@ pub(crate) fn alpha(
             } else {
                 [r, r * aspect]
             };
+            scratch.clear();
+            scratch.resize(w * h, 0u8);
+            let cover = fill_path(&mut scratch, w, h, path, scale, radius);
             if apart {
-                scratch.clear();
-                scratch.resize(w * h, 0u8);
-                fill_path(&mut scratch, w, h, path, scale, radius);
                 let signed = if negative && opacity < 1.0 {
                     -opacity
                 } else {
                     opacity
                 };
-                for (o, t) in out.iter_mut().zip(&scratch) {
-                    *o = if opacity >= 1.0 {
+                cover.each(&mut out, |o, t, soft| {
+                    if opacity >= 1.0 {
                         if negative {
-                            o.saturating_sub(*t)
+                            (o - t).max(0.0)
                         } else {
-                            o.saturating_add(*t)
+                            (o + t).min(255.0)
                         }
                     } else {
-                        to_level(f64::from(*t) * signed + f64::from(*o))
-                    };
-                }
-            } else {
-                fill_path(&mut out, w, h, path, scale, radius);
-                if opacity < 1.0 {
-                    for o in &mut out {
-                        *o = nearest(f64::from(*o) * opacity + 1.5e-8) as u8;
+                        level(f64::from(t) * signed + f64::from(o), soft)
                     }
-                }
+                });
+            } else if opacity < 1.0 {
+                cover.each(&mut out, |_, t, soft| level(f64::from(t) * opacity, soft));
+            } else {
+                cover.each(&mut out, |_, t, _| t);
             }
         }
         first = false;
@@ -666,30 +775,71 @@ mod tests {
 
     #[test]
     fn the_one_way_curves_are_each_others_turned_round() {
-        assert_eq!(bent_out(0), 0);
-        assert_eq!(bent_out(64), 213);
-        assert_eq!(bent_out(128), 255);
-        assert_eq!(bent_out(255), 255);
-        assert_eq!(bent_in(255), 255);
-        assert_eq!(bent_in(254), 254);
-        assert_eq!(bent_in(100), 0);
+        assert_eq!(bent_out(0.0), 0.0);
+        assert_eq!(bent_out(64.0), 213.0);
+        assert_eq!(bent_out(128.0), 255.0);
+        assert_eq!(bent_out(255.0), 255.0);
+        assert_eq!(bent_in(255.0), 255.0);
+        assert_eq!(bent_in(254.0), 254.0);
+        assert_eq!(bent_in(100.0), 0.0);
+        // Between the measured points and never a level away from them,
+        // rising all along.
+        assert!(bent_out(2.5) > 3.0 && bent_out(2.5) < 6.0);
+        assert_eq!(bent_in(252.5), 255.0 - bent_out(2.5));
+        let mut before = -1.0;
+        for i in 0..=128 * FINE {
+            let x = i as f64 / FINE as f64;
+            let v = bent_out(x);
+            assert!(v > before || v == 255.0, "rising at {x}");
+            if i % FINE == 0 {
+                let measured = f64::from(ONE_WAY[i / FINE]);
+                assert!((v - measured).abs() < 1.0, "{x}: {v} for {measured}");
+            }
+            before = v;
+        }
+    }
+
+    /// A wide feather fades pixel by pixel: no flat bands with steps of
+    /// several levels between them (its blur taken in whole levels made
+    /// bands up to eighteen pixels wide and steps of up to five levels).
+    #[test]
+    fn a_wide_feather_fades_without_bands() {
+        for style in [MaskFeather::Out, MaskFeather::In, MaskFeather::Both] {
+            let mut p = MaskPath::rectangle([400.0, 120.0], [880.0, 600.0]);
+            p.feather = style;
+            p.feather_pct = 20.0;
+            let c = alpha(&[p], 1280, 720, [1.0, 1.0], 1.0);
+            // The left edge's fade, from outside in.
+            let row = &c[360 * 1280..360 * 1280 + 640];
+            let mut worst = 0.0f32;
+            for p in row.windows(2) {
+                let step = p[1] - p[0];
+                // One way (the recursive Gaussian wavers by a hair).
+                assert!(step > -0.01, "{style:?}: {step} at {}", p[0]);
+                if p[0] > 0.5 && p[1] < 254.5 {
+                    assert!(step > 0.0, "{style:?}: a flat band at {}", p[0]);
+                }
+                worst = worst.max(step);
+            }
+            assert!(worst < 3.0, "{style:?}: a step of {worst}");
+        }
     }
 
     #[test]
     fn a_rectangle_fills_as_far_as_it_covers() {
         let mut p = MaskPath::rectangle([10.25, 10.0], [30.0, 20.0]);
         let c = alpha(std::slice::from_ref(&p), 40, 30, [1.0, 1.0], 1.0);
-        let at = |c: &[u8], x: usize, y: usize| c[y * 40 + x];
-        assert_eq!(at(&c, 20, 15), 255);
-        assert_eq!(at(&c, 2, 2), 0);
+        let at = |c: &[f32], x: usize, y: usize| c[y * 40 + x];
+        assert_eq!(at(&c, 20, 15), 255.0);
+        assert_eq!(at(&c, 2, 2), 0.0);
         // 0.75 of a pixel: 191.25.
-        assert_eq!(at(&c, 10, 15), 191);
-        assert_eq!(at(&c, 9, 15), 0);
+        assert_eq!(at(&c, 10, 15), 191.0);
+        assert_eq!(at(&c, 9, 15), 0.0);
         // Without anti-aliasing, whole or nothing.
         p.anti_alias = false;
         let c = alpha(&[p], 40, 30, [1.0, 1.0], 1.0);
-        assert_eq!(at(&c, 10, 15), 255);
-        assert_eq!(at(&c, 9, 15), 0);
+        assert_eq!(at(&c, 10, 15), 255.0);
+        assert_eq!(at(&c, 9, 15), 0.0);
     }
 
     #[test]
@@ -708,8 +858,8 @@ mod tests {
         let mut p = MaskPath::rectangle([10.0, 10.0], [30.0, 20.0]);
         p.mode = MaskMode::Negative;
         let c = alpha(&[p], 40, 30, [1.0, 1.0], 1.0);
-        assert_eq!(c[15 * 40 + 20], 0);
-        assert_eq!(c[2 * 40 + 2], 255);
+        assert_eq!(c[15 * 40 + 20], 0.0);
+        assert_eq!(c[2 * 40 + 2], 255.0);
     }
 
     #[test]
@@ -718,11 +868,11 @@ mod tests {
         let mut b = MaskPath::rectangle([5.0, 5.0], [15.0, 25.0]);
         b.mode = MaskMode::Negative;
         let c = alpha(&[a.clone(), b], 40, 30, [1.0, 1.0], 1.0);
-        assert_eq!(c[15 * 40 + 10], 0, "the hole");
-        assert_eq!(c[15 * 40 + 2], 255, "around the hole");
+        assert_eq!(c[15 * 40 + 10], 0.0, "the hole");
+        assert_eq!(c[15 * 40 + 2], 255.0, "around the hole");
         let d = MaskPath::rectangle([20.0, 0.0], [40.0, 30.0]);
         let c = alpha(&[a, d], 40, 30, [1.0, 1.0], 1.0);
-        assert_eq!(c[15 * 40 + 30], 255, "the second one added");
+        assert_eq!(c[15 * 40 + 30], 255.0, "the second one added");
     }
 
     #[test]
@@ -731,7 +881,7 @@ mod tests {
         p.opacity = 0.5;
         let c = alpha(&[p], 40, 30, [1.0, 1.0], 1.0);
         // 127.5, its tie to the even number with what the rounding adds.
-        assert_eq!(c[0], 128);
+        assert_eq!(c[0], 128.0);
     }
 
     #[test]

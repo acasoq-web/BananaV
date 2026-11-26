@@ -9,6 +9,7 @@
 //! converted on the card; the frame comes back in 8 bits for the screen or
 //! in linear light for files.
 
+mod banana;
 mod compositor;
 mod kernels;
 mod shared;
@@ -210,6 +211,8 @@ pub struct Gpu {
     queue: wgpu::Queue,
     adapter: Adapter,
     kernels: kernels::Kernels,
+    /// Banana Split's.
+    banana: banana::Kernels,
     lost: Arc<AtomicBool>,
     /// The first error not caught by a frame (shown when one fails).
     stray: Arc<Mutex<Option<String>>>,
@@ -260,6 +263,7 @@ impl Gpu {
         }
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let kernels = kernels::Kernels::new(&device);
+        let banana = banana::Kernels::new(&device);
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Failed(e.to_string()));
         }
@@ -268,6 +272,7 @@ impl Gpu {
             device,
             queue,
             kernels,
+            banana,
             lost,
             stray,
             cuda: OnceLock::new(),
@@ -282,6 +287,8 @@ impl Gpu {
     pub fn warm_up(&self) -> Result<(), GpuError> {
         let trace = std::env::var_os("BV_GPU_TRACE").is_some();
         let next = AtomicUsize::new(0);
+        let next_of_pack = AtomicUsize::new(0);
+        let pack: Vec<_> = bv_banana::kernels().collect();
         // The slowest to compile first: with them last, the transitions
         // using them waited seconds more after the program opened.
         let order: Vec<kernels::K> = kernels::K::SLOWEST
@@ -303,6 +310,19 @@ impl Gpu {
                 }
                 if trace {
                     eprintln!("kernel {}: {} ms", k.entry(), start.elapsed().as_millis());
+                }
+            }
+            // Banana Split's after BananaV's own.
+            while let Some(&k) = pack.get(next_of_pack.fetch_add(1, Ordering::Relaxed)) {
+                let start = std::time::Instant::now();
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                self.banana.pipeline(&self.device, k);
+                let name = bv_banana::kernel_name(k);
+                if let Some(e) = pollster::block_on(scope.pop()) {
+                    return Err(GpuError::Failed(format!("{name}: {e}")));
+                }
+                if trace {
+                    eprintln!("kernel {name}: {} ms", start.elapsed().as_millis());
                 }
             }
             Ok(())

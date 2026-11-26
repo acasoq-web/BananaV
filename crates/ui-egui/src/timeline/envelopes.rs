@@ -35,6 +35,207 @@ impl EnvHit {
     }
 }
 
+/// Points of one envelope picked, as events are: a click picks one,
+/// Ctrl+click adds or takes one away, Shift+click picks those from the
+/// last one clicked to it (Ctrl+Shift adds them); dragging one of them
+/// moves them all, Delete removes them, and the point's shortcut menu acts
+/// on them all. Kept by their times (the envelope's own: an event's from
+/// its start), which adding or removing other points leaves alone.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Picks {
+    pub track: TrackId,
+    /// An event's envelope (`None`: the track's).
+    pub clip: Option<ClipId>,
+    pub kind: EnvelopeKind,
+    /// Their times, in order.
+    pub times: Vec<Tick>,
+    /// The one a Shift+click picks from: the last clicked.
+    pub anchor: Tick,
+}
+
+impl Picks {
+    pub fn owner(&self) -> EnvelopeOwner {
+        owner(self.track, self.clip)
+    }
+
+    /// Whether they are points of `h`'s envelope.
+    pub fn of(&self, h: &EnvHit) -> bool {
+        self.track == h.track && self.clip == h.clip && self.kind == h.kind
+    }
+
+    /// The indices of the points still there, in order.
+    pub fn indices(&self, project: &Project) -> Vec<usize> {
+        envelope_of(project, self.owner(), self.kind).map_or(Vec::new(), |e| {
+            (0..e.points.len())
+                .filter(|&i| self.times.contains(&e.points[i].at))
+                .collect()
+        })
+    }
+
+    /// Whether point `i` of `h`'s envelope is one of them.
+    pub fn has(&self, project: &Project, h: &EnvHit, i: usize) -> bool {
+        self.of(h)
+            && envelope_of(project, h.owner(), h.kind)
+                .and_then(|e| e.points.get(i))
+                .is_some_and(|p| self.times.contains(&p.at))
+    }
+}
+
+/// The points of the shown track envelopes on the tracks `rows` takes
+/// whose times `times` takes, one [`Picks`] for each envelope that has
+/// some: what the selection rectangle and the Track Select tools pick
+/// along with events (Options › BananaV Mods: Envelope points with
+/// events).
+pub(crate) fn track_points(
+    view: &TimelineView,
+    project: &Project,
+    tracks: impl IntoIterator<Item = TrackId>,
+    times: impl Fn(Tick) -> bool,
+) -> Vec<Picks> {
+    let mut out = Vec::new();
+    for id in tracks {
+        let Some(track) = project.track(id) else {
+            continue;
+        };
+        for env in track.envelopes.iter().filter(|e| visible(view, e.kind)) {
+            let at: Vec<Tick> = env
+                .points
+                .iter()
+                .map(|p| p.at)
+                .filter(|t| times(*t))
+                .collect();
+            if let Some(&anchor) = at.first() {
+                out.push(Picks {
+                    track: id,
+                    clip: None,
+                    kind: env.kind,
+                    times: at,
+                    anchor,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// `a` and `b` together: each envelope's times joined.
+pub(crate) fn join_picks(mut a: Vec<Picks>, b: Vec<Picks>) -> Vec<Picks> {
+    for p in b {
+        match a
+            .iter_mut()
+            .find(|q| q.track == p.track && q.clip == p.clip && q.kind == p.kind)
+        {
+            Some(q) => {
+                q.times.extend(p.times);
+                q.times.sort();
+                q.times.dedup();
+            }
+            None => a.push(p),
+        }
+    }
+    a
+}
+
+/// A click on point `i` of `h`'s envelope (`keys` held): the points
+/// picked after it, as [`Picks`] tells.
+pub(crate) fn pick(
+    picks: Option<&Picks>,
+    project: &Project,
+    h: &EnvHit,
+    i: usize,
+    keys: egui::Modifiers,
+) -> Option<Picks> {
+    let env = envelope_of(project, h.owner(), h.kind)?;
+    let at = env.points.get(i)?.at;
+    let same = picks.filter(|p| p.of(h));
+    let alone = Picks {
+        track: h.track,
+        clip: h.clip,
+        kind: h.kind,
+        times: vec![at],
+        anchor: at,
+    };
+    let Some(same) = same else {
+        return Some(alone);
+    };
+    let mut times = if keys.shift {
+        let (a, b) = (same.anchor.min(at), same.anchor.max(at));
+        let range = env
+            .points
+            .iter()
+            .map(|p| p.at)
+            .filter(|t| (a..=b).contains(t));
+        let mut times: Vec<Tick> = if keys.command {
+            same.times.iter().copied().chain(range).collect()
+        } else {
+            range.collect()
+        };
+        times.sort_unstable();
+        times.dedup();
+        times
+    } else if keys.command {
+        let mut times = same.times.clone();
+        match times.iter().position(|&t| t == at) {
+            Some(k) => {
+                times.remove(k);
+            }
+            None => {
+                times.push(at);
+                times.sort_unstable();
+            }
+        }
+        times
+    } else {
+        return Some(alone);
+    };
+    times.retain(|t| env.points.iter().any(|p| p.at == *t));
+    let anchor = if keys.shift { same.anchor } else { at };
+    (!times.is_empty()).then(|| Picks {
+        times,
+        anchor,
+        ..same.clone()
+    })
+}
+
+/// Points `ix` of an envelope picked where they are now (after a drag:
+/// `grab` the one dragged, the next Shift+click's start).
+pub(crate) fn picks_at(
+    project: &Project,
+    track: TrackId,
+    clip: Option<ClipId>,
+    kind: EnvelopeKind,
+    ix: &[usize],
+    grab: usize,
+) -> Option<Picks> {
+    let env = envelope_of(project, owner(track, clip), kind)?;
+    let times: Vec<Tick> = ix
+        .iter()
+        .filter_map(|&i| env.points.get(i).map(|p| p.at))
+        .collect();
+    let anchor = env.points.get(grab)?.at;
+    (!times.is_empty()).then_some(Picks {
+        track,
+        clip,
+        kind,
+        times,
+        anchor,
+    })
+}
+
+/// The points of `h`'s envelope a shortcut menu on its point `i` acts
+/// on: the picked ones when `i` is one of them, else `i` alone.
+pub(crate) fn menu_points(
+    picks: Option<&Picks>,
+    project: &Project,
+    h: &EnvHit,
+    i: usize,
+) -> Vec<usize> {
+    match picks.filter(|p| p.has(project, h, i)) {
+        Some(p) => p.indices(project),
+        None => vec![i],
+    }
+}
+
 /// The track's envelope, or its event `clip`'s.
 pub(crate) fn owner(track: TrackId, clip: Option<ClipId>) -> EnvelopeOwner {
     match clip {
@@ -545,12 +746,16 @@ struct Place {
     r: Rect,
     origin: Tick,
     span: (f32, f32),
+    /// Whose envelope it is (`None`: a bus's or a chain's, whose points
+    /// are not picked).
+    owner: Option<EnvelopeOwner>,
 }
 
 /// An envelope's line and points, as VEGAS draws them (measured on the
 /// user's prints): the line two points wide, a little darker either side;
 /// the points diamonds of its color edged dark — widths, sizes and shape as
-/// Options › Envelope Appearance… sets them.
+/// Options › Envelope Appearance… sets them —, the picked ones white
+/// ([`Picks`]).
 fn paint_one(
     p: &egui::Painter,
     view: &TimelineView,
@@ -560,7 +765,18 @@ fn paint_one(
     c: Color32,
 ) {
     let look = crate::envelope_look::get();
-    let Place { r, origin, span } = place;
+    let Place {
+        r,
+        origin,
+        span,
+        owner,
+    } = place;
+    let picks = view
+        .env_picks
+        .iter()
+        .chain(&view.env_with)
+        .filter(|p| Some(p.owner()) == owner && p.kind == env.kind)
+        .collect::<Vec<_>>();
     let line = polyline(view, l, r, env, origin, span);
     p.add(Shape::line(
         line.clone(),
@@ -569,6 +785,10 @@ fn paint_one(
     p.add(Shape::line(line, Stroke::new(look.line, c)));
     for pt in &env.points {
         let at = pos2(view.x_of(l, origin + pt.at), y_of(r, env.kind, pt.value));
+        if picks.iter().any(|k| k.times.contains(&pt.at)) {
+            paint_hot_point(p, at);
+            continue;
+        }
         p.add(Shape::convex_polygon(
             look.point_shape(at, look.point + 1.0),
             Color32::from_gray(30),
@@ -596,6 +816,7 @@ pub(crate) fn paint_strip(
             r,
             origin: Tick::ZERO,
             span: (l.lanes.left(), l.lanes.right()),
+            owner: None,
         };
         paint_one(painter, view, l, place, env, color(prefs, env.kind));
     }
@@ -622,6 +843,7 @@ pub(crate) fn paint(
                 r,
                 origin: Tick::ZERO,
                 span: (l.lanes.left(), l.lanes.right()),
+                owner: Some(EnvelopeOwner::Track(row.track)),
             };
             paint_one(&p, view, l, place, env, color(prefs, env.kind));
         }
@@ -652,6 +874,7 @@ pub(crate) fn paint(
                     r: er,
                     origin: clip.start,
                     span: (area.left(), area.right()),
+                    owner: Some(EnvelopeOwner::Event(clip.id)),
                 };
                 paint_one(&p, view, l, place, env, color(prefs, env.kind));
             }
@@ -913,6 +1136,17 @@ pub(crate) fn set_to_ui(
 }
 
 impl BananaApp {
+    /// Delete with envelope points picked: they go, in one undo (an
+    /// envelope's first point stays).
+    pub(crate) fn delete_envelope_picks(&mut self) {
+        let Some(picks) = self.timeline.env_picks.take() else {
+            return;
+        };
+        let ix = picks.indices(self.project());
+        let (owner, kind) = (picks.owner(), picks.kind);
+        self.edit(|p| p.remove_envelope_points(owner, kind, &ix));
+    }
+
     /// An adjustment track on top, its Composite envelope as the user's
     /// VEGAS print shows it: 100 % up to 2 s, a smooth fade down to 21 % at
     /// 5 s (screen tests).
@@ -927,6 +1161,30 @@ impl BananaApp {
             let _ = p.set_envelope_point(owner, kind, s(2), 1.0);
             let _ = p.set_envelope_point(owner, kind, s(5), 0.21);
             let _ = p.set_envelope_curve(owner, kind, 1, KeyCurve::Smooth);
+        });
+    }
+
+    /// An adjustment track whose Composite envelope has points at 2, 4, 6
+    /// and 8 s, those at 4 and 6 s picked (screen tests).
+    pub fn envelope_picks_for_review(&mut self) {
+        self.insert_adjustment_track(None);
+        let Some(t) = self.project().tracks.first().map(|t| t.id) else {
+            return;
+        };
+        let (owner, kind) = (EnvelopeOwner::Track(t), EnvelopeKind::CompositeLevel);
+        let s = Tick::from_seconds;
+        self.modify(|p| {
+            for (k, v) in [(2, 1.0), (4, 0.55), (6, 0.8), (8, 0.35)] {
+                let _ = p.set_envelope_point(owner, kind, s(k), v);
+            }
+        });
+        self.timeline.show_envelopes = true;
+        self.timeline.env_picks = Some(Picks {
+            track: t,
+            clip: None,
+            kind,
+            times: vec![s(4), s(6)],
+            anchor: s(6),
         });
     }
 

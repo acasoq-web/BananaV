@@ -112,9 +112,9 @@ impl Kind {
     /// Its category among [`categories`].
     fn category(self) -> usize {
         match self {
-            Kind::ColorGradient | Kind::NoiseTexture => 0,
-            Kind::CreditRoll | Kind::TitlesAndText => 1,
-            _ => 2,
+            Kind::ColorGradient | Kind::NoiseTexture => 1,
+            Kind::CreditRoll | Kind::TitlesAndText => 2,
+            _ => 3,
         }
     }
 
@@ -238,6 +238,14 @@ pub(crate) fn titles_presets_all(app: &BananaApp) -> Vec<(String, Generator)> {
         .collect()
 }
 
+/// Banana Split's generators: BananaV's own pack.
+fn banana_split() -> Vec<std::sync::Arc<bv_ofx::PluginInfo>> {
+    crate::ofx::generators()
+        .into_iter()
+        .filter(|p| bv_engine::plugins::is_banana_split(p))
+        .collect()
+}
+
 /// The OFX generators of other makers (BananaV's own show in their own
 /// places: Titles & Text, Credit Roll, …).
 fn third_party() -> Vec<std::sync::Arc<bv_ofx::PluginInfo>> {
@@ -280,7 +288,8 @@ fn plugin_key(id: &str) -> String {
     format!("ofx:{id}")
 }
 
-/// An OFX generator's presets: its defaults, then the user's.
+/// An OFX generator's presets: its defaults, the factory's (one of
+/// BananaV's pack), then the user's.
 fn plugin_presets(app: &BananaApp, fx: &PluginFx) -> Vec<(String, Option<Generator>)> {
     let defaults = PluginFx {
         params: Default::default(),
@@ -288,8 +297,19 @@ fn plugin_presets(app: &BananaApp, fx: &PluginFx) -> Vec<(String, Option<Generat
     };
     let mut v = vec![(
         tr("(Default)").to_string(),
-        Some(Generator::Plugin(Box::new(defaults))),
+        Some(Generator::Plugin(Box::new(defaults.clone()))),
     )];
+    for (name, params) in crate::presets::builtin_plugin(&fx.id) {
+        // One that is the defaults is (Default) already.
+        if params.is_empty() {
+            continue;
+        }
+        let fx = PluginFx {
+            params,
+            ..defaults.clone()
+        };
+        v.push((name, Some(Generator::Plugin(Box::new(fx)))));
+    }
     v.extend(user_presets(app, &plugin_key(&fx.id)));
     v
 }
@@ -318,7 +338,8 @@ pub(crate) fn plugin_of(
 
 /// What the Video Media Generators window's Replace Plug-In offers: each
 /// generator making that kind of media (`video` or sound) with its first
-/// preset, by name; other makers' OFX generators at their defaults.
+/// preset, by name; the pack's and other makers' OFX generators at their
+/// defaults.
 pub(crate) fn replacements(app: &BananaApp, video: bool) -> Vec<(String, Generator)> {
     let mut v: Vec<(String, Generator)> = KINDS
         .into_iter()
@@ -330,9 +351,10 @@ pub(crate) fn replacements(app: &BananaApp, video: bool) -> Vec<(String, Generat
         .collect();
     if video {
         v.extend(
-            third_party()
+            banana_split()
                 .iter()
-                .map(|p| (p.label.clone(), crate::ofx::new_generator(p))),
+                .chain(&third_party())
+                .map(|p| (crate::ofx::plugin_name(p), crate::ofx::new_generator(p))),
         );
     }
     v
@@ -356,13 +378,14 @@ pub(crate) fn add_and_edit(app: &mut BananaApp, g: &Generator) {
 }
 
 /// The window's categories, as VEGAS's.
-fn categories() -> [Category; 4] {
+fn categories() -> [Category; 5] {
     let c = |name| Category {
         name,
         ready: true,
         packages: false,
     };
     [
+        c("Banana Split"),
         c(tr("Creative")),
         c(tr("Titles and Text")),
         c(tr("Utility")),
@@ -375,8 +398,11 @@ fn categories() -> [Category; 4] {
     ]
 }
 
+/// The window's index of the Banana Split category.
+const BANANA_SPLIT: usize = 0;
+
 /// The window's index of the Third Party category (OFX plug-ins).
-const THIRD_PARTY: usize = 3;
+const THIRD_PARTY: usize = 4;
 
 /// How long a title's animation plays where it has no event: the length
 /// an event of generated media takes.
@@ -441,6 +467,12 @@ fn paint_preset(
         {
             Tick::from_seconds_f64(play.map_or(2.5, |t| f64::from(t) % TITLE_SECONDS))
         }
+        // The pack's: a second in, moving under the pointer (fifteen
+        // pictures a second).
+        (Generator::Plugin(fx), play) if fx.id.starts_with(bv_engine::plugins::PACK_PREFIX) => {
+            let t = (f64::from(play.unwrap_or(0.0)) * 15.0).floor() / 15.0;
+            Tick::from_seconds_f64(1.0 + t)
+        }
         _ => Tick::ZERO,
     };
     let h = (rect.height() * painter.ctx().pixels_per_point()).round() as u32;
@@ -457,8 +489,12 @@ fn paint_preset(
 
 pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     let mut state = std::mem::take(&mut app.choosers.generators);
+    state.keys = app.browse.take(crate::dock::Tab::Generators);
     let categories = categories();
-    let ofx = third_party();
+    // The pack's, then other makers'.
+    let mut ofx = banana_split();
+    let pack = ofx.len();
+    ofx.extend(third_party());
     let own = KINDS.iter().map(|&k| Plugin {
         key: k.key(),
         name: k.name().to_string(),
@@ -477,7 +513,21 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         ],
         provider: None,
     });
-    let theirs = ofx.iter().map(|p| Plugin {
+    let packs = ofx[..pack].iter().map(|p| {
+        let name = crate::ofx::plugin_name(p);
+        Plugin {
+            key: plugin_key(&p.identifier),
+            about: [
+                crate::ofx::own_about(p, &name, categories[BANANA_SPLIT].name),
+                trf!("Description: {}", tr(&p.description)),
+            ],
+            name,
+            category: BANANA_SPLIT,
+            ready: true,
+            provider: None,
+        }
+    });
+    let theirs = ofx[pack..].iter().map(|p| Plugin {
         key: plugin_key(&p.identifier),
         name: crate::ofx::plugin_name(p),
         category: THIRD_PARTY,
@@ -493,7 +543,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         ],
         provider: Some(crate::ofx::provider(p)),
     });
-    let plugins: Vec<Plugin> = own.chain(theirs).collect();
+    let plugins: Vec<Plugin> = own.chain(packs).chain(theirs).collect();
     let frame = chooser::frame(
         ui,
         "generators",

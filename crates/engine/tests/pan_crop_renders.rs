@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use bv_core::Tick;
 use bv_engine::Engine;
+use bv_timeline::mask::MaskFeather;
 use bv_timeline::veg;
 use bv_timeline::{MediaInfo, Project, ProjectSettings};
 
@@ -85,6 +86,9 @@ struct Tally {
     /// Pixels more than two levels off, and the same.
     far: u64,
     same: u64,
+    /// The event's masks feather somewhere: BananaV's feathers fade
+    /// smoothly, the renders' in whole steps.
+    feathered: bool,
 }
 
 /// A project's events one by one against the frames rendered from it.
@@ -95,12 +99,25 @@ fn compare(project: &Project, folder: &Path, save: Option<&Path>, tag: &str) -> 
     let size = (project.settings.width, project.settings.height);
     let mut clips: Vec<_> = project
         .clips()
-        .map(|(_, c)| (c.start, c.duration))
+        .map(|(_, c)| {
+            let feathered = c.mask.as_ref().is_some_and(|m| {
+                let soft = |f: MaskFeather, pct: f64| f != MaskFeather::None && pct > 0.0;
+                m.paths.iter().any(|p| soft(p.feather, p.feather_pct))
+                    || m.keys
+                        .iter()
+                        .flat_map(|k| &k.looks)
+                        .any(|l| soft(l.feather, l.feather_pct))
+            });
+            (c.start, c.duration, feathered)
+        })
         .collect();
     clips.sort_by_key(|c| c.0);
     let mut out = Vec::new();
-    for (index, (start, duration)) in clips.into_iter().enumerate() {
-        let mut tally = Tally::default();
+    for (index, (start, duration, feathered)) in clips.into_iter().enumerate() {
+        let mut tally = Tally {
+            feathered,
+            ..Tally::default()
+        };
         let first = rate.frame_at(start);
         let last = rate.frame_at(start + duration);
         let mut worst_frame = (0u64, Vec::new(), Vec::new());
@@ -194,17 +211,25 @@ fn draws_as_its_renders_show() {
         save.as_deref(),
         "mask",
     );
-    println!("masks: event, frames, mean, worst, pixels the same (of 230400 each)");
+    // Where no feather reaches, the same pixel by pixel; a feather fades
+    // smoothly here (the renders' in whole steps): a level or two away.
+    println!("masks: event, frames, mean, worst, pixels the same (of 230400 each), feathered");
     let mut exact = true;
+    let mut soft_worst = 0u8;
     for (i, t) in tallies.iter().enumerate() {
         let mean = t.sum as f64 / t.values.max(1) as f64;
         println!(
-            "  {i:2} {:3} {mean:.4} {:3} {:8}",
-            t.frames, t.worst, t.same
+            "  {i:2} {:3} {mean:.4} {:3} {:8} {}",
+            t.frames, t.worst, t.same, t.feathered
         );
-        exact &= t.worst == 0;
+        if t.feathered {
+            soft_worst = soft_worst.max(t.worst);
+        } else {
+            exact &= t.worst == 0;
+        }
     }
-    println!("masks: all exact: {exact}");
+    println!("masks: unfeathered exact: {exact}, feathers' worst {soft_worst}");
     assert!(worst_mean < 1.0, "the picture lands where it did");
     assert!(exact, "the masks come out the same");
+    assert!(soft_worst <= 3, "the feathers fade as the renders' do");
 }

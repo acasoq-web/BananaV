@@ -60,8 +60,11 @@ impl BananaApp {
     /// command markers, placed by its timecodes less the ruler's offset.
     pub(crate) fn import_closed_captioning(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Import Closed Captioning"))
-            .add_filter(tr("Closed Captioning Files"), &EXTENSIONS)
+            .set_title(crate::i18n::os_text(tr("Import Closed Captioning")))
+            .add_filter(
+                crate::i18n::os_text(tr("Closed Captioning Files")),
+                &EXTENSIONS,
+            )
             .pick_file()
         else {
             return;
@@ -159,8 +162,8 @@ impl BananaApp {
         }
         let ext = format.extension();
         let Some(path) = rfd::FileDialog::new()
-            .set_title(tr("Export Closed Captioning"))
-            .add_filter(format.filter(), &[ext])
+            .set_title(crate::i18n::os_text(tr("Export Closed Captioning")))
+            .add_filter(crate::i18n::os_text(format.filter()), &[ext])
             .set_file_name(format!("{}.{ext}", tr("Captions")))
             .save_file()
         else {

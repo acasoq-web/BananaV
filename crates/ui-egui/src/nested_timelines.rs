@@ -81,8 +81,8 @@ impl BananaApp {
             .file_stem()
             .map_or(String::new(), |s| s.to_string_lossy().to_string());
         let mut dialog = rfd::FileDialog::new()
-            .set_title(tr("Save Nested Timeline"))
-            .add_filter(tr("BananaV Project"), &["bvproj"])
+            .set_title(crate::i18n::os_text(tr("Save Nested Timeline")))
+            .add_filter(crate::i18n::os_text(tr("BananaV Project")), &["bvproj"])
             .set_file_name(format!("{stem}_{}.bvproj", tr("Untitled Timeline")));
         if let Some(dir) = parent.parent() {
             dialog = dialog.set_directory(dir);
@@ -104,7 +104,7 @@ impl BananaApp {
             self.report_error(tr("A project can't be nested in itself"));
             return;
         }
-        if let Err(e) = std::fs::write(&file, nest.project.to_json()) {
+        if let Err(e) = crate::safe_file::save(&file, nest.project.to_json().as_bytes()) {
             self.report_save_error(&file, &e);
             return;
         }
@@ -151,7 +151,7 @@ impl BananaApp {
         self.stop();
         let parent = ParentTimeline {
             history: std::mem::replace(&mut self.history, History::new(nested.clone())),
-            saved: std::mem::replace(&mut self.saved, nested),
+            saved: self.replace_saved(nested),
             path: self.project_path.replace(path.clone()),
             cursor: std::mem::replace(&mut self.cursor, Tick::ZERO),
             selection: std::mem::take(&mut self.selection),
@@ -209,7 +209,7 @@ impl BananaApp {
         let nested = self.project_path.take();
         self.stop();
         self.history = parent.history;
-        self.saved = parent.saved;
+        self.set_saved(parent.saved);
         self.project_path = parent.path;
         self.cursor = parent.cursor;
         self.selection = parent.selection;
@@ -253,7 +253,7 @@ mod tests {
         ));
         let event = p.insert_media(red, Tick::from_seconds(2), v, None).unwrap()[0];
         app.history.reset(p.clone());
-        app.saved = p;
+        app.set_saved(p);
         let parent = dir.join("Show.bvproj");
         std::fs::write(&parent, app.project().to_json()).unwrap();
         app.project_path = Some(parent.clone());

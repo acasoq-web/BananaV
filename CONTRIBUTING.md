@@ -116,6 +116,8 @@ Also useful:
   every dependency's license is one [deny.toml](deny.toml) allows. Run it when
   you add or update a dependency.
 - `cargo xtask i18n`: the interface texts a translation lacks.
+- `cargo xtask banana`: the processor's copy of Banana Split's kernels, after
+  changing `crates/banana/kernels`.
 - `cargo test -p bv-ui-egui --test telas -- --ignored`: captures of the
   interface, drawn off-screen, in `target/telas/*.png`. The interface is
   checked this way, never by driving the mouse or the keyboard.

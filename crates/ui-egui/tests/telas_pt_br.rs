@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bv_ui_egui::{BananaApp, Language, apply_theme, egui, set_language};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 fn snap(h: &mut Harness<'_, BananaApp>, name: &str) {
     for _ in 0..30 {
@@ -79,6 +79,55 @@ fn janelas_da_area_inicial() {
     h.key_press(egui::Key::Escape);
     h.state_mut().generated_media_for_review();
     snap(&mut h, "inicio_gerador_janela");
+}
+
+/// Banana Split's category of the three choosers, and an effect's settings.
+#[test]
+#[ignore = "renders images for visual review"]
+fn banana_split_in_portuguese() {
+    let mut app = BananaApp::new(egui::Context::default());
+    set_language(Language::PortugueseBrazil);
+    app.load_demo();
+    app.welcome_for_review("closed");
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    for (window, name, plugin) in [
+        ("Geradores de mídia", "banana_geradores", "Nuvens coloridas"),
+        ("Transições", "banana_transicoes", "Cortina em coração"),
+        ("Efeitos de vídeo", "banana_efeitos", "Aberração cromática"),
+    ] {
+        h.state_mut().show_tab_named(window);
+        for _ in 0..5 {
+            h.step();
+        }
+        h.get_all_by_label("Banana Split")
+            .find(|n| n.accesskit_node().toggled().is_some())
+            .expect("Banana Split")
+            .click();
+        for _ in 0..5 {
+            h.step();
+        }
+        h.get_all_by_label(plugin)
+            .find(|n| n.accesskit_node().toggled().is_some())
+            .expect(plugin)
+            .click();
+        snap(&mut h, name);
+    }
+    assert!(h.state_mut().transition_plugin_for_review(
+        "org.bananav.bananasplit.TileFlip",
+        None,
+        true
+    ));
+    snap(&mut h, "banana_painel");
 }
 
 #[test]

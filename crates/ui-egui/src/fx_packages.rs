@@ -329,7 +329,7 @@ fn write_file(path: &Path, package: &Package) -> std::io::Result<()> {
         package: package.clone(),
     };
     let text = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
-    std::fs::write(path, text)
+    crate::safe_file::write(path, text.as_bytes())
 }
 
 /// The Save Plug-In Package dialog (or the one renaming a package), while
@@ -446,6 +446,7 @@ impl BananaApp {
     /// "Filter Packages"…), for screen tests.
     pub fn video_fx_category_for_review(&mut self, name: &str) {
         let names = [
+            "Banana Split",
             "AI/ML",
             "Creative",
             "Color",

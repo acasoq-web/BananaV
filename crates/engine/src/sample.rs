@@ -73,13 +73,21 @@ pub fn sample_picture(width: u32, height: u32) -> ImageRgbaF32 {
 /// are for the project's frames: here they shrink with the picture, as on
 /// a 1080-line frame.
 pub fn effect_sample(effects: &[Effect], width: u32, height: u32) -> Vec<u8> {
+    effect_sample_at(effects, width, height, 0.0)
+}
+
+/// [`effect_sample`] `seconds` into an event ten seconds long: what an
+/// effect that moves by itself (noise, a flicker, a bolt) shows then.
+pub fn effect_sample_at(effects: &[Effect], width: u32, height: u32, seconds: f64) -> Vec<u8> {
     crate::plugins::register_own();
+    let time = Tick::from_seconds_f64(seconds.max(0.0));
     if effects.iter().any(|e| e.plugin.is_some()) {
         // Plug-ins run on a thread with their stack.
         let effects = effects.to_vec();
-        return on_plugin_stack(move || draw_effects(&effects, width, height)).unwrap_or_default();
+        return on_plugin_stack(move || draw_effects(&effects, width, height, time))
+            .unwrap_or_default();
     }
-    draw_effects(effects, width, height)
+    draw_effects(effects, width, height, time)
 }
 
 /// Runs `f` on a thread with the stack plug-ins want; `None` when no
@@ -94,8 +102,8 @@ fn on_plugin_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
         .ok()
 }
 
-fn draw_effects(effects: &[Effect], width: u32, height: u32) -> Vec<u8> {
-    let mut img = run_effects(sample_picture(width, height), effects);
+fn draw_effects(effects: &[Effect], width: u32, height: u32, time: Tick) -> Vec<u8> {
+    let mut img = run_effects(sample_picture(width, height), effects, time);
     // Straight colors and their alpha: what an effect makes see-through
     // shows the window's squares under it.
     for px in &mut img.data {
@@ -109,9 +117,9 @@ fn draw_effects(effects: &[Effect], width: u32, height: u32) -> Vec<u8> {
 }
 
 /// The enabled ones of `effects` on `img`, in order: BananaV's own worked
-/// out here, a plug-in drawing itself at its defaults' time. Sizes in the
-/// effects are for 1080-line frames: they shrink with the picture.
-fn run_effects(mut img: ImageRgbaF32, effects: &[Effect]) -> ImageRgbaF32 {
+/// out here, a plug-in drawing itself at `time`. Sizes in the effects are
+/// for 1080-line frames: they shrink with the picture.
+fn run_effects(mut img: ImageRgbaF32, effects: &[Effect], time: Tick) -> ImageRgbaF32 {
     let (width, height) = (img.width, img.height);
     let scale = height.max(1) as f32 / 1080.0;
     for (i, e) in effects.iter().enumerate().filter(|(_, e)| e.enabled) {
@@ -122,9 +130,9 @@ fn run_effects(mut img: ImageRgbaF32, effects: &[Effect]) -> ImageRgbaF32 {
                     fx,
                     owner: FxOwner::Output,
                     index: i,
-                    time: Tick::ZERO,
+                    time,
                     duration: Tick::from_seconds(10),
-                    timeline: Tick::ZERO,
+                    timeline: time,
                     rate: FrameRate::FPS_30,
                     full_size: (width, height),
                     source: None,
@@ -186,7 +194,7 @@ fn chain_cube(effects: &[Effect], size: usize, video_gamma: bool, title: &str) -
             }
         }
     }
-    let img = run_effects(img, effects);
+    let img = run_effects(img, effects, Tick::ZERO);
     if img.width != n || img.height != n * n {
         return None;
     }

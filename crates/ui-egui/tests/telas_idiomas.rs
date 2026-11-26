@@ -33,7 +33,13 @@ fn snap(h: &mut Harness<'_, BananaApp>, name: &str) {
 fn harness(app: BananaApp, lang: Language) -> Harness<'static, BananaApp> {
     let h = Harness::builder()
         .with_size(egui::vec2(1600.0, 960.0))
-        .with_pixels_per_point(1.0)
+        // BV_TELAS_PPP=2 draws at twice the size, to look at letters closely.
+        .with_pixels_per_point(
+            std::env::var("BV_TELAS_PPP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
+        )
         .wgpu()
         .build_ui_state(
             |ui, app: &mut BananaApp| {
@@ -46,7 +52,7 @@ fn harness(app: BananaApp, lang: Language) -> Harness<'static, BananaApp> {
     h
 }
 
-const PARTIAL: [Language; 18] = [
+const PARTIAL: [Language; 19] = [
     Language::ChineseSimplified,
     Language::Russian,
     Language::SpanishSpain,
@@ -65,12 +71,21 @@ const PARTIAL: [Language; 18] = [
     Language::Hungarian,
     Language::PortuguesePortugal,
     Language::Swedish,
+    Language::Arabic,
 ];
 
 #[test]
 #[ignore = "renders images for visual review"]
 fn captura_idiomas_parciais() {
+    // BV_TELAS_LANG=ar captures one language only.
+    let only = std::env::var("BV_TELAS_LANG").ok();
     for lang in PARTIAL {
+        if only
+            .as_deref()
+            .is_some_and(|t| !t.eq_ignore_ascii_case(lang.code()))
+        {
+            continue;
+        }
         let tag = lang.code().to_lowercase();
         let mut app = BananaApp::new(egui::Context::default());
         set_language(lang);

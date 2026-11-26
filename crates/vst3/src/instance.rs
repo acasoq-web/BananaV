@@ -26,6 +26,13 @@ use crate::guard;
 use crate::host::{ComponentHandler, Edit, ParameterChanges, PlugFrame, Resize, Stream};
 use crate::module::{ClassInfo, Error, Module};
 
+/// The most audio buses a plug-in has each way: their number is the
+/// plug-in's, and lists as long are made of it.
+const MAX_BUSES: usize = 256;
+/// The most channels a bus has (a speaker arrangement names 64): their
+/// number is the plug-in's too, and a buffer is made for each.
+const MAX_CHANNELS: usize = 64;
+
 /// A parameter, as the plug-in's controller describes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamInfo {
@@ -277,7 +284,13 @@ impl Instance {
         }
         let Some(processor) = component.query::<IAudioProcessorVtbl>(&iid::AUDIO_PROCESSOR) else {
             // SAFETY: undoing initialize.
-            let _ = unsafe { guard::p(component.vt().base.terminate, component.raw()) };
+            let ended = unsafe { guard::p(component.vt().base.terminate, component.raw()) };
+            if let Err((code, at)) = ended {
+                // Crashed: switched off, its component not let go of.
+                guard::crashed(module, &class.name, "terminate", code, at);
+                std::mem::forget(component);
+                return Err(Error::Crashed);
+            }
             return Err(Error::Refused("to process sound", 0));
         };
         let mut inst = Instance {
@@ -374,6 +387,11 @@ impl Instance {
                     )
                 };
                 if r != Some(result::OK) {
+                    if self.module.crashed() {
+                        // Crashed: not called again, not even to let go of
+                        // the controller.
+                        std::mem::forget(edit);
+                    }
                     return None;
                 }
                 (edit, true)
@@ -462,6 +480,12 @@ impl Instance {
             if n_out == 0 {
                 return Err(Error::Refused("to give sound out (it has no outputs)", 0));
             }
+            if n_in.max(n_out) > MAX_BUSES {
+                return Err(Error::Refused(
+                    "a number of buses a host can take",
+                    n_in.max(n_out) as i32,
+                ));
+            }
             let want = match channels {
                 1 => speaker::MONO,
                 6 => speaker::SURROUND_51,
@@ -502,6 +526,12 @@ impl Instance {
             };
             let ins: Vec<usize> = (0..n_in).map(|i| channels_of(INPUT, i)).collect();
             let outs: Vec<usize> = (0..n_out).map(|i| channels_of(OUTPUT, i)).collect();
+            if let Some(&n) = ins.iter().chain(&outs).find(|&&n| n > MAX_CHANNELS) {
+                return Err(Error::Refused(
+                    "a number of channels in a bus a host can take",
+                    n as i32,
+                ));
+            }
             if n_in > 0 {
                 (comp.vt().activate_bus)(comp.raw(), AUDIO, INPUT, 0, 1);
             }
@@ -1046,10 +1076,12 @@ impl Instance {
 
     /// Its editor, made the first time (with a controller that has one).
     pub fn editor(&mut self) -> Option<&mut Editor> {
+        if self.module.crashed() {
+            // Its view is not called again: the editor it had is left.
+            self.close_editor();
+            return None;
+        }
         if self.editor.is_none() {
-            if self.module.crashed() {
-                return None;
-            }
             let c = self.controller.as_ref()?;
             // SAFETY: createView("editor"); the view comes with a
             // reference of ours.
@@ -1078,9 +1110,17 @@ impl Instance {
         made
     }
 
-    /// Closes its editor (after taking it out of its window).
+    /// Closes its editor (after taking it out of its window). When its
+    /// module crashed the editor is left as it is: none of its code is
+    /// called again, not even to let go of the view (whose frame no longer
+    /// resizes the window it was in).
     pub fn close_editor(&mut self) {
-        self.editor = None;
+        if let Some(editor) = self.editor.take()
+            && self.module.crashed()
+        {
+            editor.frame.get().set_resize(None);
+            std::mem::forget(editor);
+        }
     }
 }
 
@@ -1102,9 +1142,7 @@ impl Instance {
     /// Its objects left as they are when its module crashed: none of its
     /// code is called again, not even to let go of them.
     fn abandon(&mut self) {
-        if let Some(e) = self.editor.take() {
-            std::mem::forget(e);
-        }
+        self.close_editor();
         if let Some(c) = self.controller.take() {
             std::mem::forget(c);
         }

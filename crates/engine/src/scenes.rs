@@ -1,6 +1,7 @@
 //! Detecção de cenas: procura cortes dentro de um clipe comparando o
 //! histograma de luminância de quadros vizinhos (em baixa resolução).
 
+use crate::LockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -96,13 +97,13 @@ impl SceneJob {
                             since_cut += 1;
                             prev = Some(h);
                             if i % 10 == 0 {
-                                progress.lock().expect("progresso").done = i as u64;
+                                progress.locked().done = i as u64;
                                 repaint();
                             }
                         }
                         Ok(cuts)
                     })();
-                    let mut p = progress.lock().expect("progresso");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.done = p.total;
                     match result {
@@ -122,13 +123,21 @@ impl SceneJob {
     }
 
     pub(crate) fn progress(&self) -> SceneProgress {
-        self.progress.lock().expect("progresso").clone()
+        crate::settled(
+            &self.progress,
+            self.thread.as_ref(),
+            |p| p.finished,
+            |p| {
+                p.finished = true;
+                p.error = Some(crate::STOPPED.into());
+            },
+        )
     }
 
     /// The job looks through media `id`, not an event.
     pub(crate) fn of_media(self, id: MediaId) -> SceneJob {
         {
-            let mut p = self.progress.lock().expect("progresso");
+            let mut p = self.progress.locked();
             p.clip = None;
             p.media = Some(id);
         }

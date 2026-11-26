@@ -5,7 +5,7 @@
 //! A saída é sempre RGBA (8 ou 16 bits). Escrita: RGB/RGBA de 8 ou 16 bits,
 //! com filtro escolhido por linha.
 
-use bv_deflate::{Crc32, zlib_compress, zlib_decompress};
+use bv_deflate::{Crc32, zlib_compress, zlib_decompress_limited};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -256,6 +256,23 @@ fn sample(raw: &[u8], x: usize, h: &Header, pal: &Palette, trns: Option<[u16; 3]
     }
 }
 
+/// The most pixels a picture may have: 2^29 (a 32768 × 16384 panorama
+/// still opens).
+const MAX_PIXELS: usize = 1 << 29;
+
+/// The pixels of a `width` × `height` picture, refused past
+/// [`MAX_PIXELS`]: the buffers are sized from the header, before the data
+/// is looked at, and a file of a few bytes may claim a picture of
+/// gigabytes.
+fn pixel_count(width: u32, height: u32) -> Result<usize> {
+    match (width as usize).checked_mul(height as usize) {
+        Some(n) if n <= MAX_PIXELS => Ok(n),
+        _ => Err(Error::Unsupported(format!(
+            "a picture of {width} × {height} pixels"
+        ))),
+    }
+}
+
 /// Decodifica um PNG.
 pub fn decode(data: &[u8]) -> Result<Image> {
     let h = read_header(data)?;
@@ -295,11 +312,10 @@ pub fn decode(data: &[u8]) -> Result<Image> {
     if h.color_type == 3 && pal.rgba.is_empty() {
         return Err(Error::Corrupt("paleta ausente".into()));
     }
-    let raw = zlib_decompress(&idat).map_err(|e| Error::Corrupt(e.to_string()))?;
     let (w, ht) = (h.width as usize, h.height as usize);
+    let pixels = pixel_count(h.width, h.height)?;
     let bits_pp = channels(h.color_type) * h.bit_depth as usize;
     let bpp = bits_pp.div_ceil(8).max(1);
-    let mut rgba16 = vec![[0u16; 4]; w * ht];
     let passes: &[(usize, usize, usize, usize)] = if h.interlaced {
         &[
             (0, 0, 8, 8),
@@ -313,13 +329,32 @@ pub fn decode(data: &[u8]) -> Result<Image> {
     } else {
         &[(0, 0, 1, 1)]
     };
+    // The columns and rows of a pass (none: a small picture has no pixel
+    // of it).
+    let pass_size = |&(x0, y0, dx, dy): &(usize, usize, usize, usize)| {
+        (x0 < w && y0 < ht).then(|| ((w - x0).div_ceil(dx), (ht - y0).div_ceil(dy)))
+    };
+    // The filtered rows the header promises. The data may not unpack to
+    // more than twice that (a little left over, as some writers leave, is
+    // let through): a few bytes can be made to unpack into gigabytes.
+    let expected: u64 = passes
+        .iter()
+        .filter_map(pass_size)
+        .map(|(pw, ph)| ph as u64 * ((pw as u64 * bits_pp as u64).div_ceil(8) + 1))
+        .sum();
+    let limit = usize::try_from(expected.saturating_mul(2)).unwrap_or(usize::MAX);
+    let raw = zlib_decompress_limited(&idat, limit).map_err(|e| Error::Corrupt(e.to_string()))?;
+    // The pixels are made room for only once their rows are all there.
+    if (raw.len() as u64) < expected {
+        return Err(Error::Truncated);
+    }
+    let mut rgba16 = vec![[0u16; 4]; pixels];
     let mut offset = 0;
-    for &(x0, y0, dx, dy) in passes {
-        if x0 >= w || y0 >= ht {
+    for pass in passes {
+        let Some((pw, ph)) = pass_size(pass) else {
             continue;
-        }
-        let pw = (w - x0).div_ceil(dx);
-        let ph = (ht - y0).div_ceil(dy);
+        };
+        let &(x0, y0, dx, dy) = pass;
         let stride = (pw * bits_pp).div_ceil(8);
         let len = ph * (stride + 1);
         let pass = raw.get(offset..offset + len).ok_or(Error::Truncated)?;
@@ -504,6 +539,47 @@ mod tests {
         let h = read_header(&png).unwrap();
         assert_eq!((h.width, h.height, h.bit_depth, h.color_type), (3, 2, 8, 6));
         assert_eq!(decode(b"GIF89a"), Err(Error::NotPng));
+    }
+
+    /// A PNG of 8-bit RGBA whose header claims `width` × `height` and whose
+    /// data unpacks to `raw`.
+    fn png_claiming(width: u32, height: u32, raw: &[u8]) -> Vec<u8> {
+        let mut out = SIGNATURE.to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &zlib_compress(raw, 6));
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // A file of a hundred bytes that claims 34 GB of pixels.
+        let png = png_claiming(65_535, 65_535, &[0; 5]);
+        assert!(png.len() < 100);
+        assert!(matches!(decode(&png), Err(Error::Unsupported(_))));
+        // 2^29 pixels are within it: what is missing is their data, found
+        // out before any room is made for them.
+        let png = png_claiming(32_768, 16_384, &[0; 5]);
+        assert_eq!(decode(&png), Err(Error::Truncated));
+        assert_eq!(pixel_count(32_768, 16_384), Ok(MAX_PIXELS));
+        assert!(pixel_count(32_768, 16_385).is_err());
+    }
+
+    #[test]
+    fn data_that_unpacks_far_past_its_rows_is_refused() {
+        // One pixel (a filter byte and four samples), and 16 MB of zeros.
+        let png = png_claiming(1, 1, &[0; 16 << 20]);
+        assert!(matches!(decode(&png), Err(Error::Corrupt(_))));
+        // A few bytes left over are let through, as before.
+        let png = png_claiming(1, 1, &[0, 1, 2, 3, 4, 9, 9, 9]);
+        assert_eq!(
+            decode(&png).unwrap().pixels,
+            Pixels::Rgba8(vec![1, 2, 3, 4])
+        );
     }
 
     #[test]

@@ -221,8 +221,8 @@ impl SubtitlesDialog {
                                 );
                                 if ui.button(tr("Browse…")).clicked()
                                     && let Some(p) = rfd::FileDialog::new()
-                                        .set_title(tr("Insert Subtitles"))
-                                        .add_filter(tr("Text files"), &["txt", "csv"])
+                                        .set_title(crate::i18n::os_text(tr("Insert Subtitles")))
+                                        .add_filter(crate::i18n::os_text(tr("Text files")), &["txt", "csv"])
                                         .pick_file()
                                 {
                                     self.path = p.display().to_string();

@@ -868,6 +868,84 @@ fn style(ui: &Ui, at_bottom: bool) -> Style {
 mod tests {
     use super::*;
 
+    /// The arrow over a window's tab; the moving pointer only while the
+    /// tab is held, to be dragged elsewhere (it showed at once, over any
+    /// tab the mouse went by).
+    /// A docked window's button asks for another tab while the layout is
+    /// being drawn (it is out of the app then): shown once it is back.
+    #[test]
+    fn a_tab_asked_for_while_the_layout_draws_is_shown_after() {
+        let ctx = crate::egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        let tab = Tab::ALL
+            .into_iter()
+            .find(|t| !app.is_tab_open(*t))
+            .expect("a tab that is not open");
+        // As inside `dock::show`: the layout taken out.
+        let layout = app.dock.take();
+        app.show_tab(tab, false);
+        app.dock = layout;
+        assert!(!app.is_tab_open(tab), "not yet");
+        let raw = crate::egui::RawInput {
+            screen_rect: Some(crate::egui::Rect::from_min_size(
+                crate::egui::Pos2::ZERO,
+                crate::egui::vec2(1600.0, 960.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+        out.textures_delta.clear();
+        assert!(app.is_tab_open(tab), "{tab:?} opened with the layout back");
+    }
+
+    #[test]
+    fn a_tab_shows_the_moving_pointer_only_while_it_is_held() {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let moving = |h: &egui_kittest::Harness<'_, BananaApp>| {
+            matches!(
+                h.output().platform_output.cursor_icon,
+                crate::egui::CursorIcon::Grab | crate::egui::CursorIcon::Grabbing
+            )
+        };
+        // The docking area's tabs in the window as it opens (1600 by 960):
+        // Project Media's, Transitions' and Video FX's.
+        for (tab, x) in [
+            ("Project Media", 150.0),
+            ("Transitions", 372.0),
+            ("Video FX", 455.0),
+        ] {
+            let at = crate::egui::pos2(x, 597.0);
+            h.event(crate::egui::Event::PointerMoved(at));
+            h.run_steps(3);
+            assert!(!moving(&h), "over {tab}: the arrow");
+            let button = |pressed| crate::egui::Event::PointerButton {
+                pos: at,
+                button: crate::egui::PointerButton::Primary,
+                pressed,
+                modifiers: crate::egui::Modifiers::NONE,
+            };
+            h.event(button(true));
+            h.run_steps(2);
+            assert!(moving(&h), "{tab} held: the moving pointer");
+            h.event(button(false));
+            h.run_steps(2);
+            assert!(!moving(&h), "{tab} let go: the arrow again");
+        }
+    }
+
     /// Float in Its Own Window takes a window out of the layout; Dock puts
     /// it back; the timeline never floats.
     #[test]

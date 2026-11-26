@@ -798,8 +798,11 @@ impl BananaApp {
 /// Save As: the mapping into a `.bvgeneric` file.
 fn save_map(map: &GenericMap) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Save As"))
-        .add_filter(tr("Generic control mapping"), &["bvgeneric"])
+        .set_title(crate::i18n::os_text(tr("Save As")))
+        .add_filter(
+            crate::i18n::os_text(tr("Generic control mapping")),
+            &["bvgeneric"],
+        )
         .set_file_name("Generic Control.bvgeneric")
         .save_file()
     else {
@@ -813,8 +816,11 @@ fn save_map(map: &GenericMap) {
 /// Open: a mapping from a `.bvgeneric` file.
 fn open_map() -> Option<GenericMap> {
     let path = rfd::FileDialog::new()
-        .set_title(tr("Open"))
-        .add_filter(tr("Generic control mapping"), &["bvgeneric"])
+        .set_title(crate::i18n::os_text(tr("Open")))
+        .add_filter(
+            crate::i18n::os_text(tr("Generic control mapping")),
+            &["bvgeneric"],
+        )
         .pick_file()?;
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }

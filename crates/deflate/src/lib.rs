@@ -7,7 +7,7 @@ mod inflate;
 
 pub use checksum::{Crc32, adler32, crc32};
 pub use deflate::deflate;
-pub use inflate::inflate;
+pub use inflate::{inflate, inflate_limited};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -33,6 +33,12 @@ impl std::error::Error for Error {}
 
 /// Descomprime um fluxo zlib (cabeçalho de 2 bytes + deflate + Adler-32).
 pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>, Error> {
+    zlib_decompress_limited(data, usize::MAX)
+}
+
+/// Like [`zlib_decompress`], for a stream known to unpack to `max_out`
+/// bytes at most: one that gives more is refused (see [`inflate_limited`]).
+pub fn zlib_decompress_limited(data: &[u8], max_out: usize) -> Result<Vec<u8>, Error> {
     if data.len() < 6 {
         return Err(Error::Truncated);
     }
@@ -43,7 +49,7 @@ pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>, Error> {
     if flg & 0x20 != 0 {
         return Err(Error::Corrupt("dicionário zlib não suportado"));
     }
-    let (out, used) = inflate::inflate_with_len(&data[2..])?;
+    let (out, used) = inflate::inflate_with_len(&data[2..], max_out)?;
     let tail = data.get(2 + used..2 + used + 4).ok_or(Error::Truncated)?;
     let expected = u32::from_be_bytes(tail.try_into().expect("4 bytes"));
     if adler32(&out) != expected {
@@ -113,6 +119,31 @@ mod tests {
         z[n - 1] ^= 1;
         assert_eq!(zlib_decompress(&z), Err(Error::Checksum));
         assert!(zlib_decompress(&[0x78, 0x9C, 0xFF]).is_err());
+    }
+
+    #[test]
+    fn a_stream_longer_than_its_limit_is_refused() {
+        // Stored, fixed and dynamic blocks; runs that copy themselves.
+        for data in sample_data().into_iter().filter(|d| !d.is_empty()) {
+            for level in [0, 1, 6, 9] {
+                let raw = deflate(&data, level);
+                assert_eq!(inflate_limited(&raw, data.len()).unwrap(), data);
+                assert_eq!(
+                    inflate_limited(&raw, data.len() - 1),
+                    Err(Error::Corrupt("more data than expected")),
+                    "level {level}, {} bytes",
+                    data.len()
+                );
+                let z = zlib_compress(&data, level);
+                assert_eq!(zlib_decompress_limited(&z, data.len()).unwrap(), data);
+                assert!(zlib_decompress_limited(&z, data.len() / 2).is_err());
+            }
+        }
+        // A thousand zeros to the byte: the limit is met well before the
+        // megabytes are made.
+        let bomb = deflate(&vec![0; 16 << 20], 6);
+        assert!(bomb.len() < 100_000, "{} bytes", bomb.len());
+        assert!(inflate_limited(&bomb, 1000).is_err());
     }
 
     /// Fluxos gerados por outra implementação (zlib), com blocos fixos e

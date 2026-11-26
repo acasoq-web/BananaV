@@ -8,6 +8,8 @@
 
 typedef int (*bv_entry)(const char *action, const void *handle, void *in_args, void *out_args);
 typedef void (*bv_thread)(unsigned int index, unsigned int max, void *arg);
+typedef int (*bv_count)(void);
+typedef void *(*bv_get)(int nth);
 
 /* What crashed: the exception's code and the instruction's address. */
 typedef struct bv_crash {
@@ -38,6 +40,31 @@ unsigned long bv_ofx_guarded_entry(bv_entry f, const char *action, const void *h
     bv_crash crash = {0, 0};
     __try {
         *status = f(action, handle, in_args, out_args);
+    } __except (bv_noted(GetExceptionInformation(), &crash)) {
+        return bv_caught(&crash, address);
+    }
+    return 0;
+}
+
+/* A binary's function counting its plug-ins: 0 and their number in `n`, or
+   the code of the exception it crashed with (its address in `address`). */
+unsigned long bv_ofx_guarded_count(bv_count f, int *n, void **address) {
+    bv_crash crash = {0, 0};
+    __try {
+        *n = f();
+    } __except (bv_noted(GetExceptionInformation(), &crash)) {
+        return bv_caught(&crash, address);
+    }
+    return 0;
+}
+
+/* A binary's function giving its plug-in `nth`: 0 and the plug-in in
+   `plugin`, or the code of the exception it crashed with (its address in
+   `address`). */
+unsigned long bv_ofx_guarded_get(bv_get f, int nth, void **plugin, void **address) {
+    bv_crash crash = {0, 0};
+    __try {
+        *plugin = f(nth);
     } __except (bv_noted(GetExceptionInformation(), &crash)) {
         return bv_caught(&crash, address);
     }

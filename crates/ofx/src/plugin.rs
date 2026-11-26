@@ -27,6 +27,10 @@ pub struct Binary {
     off: std::sync::atomic::AtomicBool,
     /// Whether it took the host (`OfxSetHost`, given once).
     took_host: std::sync::OnceLock<bool>,
+    /// Held while its plug-ins are listed, loaded and described: OpenFX
+    /// wants its functions and those actions called one at a time, and two
+    /// threads may first use two of its plug-ins at once.
+    describing: Mutex<()>,
 }
 
 /// Where a binary's entry points are.
@@ -249,6 +253,7 @@ impl Binary {
             entries: Entries::Library(std::mem::ManuallyDrop::new(lib)),
             off: Default::default(),
             took_host: Default::default(),
+            describing: Default::default(),
         }))
     }
 
@@ -264,6 +269,7 @@ impl Binary {
             path: PathBuf::from(label),
             off: Default::default(),
             took_host: Default::default(),
+            describing: Default::default(),
             entries: Entries::Static {
                 count,
                 get,
@@ -325,18 +331,27 @@ impl Binary {
         }
     }
 
+    /// This thread's turn to list, load and describe its plug-ins (a thread
+    /// that failed in its turn leaves the others theirs).
+    fn turn(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.describing.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Loads and describes plug-in `index` of the binary alone: a binary
     /// of hundreds (Sapphire's) takes seconds to describe them all.
     pub fn plugin(self: &Arc<Self>, index: u32) -> Result<Arc<Plugin>, Error> {
+        let _turn = self.turn();
         let (count, get) = self.connected()?;
         // SAFETY: the binary's own function.
-        let n = unsafe { count() }.max(0);
+        let n = unsafe { crate::guard::count(self, count) }
+            .ok_or_else(switched_off)?
+            .max(0);
         let i = std::ffi::c_int::try_from(index)
             .ok()
             .filter(|i| *i < n)
             .ok_or_else(|| Error::Other(format!("its binary has {n} plug-ins")))?;
         // SAFETY: the binary's own function, for an index it counted.
-        let raw = unsafe { get(i) };
+        let raw = unsafe { crate::guard::get(self, get, i) }.ok_or_else(switched_off)?;
         Plugin::load(self, raw, index)
             .map(Arc::new)
             .map_err(|(_, e)| e)
@@ -344,14 +359,22 @@ impl Binary {
 
     /// Loads and describes every plug-in of the binary.
     pub fn plugins(self: &Arc<Self>) -> Result<(Vec<Arc<Plugin>>, Vec<Failure>), Error> {
+        let _turn = self.turn();
         let (count, get) = self.connected()?;
         let (mut plugins, mut failures) = (Vec::new(), Vec::new());
         // SAFETY: the binary's own function.
-        let n = unsafe { count() }.max(0);
+        let n = unsafe { crate::guard::count(self, count) }
+            .ok_or_else(switched_off)?
+            .max(0);
         for i in 0..n {
             // SAFETY: the binary's own function, for an index it counted.
-            let raw = unsafe { get(i) };
-            match Plugin::load(self, raw, i as u32) {
+            let raw = unsafe { crate::guard::get(self, get, i) };
+            let loaded = match raw {
+                Some(raw) => Plugin::load(self, raw, i as u32),
+                // Crashed, here or at a plug-in before: the rest fail too.
+                None => Err((String::new(), switched_off())),
+            };
+            match loaded {
                 Ok(p) => plugins.push(Arc::new(p)),
                 Err((identifier, error)) => failures.push(Failure {
                     index: i as u32,
@@ -362,6 +385,12 @@ impl Binary {
         }
         Ok((plugins, failures))
     }
+}
+
+/// Why a binary's functions listing its plug-ins gave nothing: it crashed
+/// there, or before (`guard.rs` tells where), and is not called again.
+fn switched_off() -> Error {
+    Error::Crashed("its binary is switched off".into())
 }
 
 /// A plug-in's raw structure, owned by its binary.

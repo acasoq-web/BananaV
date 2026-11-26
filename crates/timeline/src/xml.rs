@@ -122,10 +122,15 @@ pub fn parse(text: &str) -> Result<Element, String> {
         at: 0,
     };
     p.skip_misc()?;
-    let root = p.element()?;
+    let root = p.element(0)?;
     p.skip_misc()?;
     Ok(root)
 }
+
+/// How deep elements may be one inside the other: far past what the
+/// interchange formats nest, and well within the stack (reading the
+/// elements, and dropping them, takes a call for each level).
+const MAX_DEPTH: usize = 128;
 
 struct Parser<'a> {
     s: &'a str,
@@ -188,9 +193,14 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    fn element(&mut self) -> Result<Element, String> {
+    /// The element that starts here, `depth` elements inside the
+    /// document's.
+    fn element(&mut self, depth: usize) -> Result<Element, String> {
         if !self.rest().starts_with('<') {
             return Err(self.error("an element was expected"));
+        }
+        if depth >= MAX_DEPTH {
+            return Err(self.error("elements nested too deep"));
         }
         self.at += 1;
         let mut e = Element {
@@ -266,7 +276,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if r.starts_with('<') {
-                let child = self.element()?;
+                let child = self.element(depth + 1)?;
                 e.children.push(Node::Element(child));
                 continue;
             }
@@ -313,5 +323,23 @@ mod tests {
         assert!(parse("<a><b></a>").unwrap_err().contains("closes"));
         assert!(parse("<a x=1/>").is_err());
         assert!(parse("<a>").unwrap_err().contains("not closed"));
+    }
+
+    #[test]
+    fn elements_nested_too_deep_are_refused() {
+        // Ten thousand elements one inside the other, closed or not.
+        let open = "<a>".repeat(10_000);
+        assert!(parse(&open).unwrap_err().contains("too deep"));
+        let closed = format!("{open}{}", "</a>".repeat(10_000));
+        assert!(parse(&closed).unwrap_err().contains("too deep"));
+        // As deep as the interchange formats go is read.
+        let fine = format!("{}{}", "<a>".repeat(100), "</a>".repeat(100));
+        let mut e = &parse(&fine).unwrap();
+        let mut depth = 1;
+        while let Some(child) = e.child("a") {
+            e = child;
+            depth += 1;
+        }
+        assert_eq!(depth, 100);
     }
 }

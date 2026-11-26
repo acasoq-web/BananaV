@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 
 /// The longest frame taken (a garbled length ends the conversation
 /// instead of a huge allocation).
-const MAX_FRAME: usize = 256 << 20;
+pub const MAX_FRAME: usize = 256 << 20;
 
 pub fn write_frame(w: &mut impl Write, bytes: &[u8]) -> std::io::Result<()> {
     w.write_all(&(bytes.len() as u32).to_le_bytes())?;

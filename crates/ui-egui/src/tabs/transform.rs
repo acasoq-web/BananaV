@@ -1163,8 +1163,8 @@ fn time(ui: &mut Ui, app: &mut BananaApp, id: ClipId, rows: &mut Rows) {
     });
     if ch {
         app.modify(|p| {
+            let _ = p.set_looped(id, looped);
             if let Some(c) = p.clip_mut(id) {
-                c.looped = looped;
                 c.hold_last = hold && !looped;
             }
         });

@@ -189,8 +189,11 @@ mod imp {
     use super::{BurnError, Burner, CD_1X, CD_SECTOR, CdOptions, CdTrackData, DVD_1X};
 
     /// `f` with COM on this thread, given back after when this call
-    /// started it.
+    /// started it. The apartment itself is kept (`keep_com`): giving COM
+    /// back here, on the only thread that started it, would end it under
+    /// the other threads using it.
     fn with_com<T>(f: impl FnOnce() -> T) -> T {
+        crate::imp::keep_com();
         // SAFETY: plain COM start and end on this thread; S_FALSE (already
         // started here) is undone too, RPC_E_CHANGED_MODE is not.
         let started = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
@@ -743,7 +746,7 @@ mod imp {
     mod tests {
         use std::sync::atomic::AtomicU32;
 
-        use windows::Win32::System::Com::STATFLAG_NONAME;
+        use windows::Win32::System::Com::{CoGetApartmentType, STATFLAG_NONAME};
 
         use super::*;
 
@@ -855,6 +858,35 @@ mod imp {
             // failure.
             for b in burners() {
                 assert!(!b.id.is_empty() && !b.name.is_empty(), "{b:?}");
+            }
+        }
+
+        /// Whether COM's multithreaded apartment is there: a thread that
+        /// never started COM is in it then, and in none otherwise.
+        fn apartment_is_there() -> bool {
+            std::thread::spawn(|| {
+                let (mut kind, mut qualifier) = Default::default();
+                // SAFETY: a query into two locals.
+                unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }.is_ok()
+            })
+            .join()
+            .unwrap()
+        }
+
+        /// Listing the drives starts COM on its thread and gives it back.
+        /// That ended the apartment (this was the only thread that started
+        /// it), and the libraries COM had loaded were unloaded under the
+        /// other threads using it: the test of what opens a file type
+        /// crashed, now and then, in an unloaded
+        /// `Windows.System.Launcher.dll`.
+        #[test]
+        fn listing_the_drives_leaves_com_to_the_other_threads() {
+            let _ = burners();
+            assert!(apartment_is_there(), "after a listing");
+            // The same from threads that end, as the interface's do.
+            for _ in 0..3 {
+                std::thread::spawn(|| with_com(|| ())).join().unwrap();
+                assert!(apartment_is_there(), "after a thread's use");
             }
         }
     }

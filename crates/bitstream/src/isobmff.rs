@@ -82,7 +82,12 @@ pub fn moov<R: Read + Seek>(f: &mut R) -> Option<Vec<u8>> {
             f.read_exact(&mut data).ok()?;
             return Some(data);
         }
-        pos += size;
+        // A box longer than what is left of the file is damage: stepping
+        // over it would wrap the position around and never end the walk.
+        if size > len - pos {
+            return None;
+        }
+        pos = pos.checked_add(size)?;
     }
     None
 }
@@ -118,5 +123,24 @@ mod tests {
         let movie = moov(&mut Cursor::new(&file)).expect("a movie");
         assert_eq!(child(&movie, b"mvhd"), Some(&[1u8, 2, 3, 4][..]));
         assert_eq!(be_u32(&[0, 0, 1, 0], 0), Some(256));
+    }
+
+    #[test]
+    fn a_box_size_that_wraps_the_position_is_refused() {
+        // After a 16-byte box, one whose 64-bit size would bring the walk
+        // back to the start of the file.
+        let mut file = Vec::new();
+        file.extend(16u32.to_be_bytes());
+        file.extend(b"ftypisom\0\0\0\0");
+        file.extend(1u32.to_be_bytes());
+        file.extend(b"free");
+        file.extend((u64::MAX - 15).to_be_bytes());
+        assert_eq!(moov(&mut Cursor::new(&file)), None);
+        // And one that only runs past the end of the file.
+        let mut file = Vec::new();
+        file.extend(1u32.to_be_bytes());
+        file.extend(b"free");
+        file.extend(u64::MAX.to_be_bytes());
+        assert_eq!(moov(&mut Cursor::new(&file)), None);
     }
 }

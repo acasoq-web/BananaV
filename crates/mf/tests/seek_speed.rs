@@ -39,3 +39,54 @@ fn seeks_and_frames_a_second() {
         }
     }
 }
+
+/// Asked for further on than one after another (an event sped up, faster
+/// playback), and then in any other way, the frames are the ones that come
+/// one by one: `BV_SEEK_FILE=<video> cargo test --release -p bv-mf --test
+/// seek_speed strides -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a file: BV_SEEK_FILE"]
+fn strides_give_the_same_frames() {
+    let Ok(path) = std::env::var("BV_SEEK_FILE") else {
+        return;
+    };
+    let hash = |f: &bv_core::VideoFrame| -> (i64, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in &f.planes {
+            match &p.data {
+                bv_core::PlaneData::U8(v) => v.hash(&mut h),
+                bv_core::PlaneData::U16(v) => v.hash(&mut h),
+            }
+        }
+        (f.pts.0, h.finish())
+    };
+    let mut d = bv_mf::VideoDecoder::open(&path).expect("opens");
+    let rate = d.info().frame_rate;
+    let count = 1200;
+    let one_by_one: Vec<(i64, u64)> = (0..count)
+        .map(|n| hash(&d.frame_at(rate.frame_start(n)).expect("a frame")))
+        .collect();
+    for stride in [2, 3, 4, 7, 16, 40, 90] {
+        let mut d = bv_mf::VideoDecoder::open(&path).expect("opens");
+        let start = std::time::Instant::now();
+        let mut n = 5;
+        let mut asked = 0;
+        while n < count {
+            let f = hash(&d.frame_at(rate.frame_start(n)).expect("a frame"));
+            assert_eq!(f, one_by_one[n as usize], "frame {n}, every {stride}");
+            n += stride;
+            asked += 1;
+        }
+        // Back a little, on by one, and the same again.
+        for back in [1, 2, 9, 8, 7, 0, 1] {
+            let n = count - 1 - back;
+            let f = hash(&d.frame_at(rate.frame_start(n)).expect("a frame"));
+            assert_eq!(f, one_by_one[n as usize], "back to {n}");
+        }
+        println!(
+            "every {stride}: {:.2} ms a frame",
+            start.elapsed().as_secs_f64() * 1e3 / f64::from(asked)
+        );
+    }
+}

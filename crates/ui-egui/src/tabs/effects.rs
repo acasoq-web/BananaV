@@ -1,18 +1,17 @@
 //! Video FX: VEGAS's plug-in window for video effects. Each preset's
 //! picture is BananaV's sample picture with the effect; under the pointer
-//! the effect sweeps across it. Drag a preset onto an event, or
-//! double-click it to apply it to the selected events (its settings open
-//! in Properties). Filter Packages lists the chains saved as packages
+//! the effect sweeps across it, moving when it moves by itself. Drag a preset onto an event, or
+//! double-click it to apply it to the selected events. Filter Packages lists the chains saved as packages
 //! (`fx_packages.rs`), each one preset: the sample through its chain.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, mpsc};
 
 use crate::i18n::tr;
 use bv_timeline::{ClipId, Effect, EffectKind, TrackId, TrackKind};
 
 use super::chooser::{self, Category, Plugin};
 use crate::app::{BananaApp, MediaDrag};
-use crate::dock::Tab;
 use crate::egui::{
     self, Color32, ColorImage, Rect, Stroke, TextureHandle, TextureId, TextureOptions, pos2,
 };
@@ -182,14 +181,17 @@ pub fn apply_to_track(app: &mut BananaApp, track: TrackId, chain: &[Effect]) {
 }
 
 /// The window's categories, as VEGAS's: BananaV's effects are in
-/// Creative, Color, Utility and Blur; Filter Packages has the chains saved.
-fn categories() -> [Category; 8] {
+/// Creative, Color, Utility and Blur, and its pack's in Banana Split (by
+/// group in its Filter); Filter Packages has the chains saved.
+fn categories() -> [Category; 9] {
     let c = |name, ready| Category {
         name,
         ready,
         packages: false,
     };
     [
+        // First, where it shows in any width.
+        c("Banana Split", true),
         c(tr("AI/ML"), true),
         c(tr("Creative"), true),
         c(tr("Color"), true),
@@ -213,33 +215,39 @@ fn categories() -> [Category; 8] {
 
 fn category_of(k: EffectKind) -> usize {
     match k {
-        EffectKind::Glow | EffectKind::Vignette | EffectKind::Mirror | EffectKind::Pixelate => 1,
+        EffectKind::Glow | EffectKind::Vignette | EffectKind::Mirror | EffectKind::Pixelate => 2,
         EffectKind::BrightnessContrast
         | EffectKind::ColorGrade
         | EffectKind::Levels
         | EffectKind::BlackAndWhite
         | EffectKind::Sepia
-        | EffectKind::Invert => 2,
-        EffectKind::GaussianBlur => 4,
-        _ => 3,
+        | EffectKind::Invert => 3,
+        EffectKind::GaussianBlur => 5,
+        _ => 4,
     }
 }
 
+/// The window's index of the Banana Split category (BananaV's own pack).
+const BANANA_SPLIT: usize = 0;
+
 /// The window's index of the Third Party category (OFX plug-ins).
-const THIRD_PARTY: usize = 6;
+const THIRD_PARTY: usize = 7;
 
 /// The window's index of the Filter Packages category.
-pub(crate) const FILTER_PACKAGES: usize = 7;
+pub(crate) const FILTER_PACKAGES: usize = 8;
 
 /// The category of one of BananaV's own plug-ins: its group's.
 fn own_category(p: &bv_ofx::PluginInfo) -> usize {
+    if bv_engine::plugins::is_banana_split(p) {
+        return BANANA_SPLIT;
+    }
     match p.grouping.rsplit(['/', '\\']).next().unwrap_or("") {
-        "AI/ML" | "AI" => 0,
-        "Creative" => 1,
-        "Color" => 2,
-        "Blur" => 4,
-        "360°" => 5,
-        _ => 3,
+        "AI/ML" | "AI" => 1,
+        "Creative" => 2,
+        "Color" => 3,
+        "Blur" => 5,
+        "360°" => 6,
+        _ => 4,
     }
 }
 
@@ -248,6 +256,10 @@ fn own_category(p: &bv_ofx::PluginInfo) -> usize {
 fn plugin_presets(app: &mut BananaApp, p: &bv_ofx::PluginInfo) -> Vec<(String, Effect)> {
     let mut v = vec![(tr("(Default)").to_string(), crate::ofx::new_effect(p))];
     for (name, values) in crate::presets::builtin_plugin(&p.identifier) {
+        // One of the pack's that is the defaults: (Default) already.
+        if values.is_empty() && bv_engine::plugins::is_banana_split(p) {
+            continue;
+        }
         let mut e = crate::ofx::new_effect(p);
         if let Some(fx) = e.plugin.as_mut() {
             fx.params = values;
@@ -293,17 +305,14 @@ fn plugins(ofx: &[std::sync::Arc<bv_ofx::PluginInfo>], packages: &[Package]) -> 
             return Plugin {
                 key: format!("ofx:{}", p.identifier),
                 about: [
-                    trf!(
-                        "{}: BananaV, 32-bit floating point, group {}",
-                        name,
-                        cats[category].name
-                    ),
+                    crate::ofx::own_about(p, &name, cats[category].name),
                     trf!("Description: {}", tr(&p.description)),
                 ],
                 name,
                 category,
                 ready: true,
-                provider: None,
+                // The pack's Filter picks by group.
+                provider: (category == BANANA_SPLIT).then(|| crate::ofx::group_of(p)),
             };
         }
         Plugin {
@@ -369,10 +378,86 @@ fn presets(app: &mut BananaApp, k: EffectKind) -> Vec<(String, Effect)> {
     v
 }
 
-/// The presets' pictures: the sample picture with each effect, made once.
+/// How many pictures a second an effect that moves by itself plays under
+/// the pointer, and how many before it starts over (four seconds).
+const MOVING_FPS: f64 = 15.0;
+const MOVING_LOOP: u32 = 60;
+
+/// The picture compared with the first to tell whether an effect moves:
+/// half a second in.
+const PROBE: u32 = 8;
+
+/// The presets' pictures: the sample picture with each effect, made once;
+/// and the one under the pointer as its effect moves (noise, a flicker, a
+/// bolt), drawn on a thread of its own.
 #[derive(Default)]
 pub struct Previews {
     map: HashMap<String, TextureHandle>,
+    moving: Option<Moving>,
+    drawer: Option<Drawer>,
+}
+
+/// The pictures of the preset under the pointer, as its effect moves.
+struct Moving {
+    key: String,
+    /// Its pictures drawn, by number (a fifteenth of a second each).
+    frames: HashMap<u32, TextureHandle>,
+    /// Those asked for and not back yet.
+    asked: HashSet<u32>,
+    /// The first and the probe's bytes, until it is known whether it moves.
+    bytes: HashMap<u32, Vec<u8>>,
+    /// Whether it moves: `None` until the probe was compared with the
+    /// first.
+    moves: Option<bool>,
+}
+
+/// A picture to draw, `frame` fifteenths of a second in.
+struct Job {
+    key: String,
+    effects: Vec<Effect>,
+    size: (u32, u32),
+    frame: u32,
+}
+
+/// The thread drawing them: what to draw, what it drew, and the key of the
+/// preset that plays (the others' jobs are let go).
+struct Drawer {
+    jobs: mpsc::Sender<Job>,
+    done: mpsc::Receiver<(String, u32, Vec<u8>)>,
+    current: Arc<Mutex<String>>,
+}
+
+impl Drawer {
+    fn new(ctx: &egui::Context) -> Option<Drawer> {
+        let (jobs, todo) = mpsc::channel::<Job>();
+        let (send, done) = mpsc::channel();
+        let current = Arc::new(Mutex::new(String::new()));
+        let playing = current.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("bv-fx-previews".into())
+            .spawn(move || {
+                while let Ok(job) = todo.recv() {
+                    let wanted = playing.lock().is_ok_and(|k| *k == job.key);
+                    if !wanted {
+                        continue;
+                    }
+                    let (w, h) = job.size;
+                    let seconds = f64::from(job.frame) / MOVING_FPS;
+                    let rgba = bv_engine::effect_sample_at(&job.effects, w, h, seconds);
+                    if send.send((job.key, job.frame, rgba)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .ok()?;
+        Some(Drawer {
+            jobs,
+            done,
+            current,
+        })
+    }
 }
 
 impl std::fmt::Debug for Previews {
@@ -383,12 +468,15 @@ impl std::fmt::Debug for Previews {
     }
 }
 
+fn preview_key(effects: &[Effect], w: u32, h: u32) -> String {
+    format!("{w}x{h} {effects:?}")
+}
+
 impl Previews {
-    /// The sample picture, `w`×`h`, with `effects` (none: as it is).
+    /// The sample picture, `w`x`h`, with `effects` (none: as it is).
     fn get(&mut self, ctx: &egui::Context, effects: &[Effect], w: u32, h: u32) -> TextureId {
-        let key = format!("{w}x{h} {effects:?}");
         self.map
-            .entry(key)
+            .entry(preview_key(effects, w, h))
             .or_insert_with(|| {
                 let rgba = bv_engine::effect_sample(effects, w, h);
                 ctx.load_texture(
@@ -399,10 +487,94 @@ impl Previews {
             })
             .id()
     }
+
+    /// The picture of `effects` `seconds` after the pointer came onto it,
+    /// when they move by themselves and it is drawn yet (else the still
+    /// one shows); asks for it and the next ones.
+    fn moving(
+        &mut self,
+        ctx: &egui::Context,
+        effects: &[Effect],
+        (w, h): (u32, u32),
+        seconds: f32,
+    ) -> Option<TextureId> {
+        if effects.is_empty() {
+            return None;
+        }
+        let key = preview_key(effects, w, h);
+        if self.drawer.is_none() {
+            self.drawer = Drawer::new(ctx);
+        }
+        let drawer = self.drawer.as_ref()?;
+        if self.moving.as_ref().is_none_or(|m| m.key != key) {
+            if let Ok(mut k) = drawer.current.lock() {
+                k.clone_from(&key);
+            }
+            self.moving = Some(Moving {
+                key: key.clone(),
+                frames: HashMap::new(),
+                asked: HashSet::new(),
+                bytes: HashMap::new(),
+                moves: None,
+            });
+        }
+        let m = self.moving.as_mut()?;
+        // What came back.
+        while let Ok((k, frame, rgba)) = drawer.done.try_recv() {
+            if k != m.key {
+                continue;
+            }
+            m.asked.remove(&frame);
+            if m.moves.is_none() && (frame == 0 || frame == PROBE) {
+                m.bytes.insert(frame, rgba.clone());
+                if let (Some(a), Some(b)) = (m.bytes.get(&0), m.bytes.get(&PROBE)) {
+                    m.moves = Some(a != b);
+                    m.bytes.clear();
+                }
+            }
+            if rgba.len() == (w * h * 4) as usize {
+                let image = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                let texture = ctx.load_texture("efeito-movendo", image, TextureOptions::LINEAR);
+                m.frames.insert(frame, texture);
+            }
+        }
+        let ask = |m: &mut Moving, frame: u32| {
+            if !m.frames.contains_key(&frame) && m.asked.insert(frame) {
+                let job = Job {
+                    key: key.clone(),
+                    effects: effects.to_vec(),
+                    size: (w, h),
+                    frame,
+                };
+                let _ = drawer.jobs.send(job);
+            }
+        };
+        match m.moves {
+            // Still: its one picture.
+            Some(false) => None,
+            None => {
+                ask(m, 0);
+                ask(m, PROBE);
+                None
+            }
+            Some(true) => {
+                let now = ((f64::from(seconds) * MOVING_FPS) as u32) % MOVING_LOOP;
+                for next in now..now + 3 {
+                    ask(m, next % MOVING_LOOP);
+                }
+                // The latest drawn up to now.
+                (0..=now)
+                    .rev()
+                    .find_map(|f| m.frames.get(&f))
+                    .map(TextureHandle::id)
+            }
+        }
+    }
 }
 
 /// A preset's picture in `rect`: the sample picture through `effects`;
-/// while it plays, they sweep across it.
+/// while it plays, they sweep across it, moving when they move by
+/// themselves.
 fn paint_preset(
     painter: &egui::Painter,
     rect: Rect,
@@ -423,6 +595,7 @@ fn paint_preset(
             painter.image(with, rect, all, Color32::WHITE);
         }
         Some(t) => {
+            let with = previews.moving(&ctx, effects, (w, h), t).unwrap_or(with);
             // The effect sweeps in from the left over the squares (what it
             // makes see-through shows them), the picture as it was on the
             // right.
@@ -449,9 +622,9 @@ fn paint_preset(
 }
 
 /// Applies `chain` (a preset's effect, or a filter package's) to the
-/// selected video events, its settings then open in Properties — or, from
-/// the preset's + (`edit`), in the event's FX window, where it can be
-/// changed and saved as a preset of its own.
+/// selected video events; from the preset's + (`edit`) the event's FX
+/// window then opens, where it can be changed and saved as a preset of its
+/// own. Properties opens by itself never, only from View › Window.
 fn apply_selected(app: &mut BananaApp, chain: &[Effect], edit: bool) {
     let sel = app.selected();
     if apply_to_clips(app, &sel, chain) == 0 {
@@ -463,8 +636,6 @@ fn apply_selected(app: &mut BananaApp, chain: &[Effect], edit: bool) {
                 .is_some_and(|t| t.kind == TrackKind::Video)
         });
         app.clip_windows.clip_fx_last = video;
-    } else {
-        app.show_tab(Tab::Properties, false);
     }
 }
 
@@ -539,6 +710,7 @@ fn package_grid(
 
 pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     let mut state = std::mem::take(&mut app.choosers.effects);
+    state.keys = app.browse.take(crate::dock::Tab::VideoFx);
     let categories = categories();
     let ofx = crate::ofx::filters();
     // The packages are read when their category or the favorites show.
@@ -657,6 +829,48 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
+    /// While Video FX has the keys, a name's letters pick a plug-in, Up and
+    /// Down the next ones, Left and Right its presets.
+    #[test]
+    fn letters_and_arrows_pick_effects_and_presets() {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.fx_packages_for_review();
+        app.show_tab(crate::dock::Tab::VideoFx, false);
+        app.keys_tab = Some(crate::dock::Tab::VideoFx);
+        let mut h = Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let chosen = |h: &Harness<'_, BananaApp>| h.state().choosers.effects.plugin.clone();
+        for c in "sepia".chars() {
+            h.event(crate::egui::Event::Text(c.to_string()));
+        }
+        h.step();
+        let sepia = chosen(&h).expect("chosen");
+        assert!(sepia.to_lowercase().contains("sepia"), "{sepia}");
+        h.key_press(crate::egui::Key::ArrowDown);
+        h.step();
+        let next = chosen(&h).expect("chosen");
+        assert_ne!(next, sepia);
+        h.key_press(crate::egui::Key::ArrowUp);
+        h.step();
+        assert_eq!(chosen(&h), Some(sepia));
+        h.key_press(crate::egui::Key::ArrowRight);
+        h.step();
+        assert_eq!(h.state().choosers.effects.preset, Some(0));
+        h.key_press(crate::egui::Key::ArrowRight);
+        h.step();
+        assert_eq!(h.state().choosers.effects.preset, Some(1));
+    }
+
     /// An effect dragged out of the plug-in list onto an event lands on it
     /// with its (Default) preset, as one dragged from the presets does.
     #[test]
@@ -667,7 +881,7 @@ mod tests {
         app.fx_packages_for_review();
         app.load_demo();
         app.choosers.effects.search = Some("Sepia".into());
-        app.show_tab(Tab::VideoFx, false);
+        app.show_tab(crate::dock::Tab::VideoFx, false);
         let mut h = Harness::builder()
             .with_size(crate::egui::vec2(1600.0, 960.0))
             .build_ui_state(

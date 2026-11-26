@@ -213,7 +213,7 @@ fn folder_line(ui: &mut egui::Ui, value: &mut PathBuf, title: &str) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(tr("Browse…")).clicked()
                 && let Some(dir) = rfd::FileDialog::new()
-                    .set_title(title)
+                    .set_title(crate::i18n::os_text(title))
                     .set_directory(value.as_path())
                     .pick_folder()
             {
@@ -319,7 +319,7 @@ impl BananaApp {
                         });
                     if ui.button(tr("Browse…")).clicked()
                         && let Some(dir) = rfd::FileDialog::new()
-                            .set_title(tr("Import DVD Camcorder Disc"))
+                            .set_title(crate::i18n::os_text(tr("Import DVD Camcorder Disc")))
                             .pick_folder()
                     {
                         w.source = Some(dir);

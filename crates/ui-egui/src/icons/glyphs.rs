@@ -800,6 +800,38 @@ pub(super) fn layers(icon: Icon) -> Vec<Layer> {
             line(d("M3 5H6C10 5 14 19 18 19H21")),
             line(d("M3 19H6C10 19 14 5 18 5H21")),
         ],
+        // Two events, an arrow taking the first over the second.
+        Icon::ShuffleTool => vec![
+            body(d("M4 14H9A1 1 0 0 1 10 15V19A1 1 0 0 1 9 20H4A1 1 0 0 1 3 19V15A1 1 0 0 1 4 14Z")),
+            body(d("M15 14H20A1 1 0 0 1 21 15V19A1 1 0 0 1 20 20H15A1 1 0 0 1 14 19V15A1 1 0 0 1 15 14Z")).dim(),
+            line(d("M6.5 11V8.5A3 3 0 0 1 9.5 5.5H15")),
+            solid(d("M14.8 2.9L18.8 5.5 14.8 8.1Z")),
+        ],
+        // An event, its media sliding inside it both ways.
+        Icon::SlipTool => vec![
+            body(d("M5 6H19A2 2 0 0 1 21 8V16A2 2 0 0 1 19 18H5A2 2 0 0 1 3 16V8A2 2 0 0 1 5 6Z")),
+            line(d("M9 12H15")).dim(),
+            solid(d("M6.2 12L9.2 9.8V14.2Z")),
+            solid(d("M17.8 12L14.8 9.8V14.2Z")),
+        ],
+        // An event between its neighbours' edges, sliding both ways.
+        Icon::SlideTool => vec![
+            line(d("M3.5 5V19M20.5 5V19")).dim(),
+            body(d("M10 8H14A1.5 1.5 0 0 1 15.5 9.5V14.5A1.5 1.5 0 0 1 14 16H10A1.5 1.5 0 0 1 8.5 14.5V9.5A1.5 1.5 0 0 1 10 8Z")),
+            solid(d("M5.2 12L7.6 10.2V13.8Z")),
+            solid(d("M18.8 12L16.4 10.2V13.8Z")),
+        ],
+        // An event with a spring through it, stretched.
+        Icon::StretchTool => vec![
+            body(d("M5 7H19A2 2 0 0 1 21 9V15A2 2 0 0 1 19 17H5A2 2 0 0 1 3 15V9A2 2 0 0 1 5 7Z")),
+            line(d("M5.5 12L7.5 9.8 9.5 14.2 11.5 9.8 13.5 14.2 15.5 9.8 17.5 14.2 18.5 12")).dim().fine(),
+        ],
+        // An event cut where it is trimmed, its part past the cut faint.
+        Icon::SplitTrimTool => vec![
+            body(d("M5 7H11V17H5A2 2 0 0 1 3 15V9A2 2 0 0 1 5 7Z")),
+            body(d("M13 7H19A2 2 0 0 1 21 9V15A2 2 0 0 1 19 17H13Z")).dim(),
+            line(d("M12 3.5V20.5")),
+        ],
     }
 }
 
@@ -865,7 +897,7 @@ impl Layer {
 }
 
 #[cfg(test)]
-pub(super) const ALL: [Icon; 142] = [
+pub(super) const ALL: [Icon; 147] = [
     Icon::New,
     Icon::Open,
     Icon::Save,
@@ -1008,4 +1040,9 @@ pub(super) const ALL: [Icon; 142] = [
     Icon::OpenBank,
     Icon::SaveBank,
     Icon::Phase,
+    Icon::ShuffleTool,
+    Icon::SlipTool,
+    Icon::SlideTool,
+    Icon::StretchTool,
+    Icon::SplitTrimTool,
 ];

@@ -127,7 +127,7 @@ fn builtin() -> &'static [Template] {
 }
 
 /// Every template: BananaV's and the user's.
-fn all_templates(app: &BananaApp) -> Vec<Template> {
+pub(crate) fn all_templates(app: &BananaApp) -> Vec<Template> {
     let mut v: Vec<Template> = builtin().to_vec();
     v.extend(app.settings.render.custom.iter().map(Template::from));
     v
@@ -882,6 +882,18 @@ impl RenderDialog {
                 }
             });
             ui.add_space(2.0);
+            // With every branch open it is longer than the window.
+            egui::ScrollArea::vertical()
+                .id_salt("render-tree")
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.branches(ui, app));
+        });
+    }
+
+    /// The tree's branches and what is in the open ones.
+    fn branches(&mut self, ui: &mut Ui, app: &BananaApp) {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             let searching = !self.search.trim().is_empty();
             let sel = |n: Node| !searching && self.node == n;
             let mut pick = None;
@@ -1273,10 +1285,14 @@ impl RenderDialog {
                 })
                 .fold(0.0f32, f32::max)
                     + 10.0;
-                // Name, codec, help and Customize.
+                // Name, codec, help and Customize. Every row keeps to the
+                // window's width, its text cut off (and whole under the
+                // pointer): a long one pushed the icons after it out of
+                // the window.
+                let inner = ui.available_width();
+                ui.set_max_width(inner);
                 ui.horizontal(|ui| {
                     let name = t.as_ref().map_or(String::new(), |t| t.name());
-                    ui.label(RichText::new(name).strong().color(theme::text_strong()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let ready = t
                             .as_ref()
@@ -1306,6 +1322,10 @@ impl RenderDialog {
                             resp.on_hover_text(format_help(t.format));
                             ui.label(tr(t.format.codec_name()));
                         }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let name = RichText::new(name).strong().color(theme::text_strong());
+                            ui.add(egui::Label::new(name).truncate());
+                        });
                     });
                 });
                 let row = |ui: &mut Ui, label: &str, add: &mut dyn FnMut(&mut Ui)| {
@@ -1321,19 +1341,19 @@ impl RenderDialog {
                     let notes = t.notes();
                     if !notes.is_empty() {
                         row(ui, tr("Notes:"), &mut |ui| {
-                            ui.label(&notes);
+                            ui.add(egui::Label::new(&notes).truncate());
                         });
                     }
                     if let Some(v) = t.video_for(&p) {
                         let job = video_summary(t, &v, &p);
                         row(ui, tr("Video:"), &mut |ui| {
-                            ui.label(job.clone());
+                            ui.add(egui::Label::new(job.clone()).truncate());
                         });
                     }
                     if let Some(a) = t.audio_for(&p) {
                         let job = audio_summary(t, &a, &p);
                         row(ui, tr("Audio:"), &mut |ui| {
-                            ui.label(job.clone());
+                            ui.add(egui::Label::new(job.clone()).truncate());
                         });
                     }
                 }
@@ -1347,12 +1367,16 @@ impl RenderDialog {
                     .map(|d| d.display().to_string());
                 ui.horizontal(|ui| {
                     ui.add_sized(vec2(label_w, 22.0), egui::Label::new(tr("Folder:")));
-                    let w = (ui.available_width() - 76.0).max(80.0);
+                    // Two icons and the arrow after it.
+                    let gap = ui.spacing().item_spacing.x;
+                    let icons = 2.0 * crate::widgets::BUTTON.x + 14.0 + 3.0 * gap;
+                    let w = (ui.available_width() - icons).max(80.0);
                     ui.add_sized(vec2(w, 22.0), egui::TextEdit::singleline(&mut self.folder));
                     if crate::widgets::icon_button(ui, crate::icons::Icon::Folder, tr("Browse…"))
                         .clicked()
                     {
-                        let mut d = rfd::FileDialog::new().set_title(tr("Folder"));
+                        let mut d =
+                            rfd::FileDialog::new().set_title(crate::i18n::os_text(tr("Folder")));
                         let start = PathBuf::from(self.folder.trim());
                         if start.is_dir() {
                             d = d.set_directory(start);
@@ -1471,15 +1495,31 @@ impl RenderDialog {
                 if let Some(v) = t.and_then(|t| t.video_for(p)) {
                     let (pw, ph) = p.output_size();
                     if v.width as u64 * ph as u64 != v.height as u64 * pw as u64 {
-                        ui.add_enabled(
-                            false,
-                            egui::Label::new(trf!(
-                                "AI Auto Reframe from {} to {}",
-                                templates::aspect(pw, ph),
-                                templates::aspect(v.width, v.height)
-                            )),
-                        )
-                        .on_disabled_hover_text(tr("Coming soon to BananaV"));
+                        // What the loop region's box and its label leave.
+                        let loop_w = ui
+                            .painter()
+                            .layout_no_wrap(
+                                tr("Render loop region only").to_string(),
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                theme::text(),
+                            )
+                            .size()
+                            .x
+                            + 64.0;
+                        let room = (ui.available_width() - loop_w).max(0.0);
+                        ui.scope(|ui| {
+                            ui.set_max_width(room);
+                            ui.add_enabled(
+                                false,
+                                egui::Label::new(trf!(
+                                    "AI Auto Reframe from {} to {}",
+                                    templates::aspect(pw, ph),
+                                    templates::aspect(v.width, v.height)
+                                ))
+                                .truncate(),
+                            )
+                            .on_disabled_hover_text(tr("Coming soon to BananaV"));
+                        });
                     }
                 }
                 let has_loop = app.project().loop_region.is_some();

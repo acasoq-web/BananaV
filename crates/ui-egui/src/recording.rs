@@ -246,7 +246,7 @@ impl BananaApp {
             return;
         }
         let picked = rfd::FileDialog::new()
-            .set_title(tr("Recorded files folder"))
+            .set_title(crate::i18n::os_text(tr("Recorded files folder")))
             .set_directory(self.recorded_folder())
             .pick_folder();
         let Some(folder) = picked else {

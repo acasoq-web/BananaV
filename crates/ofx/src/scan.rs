@@ -70,9 +70,9 @@ fn message_text(m: &Message) -> String {
 pub fn scan_here(file: &Path) -> BinaryScan {
     let (modified, size) = stamp(file);
     let loaded = Binary::load(file).and_then(|b| {
-        let found = b.plugins()?;
+        let found = b.plugins();
         if !b.crashed() {
-            return Ok(found);
+            return found;
         }
         // What it said after crashing is no answer.
         let why = crate::guard::take_crashes().pop().map_or_else(

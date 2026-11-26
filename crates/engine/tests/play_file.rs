@@ -15,7 +15,8 @@
 //! stacks those effects on the events, `BV_PLAY_TRANSITION=dissolve` (or a
 //! transition's id, `org.bananav.Push`) plays a transition between two
 //! events of the file all along, and `BV_PLAY_ANIMATE=1` zooms and turns
-//! the picture with a Pan/Crop animation.
+//! the picture with a Pan/Crop animation. `BV_PLAY_SPEED=4` speeds the
+//! events up, `BV_PLAY_RATE=2` the playback.
 
 #![allow(clippy::print_stdout)]
 
@@ -102,6 +103,17 @@ fn playing_a_file() {
         .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_default();
     let animate = std::env::var("BV_PLAY_ANIMATE").is_ok_and(|v| v == "1");
+    // The events sped up, and the playback.
+    let speed = env_f64("BV_PLAY_SPEED", 1.0);
+    let play_rate = env_f64("BV_PLAY_RATE", 1.0);
+    if speed != 1.0 {
+        for t in &mut p.tracks {
+            for c in &mut t.clips {
+                c.rate = speed;
+                c.duration = Tick((c.duration.0 as f64 / speed) as i64);
+            }
+        }
+    }
     let clips: Vec<bv_timeline::ClipId> = p.tracks[0].clips.iter().map(|c| c.id).collect();
     for (k, &c) in clips.iter().enumerate() {
         let clip = p.clip_mut(c).expect("an event");
@@ -173,7 +185,11 @@ fn playing_a_file() {
     {
         std::thread::sleep(Duration::from_millis(5));
     }
-    engine.play(from, bv_engine::PlayOptions::default());
+    let options = bv_engine::PlayOptions {
+        rate: play_rate,
+        ..Default::default()
+    };
+    engine.play(from, options);
     let mut shown: Vec<(Tick, Instant)> = Vec::new();
     let start = Instant::now();
     while start.elapsed().as_secs_f64() < seconds {
@@ -201,7 +217,7 @@ fn playing_a_file() {
         .collect();
     let longest = gaps.iter().copied().fold(0.0, f64::max);
     println!(
-        "{path}: project {w}x{h} at {:.3}, preview {pw}x{ph} in {room:?}, effects {effects:?}, transition {transition:?}, animated {animate}, {gpu:?} / decoding {decoding:?} ({:?}): {:.1} different frames a second, longest wait {longest:.0} ms",
+        "{path}: project {w}x{h} at {:.3}, preview {pw}x{ph} in {room:?}, effects {effects:?}, transition {transition:?}, animated {animate}, events {speed}x, playback {play_rate}x, {gpu:?} / decoding {decoding:?} ({:?}): {:.1} different frames a second, longest wait {longest:.0} ms",
         p.settings.frame_rate.as_f64(),
         engine.gpu_status(),
         settled.len() as f64 / span,

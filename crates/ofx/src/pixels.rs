@@ -138,6 +138,15 @@ impl Buffer {
         Buffer { ptr, layout }
     }
 
+    /// As [`Buffer::new`], for a size a plug-in asks for: `None` when
+    /// there is no such memory (where `new` would end the program).
+    pub fn try_new(len: usize) -> Option<Buffer> {
+        let layout = Layout::from_size_align(len.max(1), 64).ok()?;
+        // SAFETY: the layout's size is not zero.
+        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })?;
+        Some(Buffer { ptr, layout })
+    }
+
     pub fn len(&self) -> usize {
         self.layout.size()
     }

@@ -603,6 +603,59 @@ fn other_files_are_refused() {
     assert!(read("<xmeml version=\"5\"/>").is_err());
 }
 
+/// A sequence whose timebase is no frame rate is refused, never worked
+/// with; a clip's or a file's own falls back to the sequence's.
+#[test]
+fn a_timebase_that_is_no_rate_is_refused() {
+    let doc = |seq: &str, clip: &str| {
+        format!(
+            r#"<xmeml version="5"><sequence><rate>{seq}</rate><media><video><track>
+            <clipitem id="a"><rate>{clip}</rate><start>0</start><end>50</end><in>0</in><out>50</out>
+              <file id="f"><pathurl>file:///C:/a.mov</pathurl></file></clipitem>
+            </track></video></media></sequence></xmeml>"#
+        )
+    };
+    let fine = "<timebase>25</timebase>";
+    for bad in [
+        "<timebase>536870912</timebase><ntsc>TRUE</ntsc>",
+        "<timebase>4294967296</timebase>",
+        "<timebase>1001</timebase>",
+        "<timebase>0</timebase>",
+        "<timebase>-30</timebase>",
+        "<timebase>NaN</timebase>",
+    ] {
+        assert!(read(&doc(bad, fine)).is_err(), "{bad}");
+        let own = read(&doc(fine, bad)).expect(bad);
+        assert_eq!(
+            placed(&own, TrackKind::Video, FrameRate::new(25, 1)),
+            vec![vec![(0, 50, 0)]],
+            "{bad}"
+        );
+    }
+    let fast = read(&doc("<timebase>1000</timebase>", fine)).unwrap();
+    assert_eq!(fast.rate, Some(FrameRate::new(1000, 1)));
+}
+
+/// A media's address with letters of several bytes is its path.
+#[test]
+fn addresses_in_any_script_are_read() {
+    let text = r#"<xmeml version="5"><sequence><rate><timebase>25</timebase></rate><media><video><track>
+        <clipitem id="a"><start>0</start><end>50</end><in>0</in><out>50</out>
+          <file id="f"><pathurl>maçã.mov</pathurl></file></clipitem>
+        <clipitem id="b"><start>50</start><end>100</end><in>0</in><out>50</out>
+          <file id="g"><pathurl>日本語.mov</pathurl></file></clipitem>
+        </track></video></media></sequence></xmeml>"#;
+    let doc = read(text).unwrap();
+    let paths: Vec<&MediaRefSource> = doc.media.iter().map(|m| &m.source).collect();
+    assert_eq!(
+        paths,
+        vec![
+            &MediaRefSource::File("maçã.mov".into()),
+            &MediaRefSource::File("日本語.mov".into())
+        ]
+    );
+}
+
 /// An event's start, length and media time in frames, whether it is
 /// muted, its speed.
 type Shape = (i64, i64, i64, bool, f64);

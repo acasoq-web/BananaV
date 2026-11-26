@@ -39,8 +39,8 @@ pub fn export(app: &mut BananaApp, format: Format) {
         Format::Edl => (tr("Export EDL"), "EDL", "edl"),
     };
     let Some(path) = rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter(filter, &[ext])
+        .set_title(crate::i18n::os_text(title))
+        .add_filter(crate::i18n::os_text(filter), &[ext])
         .set_file_name(format!("{name}.{ext}"))
         .save_file()
     else {
@@ -110,7 +110,7 @@ fn resolve(e: &EdlEvent, dir: &Path) -> Option<PathBuf> {
 /// File › Import › EDL text file.
 pub fn import_edl(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Import EDL"))
+        .set_title(crate::i18n::os_text(tr("Import EDL")))
         .add_filter("EDL", &["edl", "txt"])
         .pick_file()
     else {
@@ -183,8 +183,10 @@ pub fn import_edl(app: &mut BananaApp) {
 /// BananaV project into this one.
 pub fn import_project_media(app: &mut BananaApp) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Import Media from Another Project"))
-        .add_filter(tr("BananaV Project"), &["bvproj"])
+        .set_title(crate::i18n::os_text(tr(
+            "Import Media from Another Project",
+        )))
+        .add_filter(crate::i18n::os_text(tr("BananaV Project")), &["bvproj"])
         .pick_file()
     else {
         return;
@@ -225,7 +227,7 @@ pub fn import_project_media(app: &mut BananaApp) {
 /// it (or at the cursor when it has none).
 pub fn import_bwf(app: &mut BananaApp) {
     let Some(paths) = rfd::FileDialog::new()
-        .set_title(tr("Import Broadcast Wave"))
+        .set_title(crate::i18n::os_text(tr("Import Broadcast Wave")))
         .add_filter("Wave", &["wav", "bwf"])
         .pick_files()
     else {

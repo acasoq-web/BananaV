@@ -9,15 +9,104 @@ use crate::model::{ClipId, Project, TrackId, TrackKind};
 
 type Result<T> = std::result::Result<T, EditError>;
 
-/// What a post-edit ripple moves (Edit › Post-Edit Ripple).
+/// What a ripple moves (Options › Ripple, the Auto Ripple button's menu,
+/// Edit › Post-Edit Ripple), as VEGAS's three: each one's events, their
+/// envelopes and keyframes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RippleScope {
     /// Only the tracks of the edited events.
     AffectedTracks,
-    /// The affected tracks plus markers and regions.
+    /// The affected tracks, the bus tracks (the video bus's, the busses'
+    /// and the effects chains': their envelopes and keyframes), the
+    /// markers, regions, CD track and index markers and command markers.
     AffectedTracksAndMarkers,
-    /// Every track, marker and region.
+    /// Every track, the bus tracks, the markers and regions.
     All,
+}
+
+/// A point or keyframe on the timeline, whose time a ripple moves.
+trait Timed {
+    fn at(&self) -> Tick;
+    fn set_at(&mut self, t: Tick);
+}
+
+macro_rules! timed {
+    ($($t:ty),*) => {$(
+        impl Timed for $t {
+            fn at(&self) -> Tick {
+                self.at
+            }
+            fn set_at(&mut self, t: Tick) {
+                self.at = t;
+            }
+        }
+    )*};
+}
+
+timed!(
+    crate::envelope::EnvelopePoint,
+    crate::fx::TransformKey,
+    crate::fx::PluginKey,
+    crate::motion::HaloKey,
+    crate::space::Box3dKey
+);
+
+/// `keys` (in time order) at the times `to` gives them, which keeps their
+/// order: those it drops go, and of two landing at the same time the later
+/// one stays (what followed the time that closed).
+fn remap<K: Timed>(keys: &mut Vec<K>, to: &dyn Fn(Tick) -> Option<Tick>) {
+    if keys.is_empty() {
+        return;
+    }
+    let mut out: Vec<K> = Vec::with_capacity(keys.len());
+    for mut k in keys.drain(..) {
+        let Some(t) = to(k.at()) else { continue };
+        k.set_at(t);
+        if out.last().is_some_and(|l| l.at() == t) {
+            out.pop();
+        }
+        out.push(k);
+    }
+    *keys = out;
+}
+
+/// The keyframes of `effects`' plug-ins (on the timeline: a track's, a
+/// bus's), remapped by `to`.
+fn remap_effects(effects: &mut [crate::fx::Effect], to: &dyn Fn(Tick) -> Option<Tick>) {
+    for e in effects {
+        if let Some(fx) = e.plugin.as_deref_mut() {
+            remap_plugin(fx, to);
+        }
+    }
+}
+
+fn remap_plugin(fx: &mut crate::fx::PluginFx, to: &dyn Fn(Tick) -> Option<Tick>) {
+    for p in fx.params.values_mut() {
+        remap(&mut p.keys, to);
+    }
+}
+
+/// Where time `t` goes when `holes` close by `closings`
+/// ([`crate::edit::closed`]); `None` inside a part of one that closed:
+/// what was there went with the events deleted.
+fn closed_or_gone(t: Tick, holes: &[TimeRange], closings: &[Tick]) -> Option<Tick> {
+    holes
+        .iter()
+        .zip(closings)
+        .all(|(h, &c)| t <= h.start || t >= h.start + c)
+        .then(|| crate::edit::closed(t, holes, closings))
+}
+
+/// Where time `t` goes when what is from `from` on moves `delta`; `None`
+/// in the time it moves back over.
+fn shifted_or_gone(t: Tick, from: Tick, delta: Tick) -> Option<Tick> {
+    if t >= from {
+        Some((t + delta).max(Tick::ZERO))
+    } else if delta < Tick::ZERO && t > from + delta {
+        None
+    } else {
+        Some(t)
+    }
 }
 
 impl Project {
@@ -76,6 +165,74 @@ impl Project {
         }
         self.sort_commands();
         self.sort_cd();
+    }
+
+    /// A ripple's move of the automation of tracks `tracks` and, with
+    /// `busses`, of the bus tracks (the video bus's, the busses' and the
+    /// effects chains'): their envelopes, Track Motion's keyframes and
+    /// their effects' and compositors' keyframes — all on the timeline —
+    /// at the times `to` gives them.
+    fn ripple_automation(
+        &mut self,
+        tracks: &[TrackId],
+        busses: bool,
+        to: &dyn Fn(Tick) -> Option<Tick>,
+    ) {
+        for t in self.tracks.iter_mut().filter(|t| tracks.contains(&t.id)) {
+            for e in &mut t.envelopes {
+                remap(&mut e.points, to);
+            }
+            for m in [&mut t.motion, &mut t.parent_motion].into_iter().flatten() {
+                remap(&mut m.keys, to);
+                remap(&mut m.shadow.keys, to);
+                remap(&mut m.glow.keys, to);
+                remap(&mut m.space_keys, to);
+            }
+            remap_effects(&mut t.effects, to);
+            for c in [&mut t.compositor, &mut t.parent_compositor]
+                .into_iter()
+                .flatten()
+            {
+                remap_plugin(c, to);
+            }
+        }
+        if !busses {
+            return;
+        }
+        for e in &mut self.video_bus.envelopes {
+            remap(&mut e.points, to);
+        }
+        remap_effects(&mut self.video_output_fx, to);
+        for s in self.strips() {
+            if let Some(ch) = self.strip_channel_mut(s) {
+                for e in &mut ch.envelopes {
+                    remap(&mut e.points, to);
+                }
+                remap_effects(&mut ch.effects, to);
+            }
+        }
+    }
+
+    /// What a Track Select tool picks with a press at `at` (a BananaV mod,
+    /// as other editors' tools): every event reaching past `at` — or, with
+    /// `back`, starting before it —, on track `track` only or on all tracks
+    /// (`None`); with `grouped`, their groups' members too. Sorted.
+    pub fn track_selection(
+        &self,
+        at: Tick,
+        track: Option<TrackId>,
+        back: bool,
+        grouped: bool,
+    ) -> Vec<ClipId> {
+        let picked: Vec<ClipId> = self
+            .tracks
+            .iter()
+            .filter(|t| track.is_none_or(|id| t.id == id))
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| if back { c.start < at } else { c.end() > at })
+            .map(|c| c.id)
+            .collect();
+        self.edit_reach(&picked, grouped)
     }
 
     /// Opens `dur` of empty time at `at` on `tracks` (all tracks when empty):
@@ -182,11 +339,13 @@ impl Project {
         // parts and their groups become one group.
         let mut joined: Vec<ClipId> = Vec::new();
         for &(l, rt, kind) in &pairs {
+            // The crossfade first: the fade each part had at its other end
+            // keeps what the part has left.
             if let Some(c) = self.clip_mut(l) {
-                c.fade_out = c.fade_out.max(overlap);
+                c.fade_out_at_least(overlap);
             }
             if let Some(c) = self.clip_mut(rt) {
-                c.fade_in = c.fade_in.max(overlap);
+                c.fade_in_at_least(overlap);
                 if kind == TrackKind::Video
                     && let Some(fx) = video
                 {
@@ -305,7 +464,9 @@ impl Project {
             }
             t.sort();
         }
-        if scope != RippleScope::AffectedTracks {
+        let busses = scope != RippleScope::AffectedTracks;
+        self.ripple_automation(&tracks, busses, &|t| shifted_or_gone(t, next_start, delta));
+        if busses {
             self.shift_markers_from(next_start, delta);
         }
         Ok(delta)
@@ -395,8 +556,10 @@ impl Project {
     }
 
     /// Deletes the clips (with their groups) and closes the holes like
-    /// Options › Ripple: on the affected tracks only, also moving markers and
-    /// regions, or on every track.
+    /// Options › Ripple: on the affected tracks only; also moving the bus
+    /// tracks' automation, the markers and regions; or on every track. The
+    /// tracks' envelopes and keyframes go as their events do (those in the
+    /// time that closed go with the events deleted).
     pub fn delete_clips_rippled(&mut self, ids: &[ClipId], scope: RippleScope) -> Result<()> {
         self.delete_events_rippled(ids, scope, true)
     }
@@ -420,23 +583,45 @@ impl Project {
                 affected.push(t.id);
             }
         }
+        // How far each hole closes for the markers and the other tracks:
+        // as far as on the track it is on — less than its length where an
+        // event left there starts inside it (`hole_closings`).
+        let holes = crate::edit::union(&ranges);
+        let mut closings: Vec<Tick> = holes.iter().map(|h| h.duration).collect();
+        // Each affected track's own holes and how far they close: its
+        // envelopes and keyframes go as its events do.
+        let mut own_holes: Vec<(TrackId, Vec<TimeRange>, Vec<Tick>)> = Vec::new();
+        for t in &self.tracks {
+            let (gone, left): (Vec<_>, Vec<_>) = t
+                .clips
+                .iter()
+                .partition(|c| doomed.binary_search(&c.id).is_ok());
+            let own: Vec<TimeRange> = gone.iter().map(|c| c.range()).collect();
+            let own = crate::edit::union(&own);
+            let starts: Vec<Tick> = left.iter().map(|c| c.start).collect();
+            let own_closings = crate::edit::hole_closings(&own, &starts);
+            for (h, &closing) in own.iter().zip(&own_closings) {
+                let whole = holes
+                    .iter()
+                    .position(|u| u.start <= h.start && h.end() <= u.end());
+                if let Some(k) = whole {
+                    closings[k] = closings[k].min(holes[k].duration - (h.duration - closing));
+                }
+            }
+            if !own.is_empty() {
+                own_holes.push((t.id, own, own_closings));
+            }
+        }
         self.delete_events(&doomed, true, false)?;
+        for (track, own, own_closings) in &own_holes {
+            self.ripple_automation(&[*track], false, &|t| closed_or_gone(t, own, own_closings));
+        }
         if scope == RippleScope::AffectedTracks {
             return Ok(());
         }
-        let holes = crate::edit::union(&ranges);
-        let shifted = |t: Tick| -> Tick {
-            let mut out = t;
-            for h in &holes {
-                if t >= h.end() {
-                    out -= h.duration;
-                } else if t > h.start {
-                    // Inside a hole: lands where the hole began.
-                    out -= t - h.start;
-                }
-            }
-            out
-        };
+        self.ripple_automation(&[], true, &|t| closed_or_gone(t, &holes, &closings));
+        // Inside a hole: lands where the hole began.
+        let shifted = |t: Tick| crate::edit::closed(t, &holes, &closings);
         for m in &mut self.markers {
             m.time = shifted(m.time);
         }
@@ -465,18 +650,38 @@ impl Project {
                 }
                 t.sort();
             }
+            let others: Vec<TrackId> = self
+                .tracks
+                .iter()
+                .map(|t| t.id)
+                .filter(|id| !affected.contains(id))
+                .collect();
+            self.ripple_automation(&others, false, &|t| closed_or_gone(t, &holes, &closings));
         }
         Ok(())
     }
 
-    /// Removes media that no event uses (Tools › Clean Project Media).
-    /// Returns how many were removed.
+    /// Removes media that no event uses (Tools › Clean Project Media) —
+    /// a subclip's media is in use —, each as [`Self::remove_media`] does:
+    /// out of the bins, the tags and the storyboards too. Returns how many
+    /// were removed.
     pub fn remove_unused_media(&mut self) -> usize {
-        let used: Vec<crate::model::MediaId> =
-            self.clips().flat_map(|(_, c)| c.take_media()).collect();
-        let before = self.media.len();
-        self.media.retain(|m| used.contains(&m.id));
-        before - self.media.len()
+        let used: std::collections::HashSet<crate::model::MediaId> = self
+            .clips()
+            .flat_map(|(_, c)| c.take_media())
+            .chain(self.subclips.iter().map(|s| s.parent))
+            .collect();
+        let unused: Vec<crate::model::MediaId> = self
+            .media
+            .iter()
+            .map(|m| m.id)
+            .filter(|id| !used.contains(id))
+            .collect();
+        for &id in &unused {
+            // None of them has events or subclips: only what names it goes.
+            let _ = self.remove_media(id);
+        }
+        unused.len()
     }
 
     /// Slip: shows a different part of the media inside the clip (and its
@@ -829,6 +1034,216 @@ mod tests {
         assert_eq!(p.remove_unused_media(), 0);
     }
 
+    /// The Track Select tools: forward, every event reaching past the
+    /// press (the one under it too); back, every event starting before it;
+    /// on all tracks or one, groups whole unless left out.
+    #[test]
+    fn track_selection_picks_from_the_press_onward_or_back() {
+        // A from 0 to 4 s and B from 6 to 10 s on the first track; on
+        // another, C from 2 to 8 s grouped with B, and D from 9 s.
+        let (mut p, a, b) = two_clips();
+        let v = p.tracks[0].id;
+        let other = p.add_track(crate::model::TrackKind::Audio);
+        let m = p.clip(a).unwrap().media;
+        let c = p.insert_media(m, s(2), None, Some(other)).unwrap()[0];
+        p.trim_end(c, s(8)).unwrap();
+        let d = p.insert_media(m, s(9), None, Some(other)).unwrap()[0];
+        p.group_clips(&[b, c]);
+        let sorted = |mut v: Vec<ClipId>| {
+            v.sort();
+            v
+        };
+        // Forward from 3 s, all tracks: A (still under it), B, C, D.
+        assert_eq!(
+            p.track_selection(s(3), None, false, true),
+            sorted(vec![a, b, c, d])
+        );
+        // From 5 s: A ended before, C reaches past it.
+        assert_eq!(
+            p.track_selection(s(5), None, false, true),
+            sorted(vec![b, c, d])
+        );
+        // Its track only (Shift): B, and C with it, its group.
+        assert_eq!(
+            p.track_selection(s(5), Some(v), false, true),
+            sorted(vec![b, c])
+        );
+        // Its track only, groups left out (Alt+Shift): B alone.
+        assert_eq!(p.track_selection(s(5), Some(v), false, false), vec![b]);
+        // Back from 5 s: A and C start before; C's group brings B.
+        assert_eq!(
+            p.track_selection(s(5), None, true, true),
+            sorted(vec![a, b, c])
+        );
+        assert_eq!(p.track_selection(s(5), Some(other), true, false), vec![c]);
+    }
+
+    /// The times of an envelope's points.
+    fn times(e: &crate::envelope::Envelope) -> Vec<Tick> {
+        e.points.iter().map(|p| p.at).collect()
+    }
+
+    /// An envelope of `kind` with points at 0 and at `at` (seconds).
+    fn envelope(kind: crate::EnvelopeKind, at: &[i64]) -> crate::envelope::Envelope {
+        let mut e = crate::envelope::Envelope::new(kind);
+        for &t in at {
+            e.points.push(crate::envelope::EnvelopePoint {
+                at: s(t),
+                ..e.points[0]
+            });
+        }
+        e
+    }
+
+    /// The three ripples move envelopes and keyframes as VEGAS's: the
+    /// affected tracks' always (those in the time that closed going with
+    /// the events deleted); the bus tracks' — the video bus's, a bus's —
+    /// with Affected Tracks, Bus Tracks, Markers, and Regions; the other
+    /// tracks' with All Tracks, Markers, and Regions.
+    #[test]
+    fn ripples_move_envelopes_and_keyframes_by_scope() {
+        use crate::EnvelopeKind as K;
+        // A from 0 to 4 s and B from 6 s on the first track; another
+        // track, a bus and the video bus with automation from 7 s.
+        let (mut p, a, _) = two_clips();
+        let v = p.tracks[0].id;
+        let other = p.add_track(crate::model::TrackKind::Video);
+        let bus = p.add_bus().unwrap();
+        p.track_by_id_mut(v).unwrap().envelopes = vec![envelope(K::CompositeLevel, &[2, 5, 8])];
+        p.track_by_id_mut(v).unwrap().motion = Some(crate::motion::TrackMotion {
+            keys: [2, 7]
+                .map(|t| {
+                    crate::fx::TransformKey::new(
+                        s(t),
+                        crate::fx::Transform::default(),
+                        crate::fx::KeyCurve::Linear,
+                    )
+                })
+                .to_vec(),
+            ..Default::default()
+        });
+        p.track_by_id_mut(other).unwrap().envelopes = vec![envelope(K::CompositeLevel, &[7])];
+        p.bus_mut(bus).unwrap().channel.envelopes = vec![envelope(K::Volume, &[7])];
+        p.video_bus.envelopes = vec![envelope(K::FadeToColor, &[7])];
+        let track = |p: &Project, id| times(&p.track(id).unwrap().envelopes[0]);
+        let bus_times = |p: &Project| times(&p.bus(bus).unwrap().channel.envelopes[0]);
+        let video_bus = |p: &Project| times(&p.video_bus.envelopes[0]);
+        let zero = Tick::ZERO;
+
+        // Affected Tracks: the first track's (2 s went with A, the hole
+        // of 4 s closed), no other.
+        let mut q = p.clone();
+        q.delete_clips_rippled(&[a], RippleScope::AffectedTracks)
+            .unwrap();
+        assert_eq!(track(&q, v), vec![zero, s(1), s(4)]);
+        let keys: Vec<Tick> = q
+            .track(v)
+            .unwrap()
+            .motion
+            .as_ref()
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| k.at)
+            .collect();
+        assert_eq!(keys, vec![s(3)], "Track Motion's keyframes too");
+        assert_eq!(track(&q, other), vec![zero, s(7)]);
+        assert_eq!(bus_times(&q), vec![zero, s(7)]);
+        assert_eq!(video_bus(&q), vec![zero, s(7)]);
+        // Affected Tracks, Bus Tracks, Markers, and Regions: the bus
+        // tracks' too.
+        let mut q = p.clone();
+        q.delete_clips_rippled(&[a], RippleScope::AffectedTracksAndMarkers)
+            .unwrap();
+        assert_eq!(track(&q, v), vec![zero, s(1), s(4)]);
+        assert_eq!(track(&q, other), vec![zero, s(7)]);
+        assert_eq!(bus_times(&q), vec![zero, s(3)]);
+        assert_eq!(video_bus(&q), vec![zero, s(3)]);
+        // All Tracks, Markers, and Regions: every track's.
+        let mut q = p.clone();
+        q.delete_clips_rippled(&[a], RippleScope::All).unwrap();
+        assert_eq!(track(&q, other), vec![zero, s(3)]);
+        assert_eq!(bus_times(&q), vec![zero, s(3)]);
+
+        // A post-edit ripple after A grew to 5 s: B and what follows on
+        // its track come 1 s earlier, the point in the second it moved
+        // back over goes.
+        let mut q = p.clone();
+        q.track_by_id_mut(v).unwrap().envelopes = vec![envelope(K::CompositeLevel, &[2, 5, 6, 8])];
+        let _ = q.trim_end(a, s(5));
+        q.post_edit_ripple(a, RippleScope::AffectedTracks).unwrap();
+        assert_eq!(track(&q, v), vec![zero, s(2), s(5), s(7)]);
+        assert_eq!(bus_times(&q), vec![zero, s(7)]);
+        let _ = q.trim_end(a, s(4));
+        q.post_edit_ripple(a, RippleScope::AffectedTracksAndMarkers)
+            .unwrap();
+        assert_eq!(bus_times(&q), vec![zero, s(6)]);
+        assert_eq!(video_bus(&q), vec![zero, s(6)]);
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_rippled_delete_moves_markers_and_other_tracks_as_far_as_its_track() {
+        // A (0 to 10 s) crossfades into B (8 to 15 s) and C follows at
+        // 15 s, where another track's event starts too.
+        let mut p = Project::new(ProjectSettings::default());
+        let v = p.tracks[0].id;
+        let m = p.add_media(media(60));
+        let place = |p: &mut Project, from: i64, to: i64| {
+            let id = p.insert_media(m, s(from), Some(v), None).unwrap()[0];
+            p.trim_end(id, s(to)).unwrap();
+            id
+        };
+        let a = place(&mut p, 0, 10);
+        let b = place(&mut p, 8, 15);
+        let c = place(&mut p, 15, 20);
+        let other = p.add_track(crate::model::TrackKind::Audio);
+        let sound = p.insert_media(m, s(15), None, Some(other)).unwrap()[0];
+        for at in [4, 9, 15] {
+            p.add_marker(s(at));
+        }
+        p.delete_clips_rippled(&[a], RippleScope::All).unwrap();
+        // The hole closes up to B, 8 s: what was from there on comes 8 s
+        // earlier, on every track.
+        assert_eq!(p.clip(b).unwrap().start, Tick::ZERO);
+        assert_eq!(p.clip(c).unwrap().start, s(7));
+        assert_eq!(p.clip(sound).unwrap().start, s(7));
+        let marks: Vec<Tick> = p.markers.iter().map(|m| m.time).collect();
+        assert_eq!(marks, vec![Tick::ZERO, s(1), s(7)]);
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn cleaning_the_project_media_takes_what_named_the_media_too() {
+        use crate::storyboards::StoryCell;
+        let (mut p, a, _) = two_clips();
+        let used = p.clip(a).unwrap().media;
+        let unused = p.add_media(media(5));
+        let parent = p.add_media(media(8));
+        // The unused media in a bin, tagged and on a storyboard; another
+        // with no event either, but a subclip.
+        let bin = p.add_bin(None, "Shots").unwrap();
+        p.add_to_bin(bin, used).unwrap();
+        p.add_to_bin(bin, unused).unwrap();
+        assert!(p.add_tag(unused, "beach"));
+        let board = p.add_storyboard("Cut");
+        p.storyboard_drop(board, 0, StoryCell::of(unused, None), true);
+        p.storyboard_drop(board, 1, StoryCell::of(used, None), true);
+        let part = p
+            .add_subclip(parent, TimeRange::new(s(1), s(2)), false, "part")
+            .unwrap();
+        assert_eq!(p.remove_unused_media(), 1);
+        assert!(p.media(unused).is_none());
+        assert!(p.media(parent).is_some(), "a subclip's media stays");
+        assert!(p.subclip(part).is_some());
+        assert_eq!(p.bin(bin).unwrap().media, vec![used]);
+        assert!(p.media_tags.iter().all(|t| t.media != unused));
+        let cells: Vec<_> = p.storyboard(board).unwrap().cells.to_vec();
+        assert_eq!(cells, vec![StoryCell::of(used, None)]);
+        assert_eq!(p.remove_unused_media(), 0);
+        p.check_invariants().unwrap();
+    }
+
     #[test]
     fn slip_moves_media_inside_the_clip() {
         let (mut p, _, b) = two_clips();
@@ -903,6 +1318,41 @@ mod tests {
         let removed = p.smart_split(TimeRange::new(s(15), s(1)), &[], true, s(1), None);
         assert_eq!(removed, 0);
         assert_eq!(p.tracks[0].clips[1].start, s(3));
+    }
+
+    #[test]
+    fn smart_split_keeps_the_fades_within_short_parts() {
+        // A 10 s event fading in and out over 1 s; all of it taken out but
+        // a tenth of a second at each end, 5 frames of overlap asked for.
+        let mut p = Project::new(ProjectSettings::default());
+        let v = p.tracks[0].id;
+        let m = p.add_media(media(20));
+        let a = p.insert_media(m, Tick::ZERO, Some(v), None).unwrap()[0];
+        let _ = p.trim_end(a, s(10));
+        p.set_fades(a, Some(s(1)), Some(s(1))).unwrap();
+        let tenth = Tick(s(1).0 / 10);
+        let overlap = Tick(p.min_clip_duration().0 * 5);
+        let cut = TimeRange::from_bounds(tenth, s(10) - tenth);
+        assert_eq!(p.smart_split(cut, &[], true, overlap, None), 1);
+        p.check_invariants().unwrap();
+        // The parts overlap whole: the crossfade is all of each, nothing
+        // left of the fades they had.
+        let clips = &p.tracks[0].clips;
+        let (l, r) = (&clips[0], &clips[1]);
+        assert_eq!((l.duration, r.duration), (tenth, tenth));
+        assert_eq!((l.fade_in, l.fade_out), (Tick::ZERO, tenth));
+        assert_eq!((r.fade_in, r.fade_out), (tenth, Tick::ZERO));
+        // Longer parts keep what fits beside the crossfade.
+        let mut p = Project::new(ProjectSettings::default());
+        let v = p.tracks[0].id;
+        let m = p.add_media(media(20));
+        let a = p.insert_media(m, Tick::ZERO, Some(v), None).unwrap()[0];
+        let _ = p.trim_end(a, s(10));
+        p.set_fades(a, Some(s(3)), None).unwrap();
+        p.smart_split(TimeRange::new(s(2), s(4)), &[], true, s(1), None);
+        let l = &p.tracks[0].clips[0];
+        assert_eq!((l.duration, l.fade_in, l.fade_out), (s(2), s(1), s(1)));
+        p.check_invariants().unwrap();
     }
 
     #[test]

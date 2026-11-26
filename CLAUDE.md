@@ -11,7 +11,9 @@ user sees is BananaV's own.
 2. The part of **[docs/architecture.md](docs/architecture.md)** about what
    you touch — the crates and their layers, the project model, frames on
    the processor and on the graphics card, the effects, the plug-in hosts,
-   audio, the interface's windows, the platforms.
+   audio, the interface's windows, the platforms. Its Contents names every
+   part (`grep -n '^##' docs/architecture.md` gives their lines): read
+   that part, not the file; a new subject gets a part of its own there.
 3. **[docs/testing.md](docs/testing.md)** for how a change is checked, and
    [CONTRIBUTING.md](CONTRIBUTING.md) for building.
 4. [docs/ROADMAP.md](docs/ROADMAP.md) for what is done and what comes next;
@@ -38,12 +40,13 @@ user sees is BananaV's own.
   `teclado.json`, serde names, file names, egui ids). Numbers shown go
   through `crate::fmt`; layouts measure their texts (Portuguese runs a
   third longer). A new language is a catalog module and a line of
-  `languages!` in `i18n/mod.rs`. The eighteen partial languages
+  `languages!` in `i18n/mod.rs`. The nineteen partial languages
   (`zh_cn.rs`, `ru.rs`, `es_es.rs`, `de.rs`, `ja.rs`, `fr.rs`, `pl.rs`,
   `ko.rs`, `tr_tr.rs`, `zh_tw.rs`, `es_419.rs`, `th.rs`, `uk.rs`,
-  `it.rs`, `cs.rs`, `hu.rs`, `pt_pt.rs`, `sv.rs`) are not kept up with
-  new texts — the maintainer's decision: those show in English there;
-  only pt-BR gets every new text.
+  `it.rs`, `cs.rs`, `hu.rs`, `pt_pt.rs`, `sv.rs`, `ar.rs` — Arabic, right
+  to left through `i18n/rtl.rs`) are not kept up with new texts — the
+  maintainer's decision: those show in English there; only pt-BR gets
+  every new text.
 - **VEGAS is the spec, never the source.** The maintainer's VEGAS
   screenshots ("the user's prints" in the docs) give each window's layout;
   VEGAS's public Help gives the behaviour: read it first and name the
@@ -94,6 +97,10 @@ user sees is BananaV's own.
 
 - `cargo run --release -p bananav` runs it; `BANANAV_OPEN="Options.Preferences;…"`
   runs keyboard-map commands once it started.
+- `bananav <command>` (`bananav-cli` on Windows: `help` lists them) and
+  `bananav mcp`: the command line and the MCP server for AI agents
+  ([docs/agents.md](docs/agents.md)); without a window they never write
+  the user's settings.
 - `cargo test -p bv-ui-egui --test telas -- --ignored` (and `telas_inicio`,
   `telas_menus`, `telas_pt_br`) draws the interface into `target/telas`;
   `tools/capture_windows.ps1` captures the OS windows of a BananaV it

@@ -239,7 +239,12 @@ pub fn url_path(url: &str) -> Option<String> {
     if url.is_empty() {
         return None;
     }
-    if url.len() >= 5 && url[..5].eq_ignore_ascii_case("file:") {
+    // Its first five bytes, when they are whole letters (a name in another
+    // script may have one across them).
+    if url
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+    {
         let rest = &url[5..];
         let rest = match rest.strip_prefix("//") {
             Some(r) => match r.find('/') {

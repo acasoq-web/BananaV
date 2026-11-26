@@ -9,7 +9,6 @@ use bv_timeline::{
 use super::{Layout, Row, TimelineView};
 use crate::app::{BananaApp, MediaDrag, Tool};
 use crate::cursors::{self, Cursor};
-use crate::dock::Tab;
 use crate::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, pos2,
     vec2,
@@ -150,6 +149,9 @@ pub(crate) enum Drag {
     Move {
         clip: ClipId,
         grab: Tick,
+        /// The events alone, their groups left (the Track Select tools'
+        /// Alt+Shift).
+        ungrouped: bool,
     },
     /// An event double-clicked and dragged (VEGAS's): the time selection
     /// from its edges out to the next fade or event edge on its track.
@@ -265,6 +267,17 @@ pub(crate) enum Drag {
         index: Option<usize>,
         origin: (Tick, f32),
         moved: bool,
+    },
+    /// Dragging one of the envelope points picked ([`super::envelopes::Picks`]):
+    /// all of them go along, by the time and the share of the lane the
+    /// grabbed one (`grab`: its index, time and value) goes. `points`: each
+    /// one's index, time (the envelope's own) and value when it began.
+    EnvPoints {
+        track: TrackId,
+        clip: Option<ClipId>,
+        kind: bv_timeline::EnvelopeKind,
+        points: Vec<(usize, Tick, f32)>,
+        grab: (usize, Tick, f32),
     },
     /// Dragging an envelope's line, as VEGAS's: its segment's points
     /// (`points` as they were: index, time, value) up or down, their times
@@ -385,6 +398,79 @@ fn paint_tip(painter: &egui::Painter, at: Pos2, text: String) {
         egui::StrokeKind::Inside,
     );
     painter.galley(r.min + vec2(3.0, 3.0), galley, theme::text());
+}
+
+/// Where the blue handle of an event's level line is (`ci` its index in
+/// `track`, `r` its rectangle): in the middle of the line between the
+/// fades, of its part on screen, as VEGAS's (an event without fades: of
+/// the part the next one does not cover).
+fn level_handle_at(
+    view: &TimelineView,
+    l: &Layout,
+    track: &bv_timeline::Track,
+    ci: usize,
+    clip: &bv_timeline::Clip,
+    r: Rect,
+    auto_crossfade: bool,
+) -> Pos2 {
+    let on_screen = uncovered(view, l, track, ci, r).intersect(l.lanes);
+    let x = match level_span(view, track, clip, r, auto_crossfade) {
+        Some((a, b)) => {
+            let (lo, hi) = (a.max(on_screen.left()), b.min(on_screen.right()));
+            if hi > lo {
+                (lo + hi) / 2.0
+            } else {
+                on_screen.center().x.clamp(a, b)
+            }
+        }
+        None => on_screen.center().x,
+    };
+    pos2(x, level_y(r, clip.level))
+}
+
+/// Where the level handle at `center` takes a press: its shape and a
+/// little around it.
+fn level_handle_rect(center: Pos2) -> Rect {
+    Rect::from_min_max(center + vec2(-12.0, -3.0), center + vec2(12.0, 4.0)).expand(2.0)
+}
+
+/// Whether `pos` is on an event's level handle: there the level line is
+/// grabbed even where an envelope's line or points lie on it (elsewhere
+/// those come first) — the user's.
+fn on_level_handle(view: &TimelineView, l: &Layout, project: &Project, pos: Pos2) -> bool {
+    let Hit::Clip {
+        clip,
+        zone: Zone::Level,
+    } = hit(view, l, project, pos)
+    else {
+        return false;
+    };
+    let Some(row) = l.row_at(pos.y) else {
+        return false;
+    };
+    let Some(track) = project.track(row.track) else {
+        return false;
+    };
+    let Some((ci, c)) = track.clips.iter().enumerate().find(|(_, c)| c.id == clip) else {
+        return false;
+    };
+    let r = clip_rect(view, l, row, c.start, c.end());
+    let at = level_handle_at(view, l, track, ci, c, r, project.auto_crossfade);
+    level_handle_rect(at).contains(pos)
+}
+
+/// The envelope's point or line under `pos`, but on an event's level
+/// handle (the level line's there).
+fn env_hit(
+    view: &TimelineView,
+    l: &Layout,
+    project: &Project,
+    pos: Pos2,
+) -> Option<super::envelopes::EnvHit> {
+    if on_level_handle(view, l, project, pos) {
+        return None;
+    }
+    super::envelopes::hit(view, l, project, pos)
 }
 
 /// The blue handle in the middle of an event's level line, shown while the
@@ -680,8 +766,18 @@ fn hit(view: &TimelineView, l: &Layout, project: &Project, pos: Pos2) -> Hit {
         Zone::SnapOffset
     } else if let Some((clip, zone)) = edge_at(view, l, row, track, project.auto_crossfade, pos) {
         return Hit::Clip { clip, zone };
-    } else if (pos.y - level_y(r, clip.level)).abs() <= 4.0
-        && (level_from..=level_to).contains(&pos.x)
+    } else if ((pos.y - level_y(r, clip.level)).abs() <= 4.0
+        && (level_from..=level_to).contains(&pos.x))
+        || level_handle_rect(level_handle_at(
+            view,
+            l,
+            track,
+            idx,
+            clip,
+            r,
+            project.auto_crossfade,
+        ))
+        .contains(pos)
     {
         Zone::Level
     } else {
@@ -774,10 +870,13 @@ fn wheel(
     let over_bus = over_bus_headers || l.bus_lanes.contains(pos);
     let over_lanes =
         l.lanes.contains(pos) || l.ruler.contains(pos) || l.marker_bar.contains(pos) || over_bus;
-    let over_headers = l.headers.contains(pos) || over_bus_headers;
+    // Over a scroll bar the wheel moves it.
+    let over_v = l.vscroll.contains(pos);
+    let over_h = l.hscroll.contains(pos);
+    let over_headers = l.headers.contains(pos) || over_bus_headers || over_v;
     // Over an output meter the wheel changes the meters' range; over a
     // level slider it moves the slider.
-    if (!over_lanes && !over_headers)
+    if (!over_lanes && !over_headers && !over_h)
         || (!app.settings.hide_track_meters
             && super::headers::over_meter(l, pos, app.settings.track_meters_across))
         || view.wheel_sliders.iter().any(|r| r.contains(pos))
@@ -787,6 +886,14 @@ fn wheel(
     let (scroll, zoom, m) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers));
     let (shift, alt) = (m.shift, m.alt);
     let max_scroll = (l.content_height - l.lanes.height() + 20.0).max(0.0);
+    if over_h {
+        let d = scroll.x + scroll.y;
+        if d != 0.0 {
+            view.view_start =
+                (view.view_start - Tick((d as f64 * view.ticks_per_px) as i64)).max(Tick::ZERO);
+        }
+        return;
+    }
     if m.command && shift {
         let (notches, _) = ui.input(|i| crate::widgets::wheel_notches(&i.events));
         view.wheel_rest += notches;
@@ -859,8 +966,7 @@ fn nudge(view: &mut TimelineView, app: &mut BananaApp, notches: i64, frames: boo
     if app.scrub_rate != 0.0 {
         app.scrub_rate = (app.scrub_rate + rate).clamp(-max, max);
     } else if app.is_playing() {
-        app.play_rate = (app.play_rate + rate).clamp(0.1, max);
-        app.restart_if_playing();
+        app.set_play_rate((app.play_rate + rate).min(max));
     } else if frames {
         app.step_frames(notches);
     } else {
@@ -946,7 +1052,12 @@ fn autoscroll(
 /// was on the timeline.
 fn edge_held(view: &mut TimelineView, ui: &egui::Ui, l: &Layout, p: Pos2, scroll: bool) -> Pos2 {
     let (across, down) = match &view.drag {
-        Some(Drag::Move { .. } | Drag::Marquee { .. } | Drag::EnvPoint { .. }) => (true, true),
+        Some(
+            Drag::Move { .. }
+            | Drag::Marquee { .. }
+            | Drag::EnvPoint { .. }
+            | Drag::EnvPoints { .. },
+        ) => (true, true),
         Some(
             Drag::Level { .. } | Drag::EnvRange { .. } | Drag::ZoomBox { .. } | Drag::Slip { .. },
         )
@@ -1161,8 +1272,10 @@ fn selection_edge(
     keys: egui::Modifiers,
     at: Hit,
 ) -> Option<Tick> {
-    if matches!(app.tool, Tool::SplitTrim | Tool::Select | Tool::Zoom)
-        || (keys.command && keys.alt && keys.shift)
+    if matches!(
+        app.tool,
+        Tool::SplitTrim | Tool::Select | Tool::Zoom | Tool::TrackSelect { .. }
+    ) || (keys.command && keys.alt && keys.shift)
         || !matches!(
             at,
             Hit::Nothing
@@ -1208,6 +1321,13 @@ fn hover_pointer(
     match tool {
         Tool::Zoom => return Some(Cursor::Magnifier),
         Tool::Select => return Some(Cursor::SelectTool),
+        // Shift held: its track only.
+        Tool::TrackSelect { back } => {
+            return Some(Cursor::TrackSelect {
+                back,
+                single: keys.shift,
+            });
+        }
         _ => {}
     }
     let mut at = hit(view, l, project, p);
@@ -1302,7 +1422,9 @@ fn drag_pointer(drag: &Drag, tool: Tool, scrub: bool, began: Option<Cursor>) -> 
             moved: false,
             ..
         } => Some(Cursor::HandPoint),
-        Drag::EnvPoint { .. } | Drag::EnvRange { .. } => Some(Cursor::HandMove),
+        Drag::EnvPoint { .. } | Drag::EnvPoints { .. } | Drag::EnvRange { .. } => {
+            Some(Cursor::HandMove)
+        }
         Drag::EnvSegment { moved: false, .. } => Some(Cursor::HandUpDown),
         Drag::EnvSegment { .. } => Some(Cursor::HandMove),
         Drag::EnvPaint { .. } => Some(Cursor::PencilCrosshair),
@@ -1586,6 +1708,76 @@ fn alone(p: &mut Project, ungrouped: bool, edit: impl FnOnce(&mut Project)) {
     p.ignore_groups = was;
 }
 
+/// A Move drag's step: event `id` to `start` (onto `target`, as many
+/// tracks up or down for `others`, the other selected events), `movers`
+/// all that go, none before the timeline's start; the envelope `points`
+/// picked along as far (BananaV Mods), else their envelopes with them
+/// under Options › Lock Envelopes to Events (`before`: the project when
+/// the drag began). How far they went.
+#[allow(clippy::too_many_arguments)]
+fn move_events(
+    p: &mut Project,
+    before: &Project,
+    id: ClipId,
+    start: Tick,
+    target: Option<TrackId>,
+    movers: &[ClipId],
+    others: &[ClipId],
+    points: &[super::envelopes::Picks],
+) -> Tick {
+    let Some(from) = p.clip(id).map(|c| c.start) else {
+        return Tick::ZERO;
+    };
+    // None of them before the start of the timeline (nor the envelope
+    // points picked along, but one at the start).
+    let earliest = movers
+        .iter()
+        .filter_map(|&m| p.clip(m))
+        .map(|c| c.start)
+        .chain(
+            points
+                .iter()
+                .flat_map(|k| k.times.iter().copied())
+                .filter(|t| *t > Tick::ZERO),
+        )
+        .min()
+        .unwrap_or(from);
+    let delta = (start - from).max(-earliest);
+    // As many tracks up or down, onto tracks of their kind.
+    let index = |p: &Project, id: ClipId| {
+        p.tracks
+            .iter()
+            .position(|t| t.clips.iter().any(|c| c.id == id))
+    };
+    let rows = match (target.and_then(|t| p.track_index(t)), index(&*p, id)) {
+        (Some(to), Some(at)) => to as i64 - at as i64,
+        _ => 0,
+    };
+    let _ = p.move_clip(id, from + delta, target);
+    for &o in others {
+        let (Some(s), Some(at)) = (p.clip(o).map(|c| c.start), index(&*p, o)) else {
+            continue;
+        };
+        let kind = p.tracks[at].kind;
+        let to = usize::try_from(at as i64 + rows)
+            .ok()
+            .and_then(|i| p.tracks.get(i))
+            .filter(|t| t.kind == kind && rows != 0)
+            .map(|t| t.id);
+        let _ = p.move_clip(o, s + delta, to);
+    }
+    // Options › BananaV Mods: the envelope points picked along go as far;
+    // else Options › Lock Envelopes to Events.
+    if !points.is_empty() {
+        for k in points {
+            let _ = p.carry_picked_points(before, k.track, k.kind, &k.times, delta);
+        }
+    } else if p.lock_envelopes {
+        p.carry_envelopes(before, movers);
+    }
+    delta
+}
+
 /// What the menu after a right-drag of events does.
 #[derive(Clone, Copy, PartialEq)]
 enum DropChoice {
@@ -1751,10 +1943,13 @@ pub(crate) fn interact(
     app: &mut BananaApp,
     l: &Layout,
 ) {
-    let project = app.project().clone();
+    let project = app.project_snapshot();
     let pointer = ui.input(|i| i.pointer.latest_pos());
     let resp = ui.interact(l.lanes, ui.id().with("faixas"), Sense::click_and_drag());
-    if ui.rect_contains_pointer(l.lanes) || ui.rect_contains_pointer(l.headers) {
+    if [l.lanes, l.headers, l.vscroll, l.hscroll]
+        .into_iter()
+        .any(|r| ui.rect_contains_pointer(r))
+    {
         wheel(view, ui, app, l, pointer);
     }
     // No selection rectangle: nothing it began from.
@@ -1778,7 +1973,7 @@ pub(crate) fn interact(
     let env_tool = matches!(app.tool, Tool::Edit | Tool::Envelope);
     let env_hover = pointer
         .filter(|_| env_tool && resp.hovered() && app.media_drag.is_none())
-        .and_then(|p| super::envelopes::hit(view, l, &project, p));
+        .and_then(|p| env_hit(view, l, &project, p));
     if let (Some(h), Some(p)) = (env_hover, pointer)
         && view.drag.is_none()
     {
@@ -1805,7 +2000,8 @@ pub(crate) fn interact(
     // hovered or dragged ("Opacity is 52 %", "Gain is −4.1 dB").
     let level_clip = match (&view.drag, pointer) {
         (Some(Drag::Level { clip, .. }), _) => Some(*clip),
-        (None, Some(p)) if resp.hovered() && app.media_drag.is_none() => {
+        // An envelope there takes the press: its value alone shows.
+        (None, Some(p)) if resp.hovered() && app.media_drag.is_none() && env_hover.is_none() => {
             match hit(view, l, &project, p) {
                 Hit::Clip {
                     clip,
@@ -1854,17 +2050,26 @@ pub(crate) fn interact(
         );
         paint_tip(&painter, p, text);
     }
-    // A point dragged: the diamond and the tooltip go with it.
-    if let (
+    // A point dragged (the one grabbed of several picked): the diamond
+    // and the tooltip go with it.
+    let dragged_point = match &view.drag {
         Some(Drag::EnvPoint {
             track,
             clip,
             kind,
             index,
             ..
-        }),
-        Some(p),
-    ) = (&view.drag, pointer)
+        }) => Some((track, clip, kind, *index)),
+        Some(Drag::EnvPoints {
+            track,
+            clip,
+            kind,
+            grab,
+            ..
+        }) => Some((track, clip, kind, Some(grab.0))),
+        _ => None,
+    };
+    if let (Some((track, clip, kind, index)), Some(p)) = (dragged_point, pointer)
         && let Some(r) = super::envelopes::lane_for(view, l, &project, *track, *clip)
     {
         let painter = ui.ctx().layer_painter(egui::LayerId::new(
@@ -1930,7 +2135,10 @@ pub(crate) fn interact(
         zone: zone @ (Zone::Start | Zone::End),
     }) = edge
         && app.settings.prefs.edge_expanded_edit
-        && !matches!(app.tool, Tool::Envelope | Tool::Zoom)
+        && !matches!(
+            app.tool,
+            Tool::Envelope | Tool::Zoom | Tool::TrackSelect { .. }
+        )
     {
         let end = zone == Zone::End;
         match view.edge_trim {
@@ -1940,22 +2148,11 @@ pub(crate) fn interact(
     } else if double
         && env_tool
         && let Some(p) = resp.interact_pointer_pos()
-        && let Some(h) = super::envelopes::hit(view, l, &project, p)
+        && let Some(h) = env_hit(view, l, &project, p)
         && h.point.is_none()
     {
         let at = view.snap(app, &project, h.at, &[Tick::ZERO], &[]);
-        let owner = h.owner();
-        let added = app.edit(|pr| {
-            let at = super::envelopes::local(pr, owner, at);
-            pr.set_envelope_point(owner, h.kind, at, h.value)
-        });
-        new_point = added
-            .and_then(|i| {
-                super::envelopes::envelope_of(app.project(), owner, h.kind)?
-                    .points
-                    .get(i)
-            })
-            .map(|pt| super::envelopes::timeline_time(app.project(), owner, pt.at));
+        new_point = add_envelope_point(app, h, at);
     } else if double
         && app.tool == Tool::Edit
         && let Some(p) = resp.interact_pointer_pos()
@@ -2029,7 +2226,7 @@ pub(crate) fn interact(
         && resp.is_pointer_button_down_on()
         && ui.input(|i| i.pointer.primary_pressed())
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
-        && let Some(h) = super::envelopes::hit(view, l, &project, origin)
+        && let Some(h) = env_hit(view, l, &project, origin)
         && h.point.is_none()
         && h.clip.is_none()
     {
@@ -2047,7 +2244,10 @@ pub(crate) fn interact(
         && env_hover.is_none()
         && let Some(p) = pointer
         && resp.hovered()
-        && !matches!(app.tool, Tool::Envelope | Tool::Select | Tool::Zoom)
+        && !matches!(
+            app.tool,
+            Tool::Envelope | Tool::Select | Tool::Zoom | Tool::TrackSelect { .. }
+        )
         && let Hit::Clip {
             clip,
             zone: zone @ (Zone::Start | Zone::End | Zone::Body),
@@ -2071,6 +2271,45 @@ pub(crate) fn interact(
             });
         }
     }
+    // The Track Select tools (a mod, Options › BananaV Mods…): the press
+    // picks every event from there to the end — or to the start — on all
+    // tracks, with Shift on its own (Alt+Shift: their groups left out); a
+    // drag from one of them moves them all (`start_drag`), a click does
+    // no more.
+    if let Tool::TrackSelect { back } = app.tool
+        && view.drag.is_none()
+        && app.media_drag.is_none()
+        && !middle
+        && !view.ignore_press
+        && resp.is_pointer_button_down_on()
+        && ui.input(|i| i.pointer.primary_pressed())
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        && l.lanes.contains(origin)
+    {
+        let at = view.time_at(l, origin.x).max(Tick::ZERO);
+        let track = l.row_at(origin.y).map(|r| r.track);
+        if !modifiers.shift || track.is_some() {
+            let track = track.filter(|_| modifiers.shift);
+            let grouped = !(modifiers.shift && modifiers.alt);
+            app.selection = project
+                .track_selection(at, track, back, grouped)
+                .into_iter()
+                .collect();
+            // Options › BananaV Mods: the track envelopes' points from
+            // there on (or back) too.
+            view.env_with = if app.settings.mods.env_with_events {
+                let tracks: Vec<TrackId> = match track {
+                    Some(t) => vec![t],
+                    None => project.tracks.iter().map(|t| t.id).collect(),
+                };
+                super::envelopes::track_points(view, &project, tracks, |t| {
+                    if back { t <= at } else { t >= at }
+                })
+            } else {
+                Vec::new()
+            };
+        }
+    }
     // A needle grabbed by its line follows the mouse from the press, as
     // VEGAS's (egui's drag starts only some pixels away).
     if view.drag.is_none()
@@ -2088,7 +2327,7 @@ pub(crate) fn interact(
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         && !on_handle(hit(view, l, &project, origin))
         // An envelope's point or line under it comes first.
-        && super::envelopes::hit(view, l, &project, origin).is_none()
+        && env_hit(view, l, &project, origin).is_none()
         && let Some(n) = view.needle_line(app, l, origin.x)
     {
         if n == super::Needle::Playhead {
@@ -2109,12 +2348,32 @@ pub(crate) fn interact(
         // events in its rectangle (a right-click still opens the menu).
         let right = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
         view.right_drag = right;
+        // A double-click held on an envelope's line and dragged, as
+        // VEGAS's: the point goes there at the second press, and the drag
+        // pulls it (the users').
+        let pressed = ui.input(|i| i.pointer.press_start_time());
+        let on_envelope = (env_tool && !right)
+            .then(|| env_hit(view, l, &project, origin))
+            .flatten();
+        let line_again = on_envelope.filter(|h| {
+            h.point.is_none()
+                && !modifiers.any()
+                && pressed.is_some_and(|t| crate::widgets::pressed_again(ui, t, origin))
+        });
+        if let Some(h) = line_again
+            && let Some(at) = add_envelope_point(app, h, h.at)
+        {
+            app.seek(at);
+            let now = app.project_snapshot();
+            start_drag(view, app, l, &now, origin, modifiers, right);
+        }
         // The event clicked just before, pressed again and dragged: the
         // selection grows from it (its time selected first, as a
-        // double-click selects it).
-        let again = ui
-            .input(|i| i.pointer.press_start_time())
-            .zip(view.event_click);
+        // double-click selects it) — not on an envelope, whose the press
+        // is.
+        let again = pressed
+            .zip(view.event_click)
+            .filter(|_| on_envelope.is_none() && view.drag.is_none());
         let extend = match (hit(view, l, &project, origin), again) {
             (
                 Hit::Clip {
@@ -2132,7 +2391,9 @@ pub(crate) fn interact(
             }
             _ => None,
         };
-        if let Some(clip) = extend
+        if view.drag.is_some() {
+            // The envelope's new point, dragged.
+        } else if let Some(clip) = extend
             && let Some(c) = project.clip(clip)
         {
             let r = bv_core::TimeRange::new(c.start, c.duration);
@@ -2196,6 +2457,8 @@ pub(crate) fn interact(
     if resp.clicked()
         && !view.ignore_press
         && !on_label
+        // The Track Select tools' press did it all.
+        && !matches!(app.tool, Tool::TrackSelect { .. })
         && let Some(p) = resp.interact_pointer_pos()
     {
         // Noted for a double-click and drag.
@@ -2249,7 +2512,7 @@ pub(crate) fn interact(
             view.context = ContextTarget::OfxEnvelope;
         } else if let Some(track) = super::ofx_envelopes::area_at(view, l, &project, p) {
             view.context = ContextTarget::OfxArea(track);
-        } else if let Some(h) = super::envelopes::hit(view, l, &project, p)
+        } else if let Some(h) = env_hit(view, l, &project, p)
             .filter(|_| matches!(app.tool, Tool::Edit | Tool::Envelope))
         {
             view.context = ContextTarget::Envelope(h);
@@ -2283,6 +2546,27 @@ pub(crate) fn interact(
     }
     super::envelopes::set_to_ui(view, ui, app, l, &project);
     drop_media(view, ui, app, l, &project, pointer);
+    // No event picked, or the mod off: no points along.
+    if (app.selection.is_empty() || !app.settings.mods.env_with_events) && view.drag.is_none() {
+        view.env_with.clear();
+    }
+}
+
+/// A point on the envelope `h` is on, at `at` with the value it has there
+/// (one undo step); where it went on the timeline.
+fn add_envelope_point(app: &mut BananaApp, h: super::envelopes::EnvHit, at: Tick) -> Option<Tick> {
+    let owner = h.owner();
+    let added = app.edit(|pr| {
+        let at = super::envelopes::local(pr, owner, at);
+        pr.set_envelope_point(owner, h.kind, at, h.value)
+    });
+    added
+        .and_then(|i| {
+            super::envelopes::envelope_of(app.project(), owner, h.kind)?
+                .points
+                .get(i)
+        })
+        .map(|pt| super::envelopes::timeline_time(app.project(), owner, pt.at))
 }
 
 /// A double-click (`triple`: a third click) on an empty spot: the gap
@@ -2498,13 +2782,19 @@ fn start_drag(
     // preference allows it). Shift makes a time selection instead; Alt
     // slips.
     let prefs = &app.settings.prefs;
+    // A drag away from the envelopes' points lets the picked ones go.
+    let on_point = matches!(app.tool, Tool::Edit | Tool::Envelope)
+        && env_hit(view, l, project, origin).is_some_and(|h| h.point.is_some());
+    if !on_point {
+        view.env_picks = None;
+    }
     let over_event = matches!(hit(view, l, project, origin), Hit::Clip { .. });
     // An event's handles (edges, fades, level) come first: after a split
     // at the cursor its new edges are trimmed there; and an envelope's
     // points and line, as the pointer over them shows.
     let handle = on_handle(hit(view, l, project, origin))
         || (matches!(app.tool, Tool::Edit | Tool::Envelope)
-            && super::envelopes::hit(view, l, project, origin).is_some());
+            && env_hit(view, l, project, origin).is_some());
     if !right && !shift && !alt && matches!(app.tool, Tool::Edit | Tool::Envelope) {
         let grabbed = if prefs.cursor_drag && !handle {
             view.needle_line(app, l, origin.x)
@@ -2512,8 +2802,12 @@ fn start_drag(
             None
         };
         // Ctrl scrubs, by the cursor's line too (as VEGAS's), never while
-        // recording.
-        let scrub = add && (!over_event || prefs.ctrl_scrub_over_events) && app.recording.is_none();
+        // recording; not from an envelope's point (Ctrl picks points: the
+        // drag moves them).
+        let scrub = add
+            && !on_point
+            && (!over_event || prefs.ctrl_scrub_over_events)
+            && app.recording.is_none();
         let needle = if scrub {
             Some(super::Needle::Cursor)
         } else {
@@ -2532,7 +2826,7 @@ fn start_drag(
     }
     if !right
         && matches!(app.tool, Tool::Edit | Tool::Envelope)
-        && let Some(h) = super::envelopes::hit(view, l, project, origin)
+        && let Some(h) = env_hit(view, l, project, origin)
     {
         // (Shift on a track envelope's line took the press already:
         // `press_envelope_line`.)
@@ -2559,6 +2853,29 @@ fn start_drag(
             return false;
         }
         let owner = h.owner();
+        // One of several points picked: they all go along; another point:
+        // picked alone.
+        let picked = h.point.and_then(|i| {
+            let picks = view.env_picks.as_ref()?;
+            let ix = picks.indices(project);
+            (picks.has(project, &h, i) && ix.len() > 1).then_some((i, ix))
+        });
+        if let Some((i, ix)) = picked
+            && let Some(env) = super::envelopes::envelope_of(project, owner, h.kind)
+        {
+            let at = |k: usize| (k, env.points[k].at, env.points[k].value);
+            view.drag = Some(Drag::EnvPoints {
+                track: h.track,
+                clip: h.clip,
+                kind: h.kind,
+                points: ix.iter().map(|&k| at(k)).collect(),
+                grab: at(i),
+            });
+            return false;
+        }
+        if let Some(i) = h.point {
+            view.env_picks = super::envelopes::pick(None, project, &h, i, egui::Modifiers::NONE);
+        }
         view.drag = Some(match h.point {
             Some(i) => Drag::EnvPoint {
                 track: h.track,
@@ -2601,6 +2918,18 @@ fn start_drag(
         return false;
     }
     let kind = match app.tool {
+        // The press picked them: a drag from one moves them all
+        // (Alt+Shift: their groups left).
+        Tool::TrackSelect { .. } => match hit(view, l, project, origin) {
+            Hit::Clip { clip, .. } if !right && app.selection.contains(&clip) => {
+                project.clip(clip).map(|c| Drag::Move {
+                    clip,
+                    grab: t - c.start,
+                    ungrouped: shift && alt,
+                })
+            }
+            _ => None,
+        },
         Tool::Select => Some(Drag::Marquee {
             start: origin,
             add,
@@ -2653,6 +2982,7 @@ fn start_drag(
                     _ if right => Drag::Move {
                         clip,
                         grab: t - c.start,
+                        ungrouped: false,
                     },
                     Zone::FadeIn => Drag::FadeIn { clip },
                     Zone::FadeOut => Drag::FadeOut { clip },
@@ -2683,6 +3013,7 @@ fn start_drag(
                             EventAct::Move | EventAct::Shuffle => Drag::Move {
                                 clip,
                                 grab: t - c.start,
+                                ungrouped: false,
                             },
                             // Shift: the event alone, its group left (L and
                             // J cuts).
@@ -3022,6 +3353,20 @@ struct WaveChunks {
 }
 
 impl WaveChunks {
+    /// The block holding second `index` (`None` while it is read).
+    fn chunk(
+        &mut self,
+        app: &BananaApp,
+        info: &bv_timeline::MediaInfo,
+        stream: u16,
+        index: i64,
+    ) -> Option<std::sync::Arc<bv_engine::WaveChunk>> {
+        self.got
+            .entry(index)
+            .or_insert_with(|| app.engine.wave_chunk(info, stream, index))
+            .clone()
+    }
+
     /// Sample `i` of channel `ch` (`None` while its block is read).
     fn sample(
         &mut self,
@@ -3032,12 +3377,7 @@ impl WaveChunks {
         rate: i64,
         i: i64,
     ) -> Option<f32> {
-        let index = i.div_euclid(rate);
-        let chunk = self
-            .got
-            .entry(index)
-            .or_insert_with(|| app.engine.wave_chunk(info, stream, index))
-            .clone()?;
+        let chunk = self.chunk(app, info, stream, i.div_euclid(rate))?;
         let samples = chunk
             .samples
             .get(ch.min(chunk.samples.len().saturating_sub(1)))?;
@@ -3073,10 +3413,32 @@ impl WaveChunks {
         };
         let (va, vb) = (at(a)?, at(b)?);
         let (mut lo, mut hi) = (va.min(vb), va.max(vb));
-        for i in (a.floor() as i64 + 1)..=(b.floor() as i64) {
-            let v = self.sample(app, info, stream, ch, rate, i)?;
-            lo = lo.min(v);
-            hi = hi.max(v);
+        // The samples between, a block's run at a time (one look-up per
+        // block, not per sample: a zoomed-in column spans hundreds).
+        let last = b.floor() as i64;
+        let mut i = a.floor() as i64 + 1;
+        while i <= last {
+            let index = i.div_euclid(rate);
+            let next = (index + 1) * rate;
+            let chunk = self.chunk(app, info, stream, index)?;
+            let samples = chunk
+                .samples
+                .get(ch.min(chunk.samples.len().saturating_sub(1)))?;
+            let run_end = last.min(next - 1);
+            let from = (i - chunk.start).max(0) as usize;
+            let to = ((run_end - chunk.start + 1).max(0) as usize).min(samples.len());
+            if from < to {
+                for &v in &samples[from..to] {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            // Past the block's samples (the media's end): silence.
+            if to < (run_end - chunk.start + 1).max(0) as usize {
+                lo = lo.min(0.0);
+                hi = hi.max(0.0);
+            }
+            i = next;
         }
         Some((lo, hi))
     }
@@ -3180,16 +3542,31 @@ fn update_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pos: Po
                 _ => app.seek(t),
             }
         }
-        (Drag::Move { clip, grab }, Some(g)) => {
+        (
+            Drag::Move {
+                clip,
+                grab,
+                ungrouped,
+            },
+            Some(g),
+        ) => {
             let before = g.before();
-            let group = before.group_members(*clip);
+            let ungrouped = *ungrouped;
+            let members = |id: ClipId| {
+                if ungrouped {
+                    vec![id]
+                } else {
+                    before.group_members(id)
+                }
+            };
+            let group = members(*clip);
             // The other selected events go along (each with its group),
             // like VEGAS's.
             let mut done: std::collections::HashSet<ClipId> = group.iter().copied().collect();
             let mut others = Vec::new();
             for &s in &app.selection {
                 if before.clip(s).is_some() && !done.contains(&s) {
-                    done.extend(before.group_members(s));
+                    done.extend(members(s));
                     others.push(s);
                 }
             }
@@ -3230,46 +3607,14 @@ fn update_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pos: Po
                 .filter(|r| Some(r.kind) == kind)
                 .map(|r| r.track);
             let id = *clip;
+            let points = &view.env_with;
+            let mut moved = Tick::ZERO;
             app.history.preview(g, |p| {
-                let Some(from) = p.clip(id).map(|c| c.start) else {
-                    return;
-                };
-                // None of them before the start of the timeline.
-                let earliest = movers
-                    .iter()
-                    .filter_map(|&m| p.clip(m))
-                    .map(|c| c.start)
-                    .min()
-                    .unwrap_or(from);
-                let delta = (start - from).max(-earliest);
-                // As many tracks up or down, onto tracks of their kind.
-                let index = |p: &Project, id: ClipId| {
-                    p.tracks
-                        .iter()
-                        .position(|t| t.clips.iter().any(|c| c.id == id))
-                };
-                let rows = match (target.and_then(|t| p.track_index(t)), index(&*p, id)) {
-                    (Some(to), Some(at)) => to as i64 - at as i64,
-                    _ => 0,
-                };
-                let _ = p.move_clip(id, from + delta, target);
-                for &o in &others {
-                    let (Some(s), Some(at)) = (p.clip(o).map(|c| c.start), index(&*p, o)) else {
-                        continue;
-                    };
-                    let kind = p.tracks[at].kind;
-                    let to = usize::try_from(at as i64 + rows)
-                        .ok()
-                        .and_then(|i| p.tracks.get(i))
-                        .filter(|t| t.kind == kind && rows != 0)
-                        .map(|t| t.id);
-                    let _ = p.move_clip(o, s + delta, to);
-                }
-                // Options › Lock Envelopes to Events.
-                if p.lock_envelopes {
-                    p.carry_envelopes(before, &movers);
-                }
+                alone(p, ungrouped, |p| {
+                    moved = move_events(p, before, id, start, target, &movers, &others, points)
+                });
             });
+            view.env_with_moved = moved;
         }
         (Drag::SnapOffset { clip }, Some(g)) => {
             if let Some(c) = g.before().clip(*clip) {
@@ -3435,6 +3780,28 @@ fn update_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pos: Po
                 });
             }
         }
+        (
+            Drag::EnvPoints {
+                track,
+                clip,
+                kind,
+                points,
+                grab,
+            },
+            Some(g),
+        ) => {
+            if let Some(r) = super::envelopes::lane_for(view, l, g.before(), *track, *clip) {
+                let owner = super::envelopes::owner(*track, *clip);
+                let at = view.snap(app, g.before(), t.max(Tick::ZERO), &[Tick::ZERO], &[]);
+                let dt = super::envelopes::local(g.before(), owner, at) - grab.1;
+                let value = super::envelopes::value_at_y(r, *kind, pos.y);
+                let dv = kind.to_unit(value) - kind.to_unit(grab.2);
+                let (kind, points) = (*kind, points.clone());
+                app.history.preview(g, |p| {
+                    let _ = p.move_envelope_points(owner, kind, &points, dt, dv);
+                });
+            }
+        }
         (Drag::Slip { clip, t0 }, Some(g)) => {
             let d = app.frame_rate().snap_nearest(t - *t0);
             let id = *clip;
@@ -3475,13 +3842,12 @@ fn update_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pos: Po
                 } else {
                     (rate0 * dur0.0 as f64 / new_dur.0 as f64).clamp(MIN_RATE, MAX_RATE)
                 };
-                let (id, end, from_start) = (*clip, c.end(), *from_start);
+                let (id, from_start) = (*clip, *from_start);
                 app.history.preview(g, |p| {
-                    let _ = p.set_clip_rate(id, rate);
-                    // Stretched by its start, the event keeps its end.
-                    if from_start && let Some(d) = p.clip(id).map(|c| c.duration) {
-                        let _ = p.move_clip(id, end - d, None);
-                    }
+                    // Its group stretched with it as one, side by side
+                    // events staying so; stretched by its start, the group
+                    // keeps its end.
+                    let _ = p.stretch_group(id, rate, from_start);
                 });
             }
         }
@@ -3506,12 +3872,17 @@ fn update_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pos: Po
         (Drag::Marquee { start, add, shape }, _) => {
             // As VEGAS's, the events it takes are picked as it goes, after
             // those picked when it began (with Ctrl).
+            if view.box_base.is_none() {
+                view.env_with_base = Some(view.env_with.clone());
+            }
             let base = view
                 .box_base
                 .get_or_insert_with(|| (app.picked(), app.selection.clone()))
                 .clone();
             let r = shape.rect(l, *start, pos);
-            box_pick(view, app, l, r, *shape, *add, &base);
+            let add = *add;
+            let points = box_pick(view, app, l, r, *shape, add, &base);
+            view.env_with = with_base(view, add, points);
         }
         (Drag::TimeSelect { anchor }, _) => {
             let project = app.project().clone();
@@ -3536,6 +3907,16 @@ fn finish_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pointer
         app.release_playback();
     }
     let new_track = view.new_track.take();
+    // The envelope points picked along went as far as the events.
+    let moved = std::mem::take(&mut view.env_with_moved);
+    if matches!(drag, Some(Drag::Move { .. })) && !view.right_drag && app.tool != Tool::Shuffle {
+        for k in &mut view.env_with {
+            for t in &mut k.times {
+                *t = (*t + moved).max(Tick::ZERO);
+            }
+            k.anchor = (k.anchor + moved).max(Tick::ZERO);
+        }
+    }
     // Events dragged with the right button: a menu asks what to do.
     if std::mem::take(&mut view.right_drag)
         && let Some(Drag::Move { clip, .. }) = &drag
@@ -3592,12 +3973,40 @@ fn finish_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pointer
         app.history.commit_gesture(g);
     }
     view.snap_line = None;
+    // The points dragged stay picked, where they went.
+    match &drag {
+        Some(Drag::EnvPoints {
+            track,
+            clip,
+            kind,
+            points,
+            grab,
+        }) => {
+            let ix: Vec<usize> = points.iter().map(|p| p.0).collect();
+            view.env_picks =
+                super::envelopes::picks_at(app.project(), *track, *clip, *kind, &ix, grab.0);
+        }
+        Some(Drag::EnvPoint {
+            track,
+            clip,
+            kind,
+            index,
+            ..
+        }) => {
+            view.env_picks = index.and_then(|i| {
+                super::envelopes::picks_at(app.project(), *track, *clip, *kind, &[i], i)
+            });
+        }
+        _ => {}
+    }
     let Some(p) = pointer else { return };
     match drag {
         Some(Drag::Marquee { start, add, shape }) => {
             let r = shape.rect(l, start, p);
             let base = box_base.unwrap_or_else(|| (app.picked(), app.selection.clone()));
-            box_pick(view, app, l, r, shape, add, &base);
+            let points = box_pick(view, app, l, r, shape, add, &base);
+            view.env_with = with_base(view, add, points);
+            view.env_with_base = None;
         }
         Some(Drag::ZoomBox { start }) => {
             let (x0, x1) = (start.x.min(p.x), start.x.max(p.x));
@@ -3614,9 +4023,23 @@ fn finish_drag(view: &mut TimelineView, app: &mut BananaApp, l: &Layout, pointer
     }
 }
 
+/// The points a rectangle picked, after those picked when it began with
+/// Ctrl (`add`).
+fn with_base(
+    view: &TimelineView,
+    add: bool,
+    points: Vec<super::envelopes::Picks>,
+) -> Vec<super::envelopes::Picks> {
+    match (&view.env_with_base, add) {
+        (Some(base), true) => super::envelopes::join_picks(base.clone(), points),
+        _ => points,
+    }
+}
+
 /// The selection rectangle `r` picks the events it takes, each with its
 /// group, after those picked when it began (`base`, with `add`; else
-/// none).
+/// none); the track envelopes' points it takes, with the mod (Options ›
+/// BananaV Mods: Envelope points with events).
 fn box_pick(
     view: &TimelineView,
     app: &mut BananaApp,
@@ -3625,7 +4048,7 @@ fn box_pick(
     shape: BoxShape,
     add: bool,
     base: &super::BoxBase,
-) {
+) -> Vec<super::envelopes::Picks> {
     let (mut picked, mut selection) = if add {
         base.clone()
     } else {
@@ -3643,8 +4066,26 @@ fn box_pick(
             }
         }
     }
+    // Options › BananaV Mods: the track envelopes' points in it too.
+    let points = if app.settings.mods.env_with_events {
+        let rows = l.rows.iter().filter(|row| {
+            let whole = Rect::from_min_max(
+                pos2(l.lanes.left(), row.top),
+                pos2(l.lanes.right(), row.top + row.height),
+            );
+            shape.takes(r, Rect::from_x_y_ranges(r.x_range(), whole.y_range()))
+        });
+        let (t0, t1) = (view.time_at(l, r.left()), view.time_at(l, r.right()));
+        let all = shape == BoxShape::Tracks;
+        super::envelopes::track_points(view, project, rows.map(|row| row.track), |t| {
+            all || (t0..=t1).contains(&t)
+        })
+    } else {
+        Vec::new()
+    };
     app.selection = selection;
     app.set_picked(picked);
+    points
 }
 
 fn click(
@@ -3693,6 +4134,27 @@ fn click(
             app.edit(|p| p.split(clip, t));
         }
         return;
+    }
+    // An envelope's point: picked, as events are — Ctrl adds or takes it
+    // away, Shift picks those from the last one clicked —; a click
+    // elsewhere lets the picked ones go.
+    let point = matches!(app.tool, Tool::Edit | Tool::Envelope)
+        .then(|| env_hit(view, l, project, pos))
+        .flatten()
+        .and_then(|h| Some((h, h.point?)));
+    match point {
+        Some((h, i)) => {
+            view.env_picks = super::envelopes::pick(view.env_picks.as_ref(), project, &h, i, m);
+            if m.command || m.shift {
+                return;
+            }
+        }
+        None => view.env_picks = None,
+    }
+    // Those picked along with events go with a click (Ctrl and Shift keep
+    // them).
+    if !m.command && !m.shift {
+        view.env_with.clear();
     }
     if app.tool == Tool::Zoom {
         let factor = if add { 2.0 } else { 0.5 };
@@ -3840,7 +4302,19 @@ pub(crate) fn transition_labels(
 ) -> Vec<TransitionLabel> {
     let mut out = Vec::new();
     let auto = project.auto_crossfade;
+    // Only what is in sight: a track's events are sorted by their start,
+    // so those before the view are passed and those after it end the walk
+    // (every pair of every track, in sight or not, made a long track's
+    // frame slow).
+    let (from, to) = (
+        view.time_at(l, l.lanes.left()),
+        view.time_at(l, l.lanes.right()),
+    );
+    let seen = |c: &bv_timeline::Clip| c.end() > from;
     for row in l.rows.iter().filter(|r| r.kind == TrackKind::Video) {
+        if row.top + row.height < l.lanes.top() || row.top > l.lanes.bottom() {
+            continue;
+        }
         let Some(track) = project.track(row.track) else {
             continue;
         };
@@ -3864,8 +4338,18 @@ pub(crate) fn transition_labels(
             });
         };
         for (i, a) in track.clips.iter().enumerate() {
+            if a.start >= to {
+                break;
+            }
+            if !auto || a.muted || !seen(a) {
+                continue;
+            }
             for b in &track.clips[i + 1..] {
-                if !auto || b.start >= a.end() || a.muted || b.muted {
+                // Sorted: none after `b` overlaps `a` either.
+                if b.start >= a.end() {
+                    break;
+                }
+                if b.muted {
                     continue;
                 }
                 if let Some(name) = transition_label(b) {
@@ -3875,6 +4359,12 @@ pub(crate) fn transition_labels(
         }
         // Fades with a transition, where no event overlaps them.
         for c in track.clips.iter().filter(|c| !c.muted) {
+            if c.start >= to {
+                break;
+            }
+            if !seen(c) {
+                continue;
+            }
             let (over_in, over_out) = if auto {
                 track.crossfades(c)
             } else {
@@ -4013,6 +4503,15 @@ fn point_menu(
         ui.close();
         return;
     };
+    // The points it acts on: the picked ones when it is one of them.
+    let picked = super::envelopes::menu_points(view.env_picks.as_ref(), app.project(), &h, i);
+    let times: Vec<(usize, Tick)> = super::envelopes::envelope_of(app.project(), owner, kind)
+        .map_or(Vec::new(), |e| {
+            picked
+                .iter()
+                .filter_map(|&k| Some((k, e.points.get(k)?.at)))
+                .collect()
+        });
     let presets: &[(f32, &str)] = match kind {
         EnvelopeKind::CompositeLevel => &[
             (1.0, "Set to 100% Composite Strength"),
@@ -4027,7 +4526,12 @@ fn point_menu(
             item(ui, tr(label))
         };
         if clicked {
-            app.edit(|p| p.move_envelope_point(owner, kind, i, point.at, v));
+            app.edit(|p| -> Result<(), bv_timeline::EditError> {
+                for &(k, at) in &times {
+                    p.move_envelope_point(owner, kind, k, at, v)?;
+                }
+                Ok(())
+            });
             ui.close();
         }
     }
@@ -4046,15 +4550,21 @@ fn point_menu(
         ui.close();
     }
     ui.separator();
-    if item_enabled(ui, tr("Delete"), i > 0).clicked() {
-        app.edit(|p| p.remove_envelope_point(owner, kind, i));
+    if item_enabled(ui, tr("Delete"), picked.iter().any(|&k| k > 0)).clicked() {
+        app.edit(|p| p.remove_envelope_points(owner, kind, &picked));
+        view.env_picks = None;
         ui.close();
     }
     ui.separator();
     if !kind.is_held() {
         for (c, label) in POINT_CURVES {
             if mark_item(ui, tr(label), point.curve == c) {
-                app.edit(|p| p.set_envelope_curve(owner, kind, i, c));
+                app.edit(|p| -> Result<(), bv_timeline::EditError> {
+                    for &k in &picked {
+                        p.set_envelope_curve(owner, kind, k, c)?;
+                    }
+                    Ok(())
+                });
                 ui.close();
             }
         }
@@ -4091,10 +4601,13 @@ fn point_menu(
         });
         ui.close();
     }
-    ui.separator();
-    if item(ui, tr("Envelope Appearance…")) {
-        app.open_envelope_look();
-        ui.close();
+    // Its mod's (Options › BananaV Mods…).
+    if app.settings.mods.envelope_look {
+        ui.separator();
+        if item(ui, tr("Envelope Appearance…")) {
+            app.open_envelope_look();
+            ui.close();
+        }
     }
 }
 
@@ -4124,11 +4637,19 @@ fn envelope_menu(
             let point = super::envelopes::envelope_of(app.project(), owner, kind)
                 .and_then(|e| e.points.get(i))
                 .copied();
+            // The points it acts on: the picked ones when it is one of them.
+            let picked =
+                super::envelopes::menu_points(view.env_picks.as_ref(), app.project(), &h, i);
             let curve = point.map(|p| p.curve);
             if !kind.is_held() {
                 for c in bv_timeline::KeyCurve::ALL {
                     if crate::widgets::radio(ui, curve == Some(c), tr(c.name())).clicked() {
-                        app.edit(|p| p.set_envelope_curve(owner, kind, i, c));
+                        app.edit(|p| -> Result<(), bv_timeline::EditError> {
+                            for &k in &picked {
+                                p.set_envelope_curve(owner, kind, k, c)?;
+                            }
+                            Ok(())
+                        });
                         ui.close();
                     }
                 }
@@ -4141,17 +4662,36 @@ fn envelope_menu(
                 for v in [-1.0f32, -0.5, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0] {
                     let text = trf!("Set to {}", super::envelopes::value_text(kind, v));
                     if crate::widgets::radio(ui, (pt.value - v).abs() < 1e-4, &text).clicked() {
-                        app.edit(|p| p.move_envelope_point(owner, kind, i, pt.at, v));
+                        let times: Vec<(usize, Tick)> =
+                            super::envelopes::envelope_of(app.project(), owner, kind).map_or(
+                                Vec::new(),
+                                |e| {
+                                    picked
+                                        .iter()
+                                        .filter_map(|&k| Some((k, e.points.get(k)?.at)))
+                                        .collect()
+                                },
+                            );
+                        app.edit(|p| -> Result<(), bv_timeline::EditError> {
+                            for &(k, at) in &times {
+                                p.move_envelope_point(owner, kind, k, at, v)?;
+                            }
+                            Ok(())
+                        });
                         ui.close();
                     }
                 }
                 ui.separator();
             }
             if ui
-                .add_enabled(i > 0, egui::Button::new(tr("Delete Point")))
+                .add_enabled(
+                    picked.iter().any(|&k| k > 0),
+                    egui::Button::new(tr("Delete Point")),
+                )
                 .clicked()
             {
-                app.edit(|p| p.remove_envelope_point(owner, kind, i));
+                app.edit(|p| p.remove_envelope_points(owner, kind, &picked));
+                view.env_picks = None;
                 ui.close();
             }
         }
@@ -4180,10 +4720,12 @@ fn envelope_menu(
             app.edit(|p| p.toggle_event_envelope(clip, kind));
             ui.close();
         }
-        ui.separator();
-        if ui.button(tr("Envelope Appearance…")).clicked() {
-            app.open_envelope_look();
-            ui.close();
+        if app.settings.mods.envelope_look {
+            ui.separator();
+            if ui.button(tr("Envelope Appearance…")).clicked() {
+                app.open_envelope_look();
+                ui.close();
+            }
         }
         return;
     }
@@ -4230,10 +4772,12 @@ fn envelope_menu(
         app.edit(|p| p.toggle_envelope(track, kind));
         ui.close();
     }
-    ui.separator();
-    if ui.button(tr("Envelope Appearance…")).clicked() {
-        app.open_envelope_look();
-        ui.close();
+    if app.settings.mods.envelope_look {
+        ui.separator();
+        if ui.button(tr("Envelope Appearance…")).clicked() {
+            app.open_envelope_look();
+            ui.close();
+        }
     }
 }
 
@@ -4842,14 +5386,13 @@ fn place_dropped(
 }
 
 /// Video effects (a preset's, a filter package's chain) let go on event
-/// `clip`: added to it, which is selected, its settings in Properties.
+/// `clip`: added to it, which is selected.
 fn drop_effects(app: &mut BananaApp, clip: ClipId, chain: &[bv_timeline::Effect]) {
     if tabs::effects::apply_to_clips(app, &[clip], chain) == 0 {
         app.notify(tr("Video effects only apply to video clips."));
     } else {
         app.selection.clear();
         app.select_clip(clip, false);
-        app.show_tab(Tab::Properties, false);
     }
 }
 
@@ -5117,6 +5660,9 @@ fn paint_waveform(
     let len = info.duration;
     let (fade_in, fade_out) = track.effective_fades(clip, auto_crossfade);
     let mut chunks = WaveChunks::default();
+    // All its columns one mesh: thousands of shapes a frame otherwise,
+    // zoomed in.
+    let mut mesh = egui::Mesh::default();
     for c in 0..chans {
         let mid = (body.top() + band * (c as f32 + 0.5)).round();
         // The channel's zero line, as in VEGAS: pauses show as a line, not
@@ -5163,12 +5709,14 @@ fn paint_waveform(
             if yb - ya < 1.0 {
                 (ya, yb) = (ya, ya + 1.0);
             }
-            cp.rect_filled(
+            mesh.add_colored_rect(
                 Rect::from_min_max(pos2(x as f32, ya), pos2(x as f32 + 1.0, yb)),
-                0.0,
                 color,
             );
         }
+    }
+    if !mesh.is_empty() {
+        cp.add(Shape::mesh(mesh));
     }
 }
 
@@ -5986,21 +6534,15 @@ pub(crate) fn paint(
             if level_dragged
                 || ((selected || ui.rect_contains_pointer(on_screen)) && view.drag.is_none())
             {
-                // In the middle of the line between the fades, of its part
-                // on screen, as VEGAS's (an event without fades: of the part
-                // the next one does not cover).
-                let x = match span {
-                    Some((a, b)) => {
-                        let (lo, hi) = (a.max(on_screen.left()), b.min(on_screen.right()));
-                        if hi > lo {
-                            (lo + hi) / 2.0
-                        } else {
-                            on_screen.center().x.clamp(a, b)
-                        }
-                    }
-                    None => on_screen.center().x,
-                };
-                level_tabs.push(pos2(x, ly));
+                level_tabs.push(level_handle_at(
+                    view,
+                    l,
+                    track,
+                    ci,
+                    clip,
+                    r,
+                    project.auto_crossfade,
+                ));
             }
             let lc = match (view.show_envelopes, clip.level < 1.0) {
                 (false, _) => Color32::TRANSPARENT,
@@ -6153,9 +6695,24 @@ pub(crate) fn paint(
 
         // Crossfades: X na sobreposição de clipes consecutivos.
         if project.auto_crossfade {
+            let (from, to) = (
+                view.time_at(l, l.lanes.left()),
+                view.time_at(l, l.lanes.right()),
+            );
             for (i, a) in track.clips.iter().enumerate() {
+                // Sorted by start: those after the view end the walk, and
+                // no event after `b` overlaps `a` when `b` does not.
+                if a.start >= to {
+                    break;
+                }
+                if a.end() <= from {
+                    continue;
+                }
                 for b in &track.clips[i + 1..] {
-                    if b.start >= a.end() || a.muted || b.muted {
+                    if b.start >= a.end() {
+                        break;
+                    }
+                    if a.muted || b.muted {
                         continue;
                     }
                     let x0 = view.x_of(l, b.start);
@@ -7349,6 +7906,117 @@ mod edge_tests {
         assert_eq!(points(&app).len(), 3);
     }
 
+    /// Envelope points picked as events are: Ctrl+click adds or takes one
+    /// away, Shift+click picks those from the last one clicked; dragging
+    /// one moves them all by the same time and value; Delete removes them
+    /// (and no event).
+    #[test]
+    fn envelope_points_are_picked_with_ctrl_and_shift() {
+        use bv_timeline::{EnvelopeKind, EnvelopeOwner};
+        let (mut app, mut view, _) = demo_view();
+        app.insert_adjustment_track(None);
+        app.set_loop_region(None);
+        (app.snapping, app.quantize) = (false, false);
+        view.show_envelopes = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
+        let l = view.layout(screen, app.project());
+        let t = app.project().tracks[0].id;
+        let (owner, kind) = (EnvelopeOwner::Track(t), EnvelopeKind::CompositeLevel);
+        let s = Tick::from_seconds;
+        for k in [2, 4, 6, 8] {
+            app.edit(|p| p.set_envelope_point(owner, kind, s(k), 1.0));
+        }
+        let r = super::super::envelopes::lane_of(&l, t).unwrap();
+        let at = |view: &TimelineView, secs: i64| {
+            pos2(
+                view.x_of(&l, s(secs)),
+                super::super::envelopes::y_of(r, kind, 1.0),
+            )
+        };
+        let picked = |view: &TimelineView| view.env_picks.as_ref().map(|p| p.times.clone());
+        let press = |view: &mut TimelineView, app: &mut BananaApp, secs, keys| {
+            let project = app.project().clone();
+            let pos = at(view, secs);
+            click(view, app, &l, &project, pos, keys);
+        };
+        let ctrl = egui::Modifiers::COMMAND;
+        let shift = egui::Modifiers::SHIFT;
+        press(&mut view, &mut app, 2, egui::Modifiers::NONE);
+        assert_eq!(picked(&view), Some(vec![s(2)]));
+        press(&mut view, &mut app, 6, ctrl);
+        assert_eq!(picked(&view), Some(vec![s(2), s(6)]));
+        press(&mut view, &mut app, 2, ctrl);
+        assert_eq!(picked(&view), Some(vec![s(6)]), "taken away");
+        press(&mut view, &mut app, 2, ctrl);
+        press(&mut view, &mut app, 8, shift);
+        assert_eq!(
+            picked(&view),
+            Some(vec![s(2), s(4), s(6), s(8)]),
+            "from the last clicked"
+        );
+        press(&mut view, &mut app, 4, egui::Modifiers::NONE);
+        press(&mut view, &mut app, 8, shift);
+        assert_eq!(picked(&view), Some(vec![s(4), s(6), s(8)]));
+        // The one at 6 s dragged half a second later and a quarter of the
+        // lane down: the three go along.
+        let project = app.project().clone();
+        let six = at(&view, 6);
+        start_drag(
+            &mut view,
+            &mut app,
+            &l,
+            &project,
+            six,
+            egui::Modifiers::NONE,
+            false,
+        );
+        assert!(matches!(view.drag, Some(Drag::EnvPoints { .. })));
+        let to = six + vec2(50.0, r.height() / 4.0);
+        update_drag(&mut view, &mut app, &l, to, false);
+        finish_drag(&mut view, &mut app, &l, Some(to));
+        let points = super::super::envelopes::envelope_of(app.project(), owner, kind)
+            .unwrap()
+            .points
+            .clone();
+        let half = Tick::from_seconds_f64(0.5);
+        let near = |a: Tick, b: Tick| (a - b).abs() <= Tick::from_seconds_f64(0.011);
+        assert_eq!(points.len(), 5);
+        assert_eq!((points[1].at, points[1].value), (s(2), 1.0), "left alone");
+        for (k, secs) in [(2, 4), (3, 6), (4, 8)] {
+            assert!(near(points[k].at, s(secs) + half), "{:?}", points[k]);
+            assert!((points[k].value - 0.75).abs() < 0.01, "{:?}", points[k]);
+        }
+        assert_eq!(
+            view.env_picks.as_ref().map(|p| p.times.len()),
+            Some(3),
+            "still picked where they went"
+        );
+        // Delete: the three go, the events stay.
+        let events = app.project().clips().count();
+        app.timeline.env_picks = view.env_picks.take();
+        crate::commands::Cmd::Delete.run(&mut app);
+        let points = super::super::envelopes::envelope_of(app.project(), owner, kind)
+            .unwrap()
+            .points
+            .clone();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[1].at, s(2));
+        assert_eq!(app.project().clips().count(), events);
+        // A click away lets them go.
+        press(&mut view, &mut app, 2, egui::Modifiers::NONE);
+        let project = app.project().clone();
+        let away = pos2(view.x_of(&l, s(5)), r.bottom() - 4.0);
+        click(
+            &mut view,
+            &mut app,
+            &l,
+            &project,
+            away,
+            egui::Modifiers::NONE,
+        );
+        assert_eq!(picked(&view), None);
+    }
+
     /// An audio event's fades as its waveform shows them: nothing where a
     /// fade-in starts and a fade-out ends, the whole sound past them.
     #[test]
@@ -8019,12 +8687,214 @@ mod fade_tests {
         assert_eq!(app.cursor, points[1].at, "the cursor on it");
         assert!(app.project().loop_region.is_none(), "no time selection");
     }
+
+    /// A video track's Composite Level at 100 % lies on its events' level
+    /// line (the users'): a double-click held there and dragged down puts a
+    /// point and pulls it, no time selection made; the level line's handle
+    /// in the event's middle still takes the event's opacity.
+    #[test]
+    fn a_double_click_dragged_on_an_envelope_over_the_level_line_pulls_a_point() {
+        use bv_timeline::{EnvelopeKind, EnvelopeOwner};
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        app.set_loop_region(None);
+        let track = app.project().tracks[0].id;
+        let (owner, kind) = (EnvelopeOwner::Track(track), EnvelopeKind::CompositeLevel);
+        app.edit(|p| p.toggle_envelope(track, kind));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let clip = h.state().project().tracks[0].clips[0].clone();
+        let before = super::super::envelopes::envelope_of(h.state().project(), owner, kind)
+            .expect("the envelope")
+            .points
+            .len();
+        let (line, handle) = {
+            let app = h.state();
+            let view = &app.timeline;
+            let project = app.project();
+            let l = view.layout(view.last_rect, project);
+            let row = l.row_of(track).expect("its row");
+            let r = clip_rect(view, &l, row, clip.start, clip.end());
+            let t = project.track(track).expect("track");
+            let handle = level_handle_at(view, &l, t, 0, &clip, r, project.auto_crossfade);
+            let lane = super::super::envelopes::lane_of(&l, track).expect("its lane");
+            let x = r.left() + (handle.x - r.left()) * 0.4;
+            let line = pos2(x, super::super::envelopes::y_of(lane, kind, 1.0));
+            assert!(
+                (line.y - level_y(r, clip.level)).abs() <= 4.0,
+                "the envelope on the level line"
+            );
+            let hit = super::super::envelopes::hit(view, &l, project, line).expect("the line");
+            assert_eq!(hit.point, None);
+            (line, handle)
+        };
+        let button = |h: &mut Harness<'_, BananaApp>, at: Pos2, pressed: bool| {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        };
+        let drag = |h: &mut Harness<'_, BananaApp>, from: Pos2, down: f32| {
+            for k in 1..=8 {
+                h.event(egui::Event::PointerMoved(
+                    from + vec2(0.0, down * k as f32 / 8.0),
+                ));
+                h.step();
+            }
+            button(h, from + vec2(0.0, down), false);
+            h.run_steps(2);
+        };
+        h.event(egui::Event::PointerMoved(line));
+        h.step();
+        button(&mut h, line, true);
+        button(&mut h, line, false);
+        button(&mut h, line, true);
+        drag(&mut h, line, 30.0);
+        {
+            let app = h.state();
+            let points = &super::super::envelopes::envelope_of(app.project(), owner, kind)
+                .expect("the envelope")
+                .points;
+            assert_eq!(points.len(), before + 1, "a point added: {points:?}");
+            assert!(
+                points.iter().any(|p| p.value < 0.85),
+                "pulled down: {points:?}"
+            );
+            assert!(app.project().loop_region.is_none(), "no time selection");
+            let level = app.project().clip(clip.id).expect("event").level;
+            assert_eq!(level, clip.level, "the event's opacity as it was");
+        }
+        // The handle: the event's opacity, the envelope left alone.
+        h.run_steps(30);
+        h.event(egui::Event::PointerMoved(handle));
+        h.step();
+        button(&mut h, handle, true);
+        drag(&mut h, handle, 20.0);
+        let app = h.state();
+        let level = app.project().clip(clip.id).expect("event").level;
+        assert!(level < clip.level, "the handle took it: {level}");
+        let points = &super::super::envelopes::envelope_of(app.project(), owner, kind)
+            .expect("the envelope")
+            .points;
+        assert_eq!(points.len(), before + 1, "{points:?}");
+    }
 }
 
 #[cfg(test)]
 mod wheel_tests {
     use super::*;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The timeline's scroll bars: the wheel over one moves it, and a press
+    /// on its empty part brings its thumb there, held by it.
+    #[test]
+    fn the_scroll_bars_take_the_wheel_and_presses_beside_their_thumbs() {
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 760.0))
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(3);
+        h.state_mut().timeline.ticks_per_px /= 6.0;
+        // Taller than the window.
+        for _ in 0..8 {
+            h.state_mut().modify(|p| {
+                p.add_track(bv_timeline::TrackKind::Video);
+            });
+        }
+        h.run_steps(4);
+        let bars: Vec<Rect> = h
+            .get_all_by_label(tr("Scroll bar"))
+            .map(|n| n.rect())
+            .collect();
+        let across = bars
+            .iter()
+            .copied()
+            .filter(|r| r.width() > 200.0)
+            .max_by(|a, b| a.bottom().total_cmp(&b.bottom()))
+            .expect("the horizontal one");
+        let down = bars
+            .iter()
+            .copied()
+            .find(|r| r.height() > r.width() * 2.0)
+            .expect("the vertical one");
+        let roll = |h: &mut Harness<'_, BananaApp>, at: Pos2, y: f32| {
+            h.event(egui::Event::PointerMoved(at));
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, y),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            });
+            h.run_steps(12);
+        };
+        let button = |h: &mut Harness<'_, BananaApp>, at: Pos2, pressed: bool| {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            h.run_steps(2);
+        };
+        let start = |h: &Harness<'_, BananaApp>| h.state().timeline.view_start;
+        let top = |h: &Harness<'_, BananaApp>| h.state().timeline.scroll_y;
+        // The wheel.
+        let zoom = h.state().timeline.ticks_per_px;
+        let (a, t) = (start(&h), top(&h));
+        roll(&mut h, across.center(), -120.0);
+        assert!(start(&h) > a, "scrolled on");
+        assert_eq!(h.state().timeline.ticks_per_px, zoom, "not zoomed");
+        roll(&mut h, across.center(), 240.0);
+        assert_eq!(start(&h), Tick::ZERO);
+        roll(&mut h, down.center(), -60.0);
+        assert!(top(&h) > t, "scrolled down");
+        assert_eq!(h.state().timeline.ticks_per_px, zoom, "not zoomed");
+        roll(&mut h, down.center(), 600.0);
+        assert_eq!(top(&h), 0.0);
+        // Pressed and held on the empty part.
+        let spot = pos2(across.left() + across.width() * 0.8, across.center().y);
+        h.event(egui::Event::PointerMoved(spot));
+        h.run_steps(2);
+        button(&mut h, spot, true);
+        let there = start(&h);
+        assert!(there > Tick::ZERO, "the thumb came");
+        h.event(egui::Event::PointerMoved(spot - egui::vec2(200.0, 0.0)));
+        h.run_steps(2);
+        assert!(start(&h) < there, "and follows the pointer");
+        button(&mut h, spot - egui::vec2(200.0, 0.0), false);
+        let spot = pos2(down.center().x, down.bottom() - 4.0);
+        h.event(egui::Event::PointerMoved(spot));
+        h.run_steps(2);
+        button(&mut h, spot, true);
+        let there = top(&h);
+        assert!(there > 0.0, "the thumb came");
+        h.event(egui::Event::PointerMoved(spot - egui::vec2(0.0, 60.0)));
+        h.run_steps(2);
+        assert!(top(&h) < there, "and follows the pointer");
+        button(&mut h, spot - egui::vec2(0.0, 60.0), false);
+    }
 
     /// The mouse wheel zooms toward the needle wherever the pointer is: in
     /// view, the needle keeps its place; out of view, it comes to the
@@ -8085,5 +8955,268 @@ mod wheel_tests {
             (needle_x(&h) - middle).abs() < 1.5,
             "the needle in the middle"
         );
+    }
+}
+
+#[cfg(test)]
+mod track_select_tests {
+    use super::*;
+    use crate::mods::Mods;
+
+    /// One frame with `events` and `keys` held.
+    fn input(
+        ctx: &egui::Context,
+        app: &mut BananaApp,
+        mut events: Vec<egui::Event>,
+        keys: egui::Modifiers,
+    ) {
+        events.insert(0, egui::Event::ModifiersChanged(keys));
+        let mut raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1600.0, 960.0))),
+            events,
+            ..Default::default()
+        };
+        raw.viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .inner_rect = raw.screen_rect;
+        let mut out = ctx.run_ui(raw, |ui| app.frame(ui));
+        out.textures_delta.clear();
+    }
+
+    /// The left button pressed at `from` with `keys`, moved to `to` and let
+    /// go.
+    fn drag(ctx: &egui::Context, app: &mut BananaApp, from: Pos2, to: Pos2, keys: egui::Modifiers) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: keys,
+        };
+        input(ctx, app, vec![egui::Event::PointerMoved(from)], keys);
+        input(ctx, app, vec![button(from, true)], keys);
+        for i in 1..=12 {
+            let at = from + (to - from) * (i as f32 / 12.0);
+            input(ctx, app, vec![egui::Event::PointerMoved(at)], keys);
+        }
+        input(ctx, app, vec![button(to, false)], keys);
+        input(ctx, app, Vec::new(), keys);
+    }
+
+    /// The demo with the Track Select tools' mod on, and an event of the
+    /// first track with time around it: its id and its middle's time.
+    fn demo() -> (egui::Context, BananaApp, ClipId, f64) {
+        let ctx = egui::Context::default();
+        let mut app = BananaApp::new(ctx.clone());
+        app.settings = app.settings.unsaved();
+        app.set_mods(Mods {
+            track_select: true,
+            ..Mods::default()
+        });
+        app.load_demo();
+        input(&ctx, &mut app, Vec::new(), egui::Modifiers::NONE);
+        let c = app.project().tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.start > Tick::ZERO && c.duration >= Tick::from_seconds(2))
+            .expect("an event after the start")
+            .clone();
+        let middle = (c.start + Tick(c.duration.0 / 2)).as_seconds_f64();
+        (ctx, app, c.id, middle)
+    }
+
+    /// The time under `p` on the timeline as last drawn.
+    fn time_at(app: &BananaApp, p: Pos2) -> Tick {
+        let view = &app.timeline;
+        let l = view.layout(view.last_rect, app.project());
+        view.time_at(&l, p.x).max(Tick::ZERO)
+    }
+
+    /// With the mod Envelope points with events, Track Select Forward picks
+    /// the track envelopes' points from there on too: they go as far as
+    /// the events, the earlier ones staying, and Delete takes them away
+    /// with the events.
+    #[test]
+    fn track_select_picks_envelope_points_with_the_events() {
+        use bv_timeline::EnvelopeKind;
+        let (ctx, mut app, clip, middle) = demo();
+        app.set_mods(Mods {
+            track_select: true,
+            env_with_events: true,
+            ..Mods::default()
+        });
+        let audio = app.project().tracks[1].id;
+        let kind = EnvelopeKind::Volume;
+        let s = Tick::from_seconds_f64;
+        app.edit(|p| p.toggle_envelope(audio, kind));
+        for (t, v) in [(0.5, 0.8), (middle + 0.5, 0.5), (middle + 2.0, 0.3)] {
+            app.edit(|p| p.set_envelope_point(audio, kind, s(t), v));
+        }
+        app.timeline.show_envelopes = true;
+        input(&ctx, &mut app, Vec::new(), egui::Modifiers::NONE);
+        app.tool = Tool::TrackSelect { back: false };
+        let from = app.timeline_spot_for_review(0, middle).expect("the event");
+        let at = time_at(&app, from);
+        let times = |app: &BananaApp| -> Vec<Tick> {
+            app.project().track(audio).expect("track").envelopes[0]
+                .points
+                .iter()
+                .map(|q| q.at)
+                .collect()
+        };
+        let before = times(&app);
+        let start = app.project().clip(clip).expect("event").start;
+        drag(
+            &ctx,
+            &mut app,
+            from,
+            from + egui::vec2(60.0, 0.0),
+            egui::Modifiers::NONE,
+        );
+        let delta = app.project().clip(clip).expect("event").start - start;
+        assert!(delta > Tick::ZERO);
+        let after = times(&app);
+        let expected: Vec<Tick> = before
+            .iter()
+            .map(|&t| if t >= at { t + delta } else { t })
+            .collect();
+        assert_eq!(after, expected, "the later points went along");
+        let picked: usize = app.timeline.env_with.iter().map(|k| k.times.len()).sum();
+        assert_eq!(picked, 2, "still picked, where they went");
+        // Delete: the events and those points.
+        app.delete_selection(false);
+        let left = times(&app);
+        assert_eq!(left, before[..2].to_vec(), "{left:?}");
+        // The mod off: the press picks no points.
+        app.edit(|p| p.set_envelope_point(audio, kind, s(middle + 3.0), 0.4));
+        app.set_mods(Mods {
+            track_select: true,
+            ..Mods::default()
+        });
+        input(&ctx, &mut app, Vec::new(), egui::Modifiers::NONE);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        input(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(from)],
+            egui::Modifiers::NONE,
+        );
+        input(
+            &ctx,
+            &mut app,
+            vec![button(from, true)],
+            egui::Modifiers::NONE,
+        );
+        input(
+            &ctx,
+            &mut app,
+            vec![button(from, false)],
+            egui::Modifiers::NONE,
+        );
+        assert!(app.timeline.env_with.is_empty());
+    }
+
+    /// Track Select Forward: the press picks every event from there on, on
+    /// all tracks; dragging one moves them all, the others staying. Its
+    /// pointer: two arrows, one with Shift.
+    #[test]
+    fn track_select_forward_picks_and_moves_the_rest() {
+        let (ctx, mut app, clip, middle) = demo();
+        app.tool = Tool::TrackSelect { back: false };
+        let from = app.timeline_spot_for_review(0, middle).expect("the event");
+        let at = time_at(&app, from);
+        let picked = app.project().track_selection(at, None, false, true);
+        assert!(picked.contains(&clip));
+        assert!(
+            app.project().clips().count() > picked.len(),
+            "some events end before the press"
+        );
+        let before = app.project().clone();
+        let to = from + egui::vec2(60.0, 0.0);
+        drag(&ctx, &mut app, from, to, egui::Modifiers::NONE);
+        let picked_now: Vec<ClipId> = app.selection.iter().copied().collect();
+        assert_eq!(picked_now, picked, "the press picked them");
+        let moved = |id: ClipId| {
+            app.project().clip(id).expect("still there").start
+                - before.clip(id).expect("there before").start
+        };
+        let delta = moved(clip);
+        assert!(delta > Tick::ZERO, "dragged right: {delta:?}");
+        for (_, c) in before.clips() {
+            let expected = if picked.contains(&c.id) {
+                delta
+            } else {
+                Tick::ZERO
+            };
+            assert_eq!(moved(c.id), expected, "{:?}", c.id);
+        }
+        // Its pointer.
+        let view = &app.timeline;
+        let l = view.layout(view.last_rect, app.project());
+        for (keys, single) in [
+            (egui::Modifiers::NONE, false),
+            (egui::Modifiers::SHIFT, true),
+        ] {
+            assert_eq!(
+                hover_pointer(view, &app, &l, app.project(), from, keys, None),
+                Some(Cursor::TrackSelect {
+                    back: false,
+                    single
+                })
+            );
+        }
+    }
+
+    /// Shift keeps to the track pressed (and its events' groups);
+    /// Alt+Shift leaves the groups out; Backward picks what starts before
+    /// the press.
+    #[test]
+    fn track_select_shift_keeps_to_its_track_and_backward_goes_back() {
+        let (ctx, mut app, _, middle) = demo();
+        app.tool = Tool::TrackSelect { back: false };
+        let from = app.timeline_spot_for_review(0, middle).expect("the event");
+        let at = time_at(&app, from);
+        let first = app.project().tracks[0].id;
+        let press = |app: &mut BananaApp, keys| drag(&ctx, app, from, from, keys);
+        press(&mut app, egui::Modifiers::SHIFT);
+        let sel = |app: &BananaApp| app.selection.iter().copied().collect::<Vec<_>>();
+        assert_eq!(
+            sel(&app),
+            app.project().track_selection(at, Some(first), false, true)
+        );
+        press(&mut app, egui::Modifiers::SHIFT | egui::Modifiers::ALT);
+        let alone = app.project().track_selection(at, Some(first), false, false);
+        assert_eq!(sel(&app), alone);
+        assert!(
+            alone
+                .iter()
+                .all(|&id| app.project().clip_track(id).map(|t| t.id) == Some(first)),
+            "that track's only"
+        );
+        app.tool = Tool::TrackSelect { back: true };
+        press(&mut app, egui::Modifiers::NONE);
+        assert_eq!(
+            sel(&app),
+            app.project().track_selection(at, None, true, true)
+        );
+        assert!(!app.selection.is_empty());
+    }
+
+    /// The mod off: its tools go back to the Normal Edit Tool, and can't be
+    /// picked.
+    #[test]
+    fn track_select_tools_need_their_mod() {
+        let (ctx, mut app, _, _) = demo();
+        app.tool = Tool::TrackSelect { back: false };
+        app.set_mods(Mods::default());
+        input(&ctx, &mut app, Vec::new(), egui::Modifiers::NONE);
+        assert_eq!(app.tool, Tool::Edit);
+        let pick = crate::commands::Cmd::UseTool(Tool::TrackSelect { back: true });
+        assert!(!pick.enabled(&app));
     }
 }

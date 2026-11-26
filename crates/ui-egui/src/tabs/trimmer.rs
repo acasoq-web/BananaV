@@ -179,7 +179,7 @@ pub struct TrimmerState {
     /// Width of the time bar, for pixel steps.
     bar_width: f32,
     texture: Option<TextureHandle>,
-    shown: Option<(u64, Tick, u32, u32)>,
+    shown: Option<bv_engine::FrameKey>,
     /// A media marker being renamed: its index and the text.
     renaming: Option<(usize, String)>,
     /// A media marker being dragged: its index and whether it is a
@@ -1148,7 +1148,7 @@ fn take_frame(ui: &egui::Ui, st: &mut TrimmerState, engine: &bv_engine::Engine) 
     let Some(f) = engine.trimmer_frame() else {
         return;
     };
-    let key = (f.generation, f.time, f.width, f.height);
+    let key = f.key();
     if st.shown == Some(key) {
         return;
     }
@@ -1589,7 +1589,7 @@ fn paint_markers(
             vec![(x, Kind::Marker)]
         };
         for (x, kind) in ends {
-            flag::paint_pole(painter, x, top + size.height - 1.0, bottom, kind);
+            flag::paint_pole(painter, x, top + size.height - 1.0, bottom, kind, size);
             let f = flag::paint(painter, x, top, &number, kind, size, false);
             if kind != Kind::RegionEnd {
                 flag::paint_name(painter, f, &m.name, size, kind);

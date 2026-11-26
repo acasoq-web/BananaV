@@ -28,7 +28,7 @@ impl BananaApp {
                 s.to_string_lossy().to_string()
             });
         let picked = rfd::FileDialog::new()
-            .set_title(tr("Real-Time Render"))
+            .set_title(crate::i18n::os_text(tr("Real-Time Render")))
             .set_directory(folder)
             .set_file_name(format!("{name}.wav"))
             .add_filter("Wave (*.wav)", &["wav"])

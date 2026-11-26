@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bv-effects.workspace = true
+bv-banana.workspace = true
 bv-ofx-sys.workspace = true
 
 [lints]

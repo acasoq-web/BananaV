@@ -591,13 +591,20 @@ unsafe extern "C" fn clip_get_image(
     let Some(run) = &effect.run else {
         return kOfxStatErrBadHandle;
     };
-    match fetch(effect, run, c, time) {
-        Ok(h) => {
+    // The picture comes from the engine's code (`ClipSource`): a failure
+    // of its own there stops here, where unwinding on into the plug-in's
+    // code would end the program. The locks it held are taken again
+    // whatever happened under them.
+    let fetched =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(effect, run, c, time)));
+    match fetched {
+        Ok(Ok(h)) => {
             // SAFETY: where the plug-in wants the image.
             unsafe { *image = h };
             kOfxStatOK
         }
-        Err(e) => e,
+        Ok(Err(e)) => e,
+        Err(_) => kOfxStatFailed,
     }
 }
 
@@ -705,9 +712,13 @@ unsafe extern "C" fn image_memory_alloc(
     if handle.is_null() {
         return kOfxStatErrValue;
     }
+    // The size is the plug-in's: one there is no memory for is refused.
+    let Some(buffer) = Buffer::try_new(n_bytes) else {
+        return kOfxStatErrMemory;
+    };
     let m = Box::new(ImageMemory {
         magic: MEMORY_MAGIC,
-        buffer: Buffer::new(n_bytes),
+        buffer,
         locks: AtomicI32::new(0),
     });
     // SAFETY: where the plug-in wants the handle.

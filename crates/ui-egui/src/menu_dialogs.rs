@@ -43,6 +43,27 @@ struct PasteRepeat {
 }
 
 impl MenuDialogs {
+    /// Takes in the windows opened while these were being drawn: a window
+    /// drawn by `show` that opens another writes to the app's set, which
+    /// stands in for this one meanwhile and would be thrown away.
+    pub(crate) fn absorb(&mut self, opened: MenuDialogs) {
+        if opened.go_to.is_some() {
+            self.go_to = opened.go_to;
+            self.go_to_field = opened.go_to_field;
+        }
+        if opened.paste_repeat.is_some() {
+            self.paste_repeat = opened.paste_repeat;
+        }
+        if opened.layouts.is_some() {
+            self.layouts = opened.layouts;
+        }
+        if opened.save_layout.is_some() {
+            self.save_layout = opened.save_layout;
+        }
+        self.clear_history |= opened.clear_history;
+        self.more.absorb(opened.more);
+    }
+
     pub fn open_go_to(&mut self, current: String) {
         self.open_go_to_field(current, GoToField::Cursor);
     }
@@ -243,5 +264,28 @@ impl MenuDialogs {
             Some(false) => self.clear_history = false,
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Customize Toolbar's Help, Burn Disc's job: a window drawn by `show`
+    /// opens another through the app, whose set is a stand-in meanwhile.
+    #[test]
+    fn a_window_opened_by_a_window_being_drawn_is_kept() {
+        let mut app = BananaApp::new(egui::Context::default());
+        app.menu_dialogs.open_go_to("00:00:01;00".into());
+        // As `BananaApp::frame` draws them.
+        let mut drawn = std::mem::take(&mut app.menu_dialogs);
+        app.menu_dialogs.more.help = Some(0);
+        app.menu_dialogs.clear_history = true;
+        drawn.absorb(std::mem::take(&mut app.menu_dialogs));
+        app.menu_dialogs = drawn;
+        assert_eq!(app.menu_dialogs.more.help, Some(0), "the Help opened");
+        assert!(app.menu_dialogs.clear_history);
+        // What was open stays open.
+        assert!(app.menu_dialogs.go_to.is_some());
     }
 }

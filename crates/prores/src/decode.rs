@@ -106,6 +106,22 @@ pub fn frame_info(frame: &[u8]) -> Option<FrameInfo> {
     })
 }
 
+/// The most pixels a frame may have: 2^29 (a 32768 × 16384 panorama still
+/// opens).
+const MAX_PIXELS: usize = 1 << 29;
+
+/// The pixels of a `width` × `height` frame, refused past [`MAX_PIXELS`]:
+/// the planes are made from the frame's header, before any of its slices
+/// is read, and a header of a few bytes may claim gigabytes.
+fn pixel_count(width: usize, height: usize) -> Result<usize, DecodeError> {
+    match width.checked_mul(height) {
+        Some(n) if n <= MAX_PIXELS => Ok(n),
+        _ => Err(DecodeError::Unsupported(format!(
+            "a frame of {width} × {height} pixels"
+        ))),
+    }
+}
+
 /// Decodes one ProRes frame (as stored in a MOV sample).
 pub fn decode(frame: &[u8]) -> Result<Decoded, DecodeError> {
     let bad = || DecodeError::Corrupt("frame header".into());
@@ -126,6 +142,7 @@ pub fn decode(frame: &[u8]) -> Result<Decoded, DecodeError> {
     if width == 0 || height == 0 {
         return corrupt("frame size");
     }
+    let pixels = pixel_count(width, height)?;
     let mut qmat_luma = [4u16; 64];
     let mut qmat_chroma = [4u16; 64];
     let mut at = 20;
@@ -169,10 +186,10 @@ pub fn decode(frame: &[u8]) -> Result<Decoded, DecodeError> {
         width: width as u32,
         height: height as u32,
         chroma444: h.chroma444,
-        y: vec![512; width * height],
+        y: vec![512; pixels],
         cb: vec![512; cw * height],
         cr: vec![512; cw * height],
-        alpha: (h.alpha_bits > 0).then(|| vec![u16::MAX; width * height]),
+        alpha: (h.alpha_bits > 0).then(|| vec![u16::MAX; pixels]),
         color: h.color,
     };
     let mut pic = d.get(hdr_size..).ok_or_else(bad)?;
@@ -244,6 +261,11 @@ fn picture(
             y += 1;
             mbs = 1 << log2_mbs;
         }
+    }
+    // A field without rows (the second one of a frame one row high) has
+    // nothing to decode, and no slices to share among threads.
+    if slices.is_empty() {
+        return Ok(size);
     }
     let scan = if h.interlace == 0 {
         &SCAN
@@ -617,4 +639,51 @@ fn alpha(d: &[u8], count: usize, bits: u32) -> Vec<u16> {
     }
     out.resize(count, to16(val));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4:2:2 frame of `width` × `height` (`interlace`: 0 progressive, 1
+    /// top field first, 2 bottom field first) and its pictures' bytes.
+    fn frame(width: u16, height: u16, interlace: u8, pictures: &[&[u8]]) -> Vec<u8> {
+        let mut f = vec![0u8; 4];
+        f.extend(b"icpf");
+        // The header's size and version, the encoder's name.
+        f.extend(20u16.to_be_bytes());
+        f.extend(0u16.to_be_bytes());
+        f.extend(b"test");
+        f.extend(width.to_be_bytes());
+        f.extend(height.to_be_bytes());
+        f.push(0x80 | interlace << 2);
+        // Color, no alpha, the default matrices.
+        f.extend([0u8; 7]);
+        for p in pictures {
+            f.extend(*p);
+        }
+        f
+    }
+
+    #[test]
+    fn a_field_without_rows_is_passed_over() {
+        // One row, the bottom field first: that field has no row, the top
+        // one has the frame's only one (in a slice without data: gray).
+        let no_rows = [0x40, 0, 0, 0, 8, 0, 0, 0x30];
+        let one_row = [0x40, 0, 0, 0, 10, 0, 1, 0x30, 0, 0];
+        let out = decode(&frame(16, 1, 2, &[&no_rows, &one_row])).unwrap();
+        assert_eq!((out.width, out.height), (16, 1));
+        assert_eq!(out.y, [512; 16]);
+        // The top field first: the field without rows comes last.
+        assert!(decode(&frame(16, 1, 1, &[&one_row, &no_rows])).is_ok());
+    }
+
+    #[test]
+    fn a_frame_over_the_pixel_budget_is_refused() {
+        // A header of 28 bytes that claims 34 GB of samples.
+        let huge = frame(65_535, 65_535, 0, &[]);
+        assert!(matches!(decode(&huge), Err(DecodeError::Unsupported(_))));
+        assert_eq!(pixel_count(32_768, 16_384), Ok(MAX_PIXELS));
+        assert!(pixel_count(32_768, 16_385).is_err());
+    }
 }

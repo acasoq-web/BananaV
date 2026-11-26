@@ -1,7 +1,7 @@
 //! Windows and OS/2 bitmaps: 1, 2, 4 and 8 bits with a palette (also RLE4
 //! and RLE8), 16, 24 and 32 bits (with bit fields and alpha).
 
-use super::{Picture, Result, corrupt, unsupported};
+use super::{Picture, Result, checked_size, corrupt, pixel_count, unsupported};
 
 fn u16_at(d: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(d.get(at..at + 2)?.try_into().ok()?))
@@ -69,6 +69,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     if w == 0 || h == 0 || w > 65_535 || h > 65_535 {
         return corrupt("BMP size");
     }
+    let count = pixel_count(w, h)?;
     // 0 BI_RGB, 1 RLE8, 2 RLE4, 3 BITFIELDS, 6 ALPHABITFIELDS.
     match compression {
         0..=3 | 6 => {}
@@ -123,7 +124,19 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         Vec::new()
     };
     let pixels = d.get(offset..).ok_or_else(bad)?;
-    let mut out = vec![0u8; w * h * 4];
+    // Raw rows are all in the file (the last one's padding aside), or it
+    // is cut short: their room is not made on the header's word alone.
+    let row = (w * bpp as usize).div_ceil(8);
+    if !matches!((compression, bpp), (1, 8) | (2, 4)) {
+        if !matches!(bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
+            return unsupported(format!("BMP of {bpp} bits"));
+        }
+        let stride = (w * bpp as usize).div_ceil(32) * 4;
+        if pixels.len() < checked_size(h - 1, stride)? + row {
+            return corrupt("truncated BMP");
+        }
+    }
+    let mut out = vec![0u8; checked_size(count, 4)?];
     // Rows from the bottom unless the height is negative.
     let row_of = |r: usize| if top_down { r } else { h - 1 - r };
     match (compression, bpp) {
@@ -131,7 +144,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
         (_, 1 | 2 | 4 | 8) => {
             let stride = (w * bpp as usize).div_ceil(32) * 4;
             for r in 0..h {
-                let line = pixels.get(r * stride..r * stride + stride);
+                let line = pixels.get(r * stride..r * stride + row);
                 let Some(line) = line else { break };
                 let y = row_of(r);
                 for x in 0..w {
@@ -294,5 +307,48 @@ mod tests {
                 assert_eq!(a[3], if alpha { b[3] } else { 255 });
             }
         }
+    }
+
+    /// A 5×3 bitmap of 24 bits: rows of 15 bytes padded to 16.
+    fn small() -> Vec<u8> {
+        let px: Vec<u8> = (0..5 * 3 * 4).map(|i| (i * 7 % 256) as u8).collect();
+        bmp(&Image {
+            width: 5,
+            height: 3,
+            pixels: Pixels::Rgba8(&px),
+            alpha: false,
+        })
+    }
+
+    #[test]
+    fn rows_missing_from_the_file_are_refused() {
+        // The last row's padding may be missing; a pixel of it may not.
+        let mut d = small();
+        d.truncate(d.len() - 1);
+        assert!(super::read(&d).is_ok());
+        d.truncate(d.len() - 1);
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // 65535 × 65535 in the header of a file of a hundred bytes.
+        let mut d = small();
+        d[18..22].copy_from_slice(&65_535i32.to_le_bytes());
+        d[22..26].copy_from_slice(&65_535i32.to_le_bytes());
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
+        // Run-length encoded too, where the file's size says nothing.
+        d[28..30].copy_from_slice(&8u16.to_le_bytes());
+        d[30..34].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Unsupported(_))
+        ));
     }
 }

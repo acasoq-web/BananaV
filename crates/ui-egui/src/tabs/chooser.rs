@@ -60,6 +60,15 @@ pub(crate) struct ChooserState {
     focus_search: bool,
     /// The preset under the pointer, and since when (it plays).
     hovered: Option<(usize, f64)>,
+    /// The keys the window was given this frame (`crate::browse`): a
+    /// name's letters and Up and Down pick a plug-in, Left and Right a
+    /// preset.
+    pub keys: crate::browse::Keys,
+    /// Left and Right for the presets, from the keys.
+    preset_moves: Vec<crate::browse::Move>,
+    /// The chosen plug-in, or preset, scrolls into view.
+    reveal_plugin: bool,
+    reveal_preset: bool,
 }
 
 /// The windows' states.
@@ -146,11 +155,43 @@ pub(crate) fn frame(
     let (refresh, explore) = strip_ui(ui, strip, id, state, categories, plugins);
     let shown = shown(state, favorites, categories, plugins);
     // A plug-in is always chosen while any is listed.
-    let chosen = state
+    let mut chosen = state
         .plugin
         .as_deref()
         .and_then(|k| shown.iter().copied().find(|&i| plugins[i].key == k))
         .or_else(|| shown.iter().copied().find(|&i| plugins[i].ready));
+    // The keys: a name's letters, Up and Down pick a plug-in (one BananaV
+    // has); Left and Right go to the presets.
+    let keys = std::mem::take(&mut state.keys);
+    {
+        use crate::browse::{self, Move};
+        let ready: Vec<usize> = shown
+            .iter()
+            .copied()
+            .filter(|&i| plugins[i].ready)
+            .collect();
+        let at = chosen.and_then(|c| ready.iter().position(|&i| i == c));
+        let (across, down): (Vec<Move>, Vec<Move>) = keys
+            .moves
+            .iter()
+            .partition(|m| matches!(m, Move::Left | Move::Right));
+        let mut to = None;
+        if !keys.find.is_empty() {
+            to = browse::find(
+                ready.iter().map(|&i| plugins[i].name.as_str()),
+                at,
+                &keys.find,
+            );
+        }
+        if !down.is_empty() {
+            to = browse::step(ready.len(), at, &down, 1, 10);
+        }
+        if let Some(k) = to {
+            chosen = Some(ready[k]);
+            state.reveal_plugin = true;
+        }
+        state.preset_moves = across;
+    }
     let key = chosen.map(|i| plugins[i].key.clone());
     if key != state.plugin {
         state.plugin = key;
@@ -564,6 +605,9 @@ fn list_ui(
                     let (rect, resp) =
                         ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), sense);
                     let selected = state.plugin.as_deref() == Some(p.key.as_str());
+                    if selected && std::mem::take(&mut state.reveal_plugin) {
+                        ui.scroll_to_rect(rect, None);
+                    }
                     resp.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::SelectableLabel,
@@ -741,6 +785,12 @@ pub(crate) fn preset_grid(
                 let cols =
                     (((width - 2.0 * MARGIN.x + GAP.x) / (CELL.x + GAP.x)).floor() as usize).max(1);
                 let rows = names.len().div_ceil(cols);
+                // Left and Right: the preset before or after.
+                let moves = std::mem::take(&mut state.preset_moves);
+                if !moves.is_empty() {
+                    state.preset = crate::browse::step(names.len(), state.preset, &moves, 2, 1);
+                    state.reveal_preset = true;
+                }
                 let (grid, _) = ui.allocate_exact_size(
                     vec2(
                         width,
@@ -768,6 +818,9 @@ pub(crate) fn preset_grid(
                         resp.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
                         });
+                        if state.preset == Some(i) && std::mem::take(&mut state.reveal_preset) {
+                            ui.scroll_to_rect(rect, None);
+                        }
                         if ui.is_rect_visible(rect) {
                             let pic = Rect::from_min_size(rect.min, THUMB);
                             let painter = ui.painter_at(rect);

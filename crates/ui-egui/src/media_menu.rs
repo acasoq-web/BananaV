@@ -293,7 +293,7 @@ impl BananaApp {
     /// asked for, then the project's video files swapped for those there.
     pub(crate) fn swap_video_files_dialog(&mut self) {
         let Some(dir) = rfd::FileDialog::new()
-            .set_title(tr("Swap Video Files"))
+            .set_title(crate::i18n::os_text(tr("Swap Video Files")))
             .pick_folder()
         else {
             return;
@@ -362,7 +362,8 @@ impl BananaApp {
 
     /// Replace…: a file asked for, which media `id` becomes.
     pub(crate) fn replace_media_dialog(&mut self, id: MediaId) {
-        let dialog = rfd::FileDialog::new().set_title(tr("Replace Media File"));
+        let dialog =
+            rfd::FileDialog::new().set_title(crate::i18n::os_text(tr("Replace Media File")));
         let Some(path) = crate::media_files::media_filters(dialog).pick_file() else {
             return;
         };

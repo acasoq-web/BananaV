@@ -429,6 +429,8 @@ struct Unopened {
     sample: Option<IMFSample>,
     time: i64,
     changed: bool,
+    /// The decoder says the picture came out damaged.
+    damaged: bool,
     /// The picture's copy from the card, started when it was read.
     copy: Option<Copying>,
 }
@@ -480,10 +482,14 @@ fn next_sample(reader: &IMFSourceReader, stream: u32) -> Result<Option<Unopened>
             // A gap in the stream or a format change: try again.
             continue;
         };
+        // SAFETY: a sample just read.
+        let damaged =
+            unsafe { sample.GetUINT32(&MFSampleExtension_FrameCorruption) }.is_ok_and(|v| v != 0);
         return Ok(Some(Unopened {
             sample: Some(sample),
             time,
             changed,
+            damaged,
             copy: None,
         }));
     }
@@ -496,6 +502,7 @@ fn open_sample(u: Unopened) -> Result<RawSample> {
         time,
         changed,
         copy,
+        ..
     } = u;
     if let Some(c) = copy {
         return open_copy(c, time, changed).map(|(raw, _)| raw);
@@ -552,6 +559,10 @@ fn open_sample(u: Unopened) -> Result<RawSample> {
         }
     }
 }
+
+/// How many times a decoder's file is opened again for pictures that came
+/// out damaged or not at all.
+const MOST_REPAIRS: u32 = 4;
 
 /// Samples read ahead of the one opened when decoding on the card: their
 /// copies to memory start when they are read, and by the time a picture is
@@ -786,6 +797,21 @@ pub struct VideoDecoder {
     /// later frame with no keyframe on the way beats a seek, however far.
     keyframes: Option<std::sync::Arc<Vec<Tick>>>,
     eos: bool,
+    /// The time asked for last, and how many times in a row one further on
+    /// than the next frame was: an event sped up, or playback. Only the
+    /// frames shown are then copied out of the decoder.
+    asked: Option<Tick>,
+    strides: u32,
+    /// The first damaged picture since the last seek: those after it are
+    /// decoded from it.
+    damaged: Option<Tick>,
+    /// How many times the file was opened again for a picture that came
+    /// out damaged or not at all ([`MOST_REPAIRS`] at most).
+    repairs: u32,
+    /// How long decoding a frame that is passed by takes, and a seek, in
+    /// seconds: what is quicker on the way to a frame further on.
+    per_frame: f64,
+    per_seek: f64,
     /// Time (100 ns) of the first frame. Media Foundation does not apply the
     /// MP4 edit list (B-frame delay, say) and MPEG-TS times start anywhere:
     /// everything is shifted for the first frame to be zero.
@@ -956,6 +982,12 @@ impl VideoDecoder {
                 first: None,
                 keyframes: crate::mp4::video_keyframes_cached(path),
                 eos: false,
+                asked: None,
+                strides: 0,
+                damaged: None,
+                repairs: 0,
+                per_frame: 0.002,
+                per_seek: 0.03,
                 time_offset: 0,
             };
             // The first frame must come, and in a layout understood. It is
@@ -986,6 +1018,7 @@ impl VideoDecoder {
         self.eos = false;
         self.last = None;
         self.first = None;
+        self.damaged = None;
         Ok(())
     }
 
@@ -1134,7 +1167,10 @@ impl VideoDecoder {
     }
 
     /// The frame visible at `t` among those decoded: the last one at or
-    /// before `t`, as long as the next one (if any) starts after `t`.
+    /// before `t`, as long as the next one (if any) starts after `t`; after
+    /// the end, the last one, which stays (a file whose sound goes on past
+    /// its pictures — recordings often — sought every frame there, from its
+    /// last keyframe: a third of a second each in 4K).
     fn cached(&self, t: Tick) -> Option<&std::sync::Arc<VideoFrame>> {
         let nominal = self.rate.frame_duration();
         let n = self.recent.len();
@@ -1144,7 +1180,7 @@ impl VideoDecoder {
             let visible = f.pts <= t
                 && match next {
                     Some(nx) => t < nx.pts,
-                    None => t < f.pts + nominal,
+                    None => self.eos || t < f.pts + nominal,
                 };
             visible.then_some(f)
         })
@@ -1158,12 +1194,67 @@ impl VideoDecoder {
     /// [`frame_at`](Self::frame_at) that tells `way` about the frames on
     /// the way to `t` (after a seek, from the keyframe on): it may stop the
     /// decoding ([`Error::Interrupted`]) or ask for some of them.
+    ///
+    /// A frame the decoder says is damaged, or fails at, is decoded again
+    /// from its keyframe by a new one — on the card, then on the processor
+    /// —, which goes on from there: a card's hiccup (its driver started
+    /// again, its memory short) would stay in the picture, and in a
+    /// render, until the next keyframe.
     pub fn frame_at_with(
         &mut self,
         t: Tick,
         way: &mut dyn crate::Way,
     ) -> Result<std::sync::Arc<VideoFrame>> {
+        let first = self.frame_once(t, way);
+        let sound = |d: &VideoDecoder, r: &Result<std::sync::Arc<VideoFrame>>| match r {
+            Ok(f) => d.damaged.is_none_or(|from| f.pts < from),
+            Err(e) => matches!(e, Error::Interrupted),
+        };
+        if sound(self, &first) || self.repairs >= MOST_REPAIRS {
+            return first;
+        }
+        self.repairs += 1;
+        let repairs = self.repairs;
+        let processor = || {
+            [Layout::P010, Layout::Nv12, Layout::I420]
+                .into_iter()
+                .find_map(|l| VideoDecoder::open_as(&self.path, Mode::Processor, l).ok())
+        };
+        for again in 0..2 {
+            let fresh = match again {
+                0 => VideoDecoder::open(&self.path).ok(),
+                _ => processor(),
+            };
+            let Some(mut d) = fresh else { continue };
+            let r = d.frame_once(t, way);
+            if matches!(r, Err(Error::Interrupted)) {
+                return r;
+            }
+            if sound(&d, &r) {
+                d.repairs = repairs;
+                (d.asked, d.strides) = (self.asked, self.strides);
+                *self = d;
+                return r;
+            }
+        }
+        // The file itself is damaged there.
+        self.repairs = MOST_REPAIRS;
+        first
+    }
+
+    fn frame_once(
+        &mut self,
+        t: Tick,
+        way: &mut dyn crate::Way,
+    ) -> Result<std::sync::Arc<VideoFrame>> {
         init()?;
+        let frame = self.rate.frame_duration();
+        let step = self.asked.replace(t).map_or(Tick::ZERO, |a| t - a);
+        if step.0 * 2 > frame.0 * 3 && step < Tick::from_seconds(4) {
+            self.strides = self.strides.saturating_add(1);
+        } else if step != Tick::ZERO {
+            self.strides = 0;
+        }
         if let Some(f) = self.cached(t) {
             return Ok(f.clone());
         }
@@ -1180,7 +1271,8 @@ impl VideoDecoder {
                             .keyframes
                             .as_deref()
                             .is_some_and(|k| crate::mp4::same_group(k, last, t, slack)))
-            });
+            })
+            && !self.better_sought(t);
         if ahead && let Some(f) = self.decode_to(t, way)? {
             return Ok(f);
         }
@@ -1202,6 +1294,7 @@ impl VideoDecoder {
                 }
                 tried_first = true;
             }
+            let started = std::time::Instant::now();
             if back.is_finite() {
                 // Some sources refuse some positions (an MPEG program
                 // stream its last seconds): an earlier one may do.
@@ -1214,11 +1307,20 @@ impl VideoDecoder {
                 self.eos = false;
                 self.last = None;
                 self.first = None;
+                self.damaged = None;
             } else {
                 // At last, the file from its very start, read again (an
                 // MPEG-TS's first keyframe may sit before the first frame's
                 // time, and its seek to the start is not reliable).
                 self.reopen()?;
+            }
+            if back == 0.0 && self.skims() {
+                // The first frame there, which the rest is decoded from.
+                if let Some(u) = self.next_unopened(t)? {
+                    self.queue.push_front(u);
+                }
+                let took = started.elapsed().as_secs_f64();
+                self.per_seek += (took - self.per_seek) * 0.3;
             }
             let found = self.decode_to(t, way)?;
             let in_time = self.first.is_some_and(|f| f <= t + late);
@@ -1230,17 +1332,45 @@ impl VideoDecoder {
         Err(Error::Windows("no frames".into()))
     }
 
-    /// The next sample, not opened yet; `None` at the end.
-    fn next_unopened(&mut self) -> Result<Option<Unopened>> {
-        let ahead = if matches!(self.mode, Mode::Card(_)) {
-            CARD_AHEAD
-        } else {
-            0
+    /// Whether frames are asked for further on than one after another.
+    fn skims(&self) -> bool {
+        self.strides >= 2
+    }
+
+    /// Whether a seek to the keyframe before `t` gets there sooner than
+    /// decoding every frame on the way: played fast, in video too large to
+    /// be decoded whole as fast as that.
+    fn better_sought(&self, t: Tick) -> bool {
+        let (true, Some(last), Some(keys)) = (self.skims(), self.last, self.keyframes.as_deref())
+        else {
+            return false;
         };
+        let frame = self.rate.frame_duration();
+        let k = keys.partition_point(|k| *k <= t + Tick(frame.0 / 2));
+        let Some(key) = k.checked_sub(1).and_then(|k| keys.get(k)) else {
+            return false;
+        };
+        let passed = (*key - last).0 as f64 / frame.0.max(1) as f64;
+        passed * self.per_frame > self.per_seek * 1.2
+    }
+
+    /// The next sample, not opened yet, on the way to the frame at `t`;
+    /// `None` at the end.
+    fn next_unopened(&mut self, t: Tick) -> Result<Option<Unopened>> {
+        let skims = self.skims();
+        let ahead = match (&self.mode, skims) {
+            (Mode::Card(_), false) => CARD_AHEAD,
+            (Mode::Card(_), true) => 1,
+            _ => 0,
+        };
+        // Passed by, a frame is not copied from the card at all.
+        let frame = self.rate.frame_duration();
         while !self.source_end && self.queue.len() <= ahead {
             match next_sample(&self.reader.0, VIDEO)? {
                 Some(mut u) => {
-                    if ahead > 0 {
+                    let pts = hns_to_tick(u.time - self.time_offset);
+                    let shown = pts <= t && pts.0 + frame.0 * 3 / 2 > t.0;
+                    if ahead > 0 && (!skims || shown) {
                         start_copy(&mut u, &mut self.spare)?;
                     }
                     self.queue.push_back(u);
@@ -1292,7 +1422,14 @@ impl VideoDecoder {
         t: Tick,
         way: &mut dyn crate::Way,
     ) -> Result<Option<std::sync::Arc<VideoFrame>>> {
-        let near = self.rate.frame_duration().0 * 8;
+        let skims = self.skims();
+        let near = if skims {
+            0
+        } else {
+            self.rate.frame_duration().0 * 8
+        };
+        let started = std::time::Instant::now();
+        let mut passed = 0u32;
         // The sample before, not opened yet: it is the one visible at `t`
         // when the next one starts after `t`.
         let mut held: Option<(Tick, Unopened)> = None;
@@ -1303,7 +1440,7 @@ impl VideoDecoder {
                 }
                 return Err(Error::Interrupted);
             }
-            let Some(u) = self.next_unopened()? else {
+            let Some(u) = self.next_unopened(t)? else {
                 self.eos = true;
                 if let Some((_, h)) = held.take() {
                     self.keep(h)?;
@@ -1312,6 +1449,9 @@ impl VideoDecoder {
                 return Ok(self.recent.back().cloned());
             };
             let pts = self.snap(hns_to_tick(u.time - self.time_offset));
+            if u.damaged {
+                self.damaged.get_or_insert(pts);
+            }
             self.first.get_or_insert(pts);
             self.last = Some(pts);
             if let Some((held_pts, h)) = held.take() {
@@ -1323,6 +1463,18 @@ impl VideoDecoder {
                     }
                 } else {
                     self.discard(h);
+                    passed += 1;
+                }
+                if pts > t && skims {
+                    // Only the frame shown is kept; the one after is gone
+                    // on from next.
+                    self.queue.push_front(u);
+                    self.last = Some(held_pts);
+                    if passed >= 2 {
+                        let took = started.elapsed().as_secs_f64() / f64::from(passed + 1);
+                        self.per_frame += (took - self.per_frame) * 0.2;
+                    }
+                    return Ok(self.recent.back().cloned());
                 }
             }
             if pts > t {

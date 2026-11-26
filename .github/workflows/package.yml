@@ -66,7 +66,8 @@ jobs:
         env:
           # No Visual C++ runtime to install.
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release -p bananav
+        # With the command line's console program (bananav-cli.exe).
+        run: cargo build --release -p bananav -p bananav-cli
       - name: The 32-bit bridge
         if: matrix.arch == 'x64'
         env:
@@ -79,6 +80,7 @@ jobs:
           name="BananaV-$version-${GITHUB_SHA::7}-windows-${{ matrix.arch }}"
           mkdir -p "dist/$name"
           cp target/release/bananav.exe "dist/$name/BananaV.exe"
+          cp target/release/bananav-cli.exe "dist/$name/bananav-cli.exe"
           if [ -f target/i686-pc-windows-msvc/release/bananav-bridge32.exe ]; then
             cp target/i686-pc-windows-msvc/release/bananav-bridge32.exe "dist/$name/bananav-bridge32.exe"
           fi

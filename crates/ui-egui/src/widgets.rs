@@ -81,6 +81,24 @@ pub(crate) fn double_click_here(ui: &Ui) -> bool {
     clicked && at.is_some_and(|at| click_pairs(ui, at))
 }
 
+/// Whether a press at `at`, made at time `pressed`, is the second of a
+/// double-click: soon after a click near it that did not end a pair itself
+/// (what acts on a double-click's press, as one held and dragged).
+pub(crate) fn pressed_again(ui: &Ui, pressed: f64, at: egui::Pos2) -> bool {
+    let (delay, near) = ui.ctx().options(|o| {
+        (
+            o.input_options.max_double_click_delay,
+            o.input_options.max_click_dist,
+        )
+    });
+    let last: Option<(f64, egui::Pos2, bool, u64)> = ui
+        .ctx()
+        .data(|d| d.get_temp(egui::Id::new("bv-double-click")));
+    last.is_some_and(|(t, p, double, _)| {
+        !double && pressed >= t && pressed - t <= delay && (p - at).length() <= near * 2.0
+    })
+}
+
 /// Notes a click at `at`: whether it ends a pair.
 fn click_pairs(ui: &Ui, at: egui::Pos2) -> bool {
     let now = ui.input(|i| i.time);
@@ -261,6 +279,30 @@ pub fn icon_button_ex(ui: &mut Ui, icon: Icon, tip: &str, on: bool, enabled: boo
     resp.on_hover_text(tip)
 }
 
+/// The ▾ beside a toolbar button that opens its menu (Auto Ripple's), as
+/// tall as the button; named `tip`.
+pub fn menu_arrow(ui: &mut Ui, tip: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(12.0, BUTTON.y), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if resp.hovered() || resp.is_pointer_button_down_on() {
+            painter.rect_filled(rect, 3.0, theme::hover());
+        }
+        let c = rect.center();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + vec2(-3.5, -1.5),
+                c + vec2(3.5, -1.5),
+                c + vec2(0.0, 2.5),
+            ],
+            theme::text(),
+            Stroke::NONE,
+        ));
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    resp.on_hover_text(tip)
+}
+
 /// The width of a pane left of a splitter that can be dragged (VEGAS's
 /// windows split into a tree and a list): `default` until it is dragged,
 /// kept by `id` meanwhile, within `min` and what leaves `room` of `area`
@@ -371,8 +413,9 @@ fn bar_drag(g: &BarGrab, dx: f32, lens: (f64, f64)) -> (f64, f64) {
 /// part `start..start + len` of `0..total` that shows, never thinner than
 /// [`MIN_THUMB`]. Dragged by the middle it scrolls; by an end it zooms,
 /// that end following the pointer while the other stays (`lens`: the
-/// shortest and the longest part that can show); a click beside it brings
-/// the view there. Returns the new start and length when they change.
+/// shortest and the longest part that can show); a press beside it brings
+/// its middle there, held by it. Returns the new start and length when
+/// they change.
 pub(crate) fn zoom_scrollbar(
     ui: &mut Ui,
     rect: Rect,
@@ -401,45 +444,44 @@ pub(crate) fn zoom_scrollbar(
     resp.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, tr("Scroll bar"))
     });
-    if resp.drag_started() {
-        let x = ui
-            .input(|i| i.pointer.press_origin())
-            .map_or(thumb.center().x, |p| p.x);
-        if let Some(part) = part_at(x) {
-            let grab = BarGrab {
-                part,
-                x,
-                start,
-                len,
-                total,
-                width,
-                travel: rect.width() - width,
-            };
-            ui.data_mut(|d| d.insert_temp(id, grab));
-        }
+    let held = resp.is_pointer_button_down_on() || resp.dragged();
+    if held
+        && ui.input(|i| i.pointer.primary_pressed())
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let travel = rect.width() - width;
+        // Beside the thumb: its middle goes there, and is what is held.
+        let (part, from) = match part_at(p.x) {
+            Some(part) => (part, start),
+            None => {
+                let range = (total - len).max(0.0);
+                let to = if travel > 0.0 {
+                    ((p.x - rect.left() - width / 2.0) / travel) as f64 * range
+                } else {
+                    start
+                };
+                (BarPart::Middle, to.clamp(0.0, range))
+            }
+        };
+        let grab = BarGrab {
+            part,
+            x: p.x,
+            start: from,
+            len,
+            total,
+            width,
+            travel,
+        };
+        ui.data_mut(|d| d.insert_temp(id, grab));
     }
-    let grab = ui
-        .data(|d| d.get_temp::<BarGrab>(id))
-        .filter(|_| resp.dragged());
+    let grab = ui.data(|d| d.get_temp::<BarGrab>(id)).filter(|_| held);
     let mut out = None;
     if let (Some(g), Some(p)) = (grab, resp.interact_pointer_pos()) {
         let view = bar_drag(&g, p.x - g.x, lens);
         out = (view != (start, len)).then_some(view);
     }
-    if resp.drag_stopped() {
+    if !held {
         ui.data_mut(|d| d.remove::<BarGrab>(id));
-    }
-    if resp.clicked()
-        && let Some(p) = resp.interact_pointer_pos()
-        && part_at(p.x).is_none()
-    {
-        // Beside the thumb: its middle goes to the click.
-        let travel = rect.width() - width;
-        let range = (total - len).max(0.0);
-        if travel > 0.0 {
-            let s = ((p.x - rect.left() - width / 2.0) / travel) as f64 * range;
-            out = Some((s.clamp(0.0, range), len));
-        }
     }
     let part = grab
         .map(|g| g.part)
@@ -477,6 +519,65 @@ pub(crate) fn zoom_scrollbar(
         );
     }
     out
+}
+
+/// A vertical scroll bar, its thumb the part `start..start + len` of
+/// `0..total` that shows, never shorter than [`MIN_THUMB`]: dragged it
+/// scrolls, and a press beside it brings its middle there, held by it.
+/// Returns the new start when it changes.
+pub(crate) fn vertical_scrollbar(
+    ui: &mut Ui,
+    rect: Rect,
+    id: egui::Id,
+    (start, len): (f32, f32),
+    total: f32,
+) -> Option<f32> {
+    let (at, height) = thumb_span(rect.height(), start.into(), len.into(), total.into());
+    let thumb = Rect::from_min_size(
+        pos2(rect.left(), rect.top() + at),
+        vec2(rect.width(), height),
+    );
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, tr("Scroll bar"))
+    });
+    let held = resp.is_pointer_button_down_on() || resp.dragged();
+    let pointer = resp.interact_pointer_pos().filter(|_| held);
+    let range = (total - len).max(0.0);
+    let travel = rect.height() - height;
+    if let Some(p) = pointer
+        && ui.input(|i| i.pointer.primary_pressed())
+    {
+        // Where on the thumb it is held: its middle, beside it.
+        let grip = if thumb.y_range().contains(p.y) {
+            p.y - thumb.top()
+        } else {
+            height / 2.0
+        };
+        ui.data_mut(|d| d.insert_temp(id, grip));
+    }
+    let hot = resp.hovered() || held;
+    ui.painter_at(rect).rect_filled(
+        thumb.shrink2(vec2(2.0, 0.0)),
+        4.0,
+        if held {
+            theme::knob()
+        } else if hot {
+            theme::text_dim()
+        } else {
+            theme::separator()
+        },
+    );
+    let grip = ui.data(|d| d.get_temp::<f32>(id))?;
+    let Some(p) = pointer else {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        return None;
+    };
+    if travel <= 0.0 {
+        return None;
+    }
+    let to = ((p.y - grip - rect.top()) / travel * range).clamp(0.0, range);
+    (to != start).then_some(to)
 }
 
 /// Separador vertical fino para barras de ferramentas.

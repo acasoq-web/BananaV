@@ -8,12 +8,14 @@
 #[macro_use]
 mod i18n;
 
+mod agents;
 mod app;
 mod archive;
 mod ask;
 mod automation;
 mod autosave;
 mod beats_ui;
+mod browse;
 mod burn_cd;
 mod burn_dvd;
 mod burn_job;
@@ -64,6 +66,7 @@ mod menu_dialogs;
 mod menus;
 mod midi;
 mod modern_eq;
+mod mods;
 mod more_dialogs;
 mod motion_tracking;
 mod multicam;
@@ -88,10 +91,12 @@ mod proxies;
 mod realtime_ui;
 mod recording;
 mod render;
+mod safe_file;
 mod safe_start;
 mod screen_capture;
 mod sequence_dialog;
 mod settings;
+mod speed;
 mod stabilize_ui;
 mod subclip_ui;
 mod subtitles;
@@ -182,6 +187,14 @@ pub fn plugin_scan_child() -> Option<i32> {
     }
 }
 
+/// When BananaV was started for its command line (`bananav-cli`, or a
+/// command such as `bananav mcp`, see [`agents::cli`]): runs it without a
+/// window and gives the exit code.
+pub fn command_line() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    agents::cli::wanted(&args).then(|| agents::cli::main(args))
+}
+
 /// The program's icon, for the main window's title bar and taskbar button:
 /// the official one (`packaging/icons/bananav.png`, a 256 px render of
 /// `bananav-icon.svg`).
@@ -211,6 +224,9 @@ pub fn run() -> eframe::Result {
     // A start that ended early (a driver failing on DirectX 12) makes this
     // one draw through another interface; crashes write Crash.log.
     let graphics = safe_start::begin();
+    // BananaV's own plug-ins (some four hundred) are described while the
+    // window and the graphics card get ready; who needs them first waits.
+    std::thread::spawn(bv_engine::plugins::register_own);
     // macOS: Quit and the files Finder opens get BananaV's answers.
     bv_platform::before_run();
     let mut viewport = egui::ViewportBuilder::default()

@@ -205,7 +205,7 @@ fn ofx_section(ui: &mut egui::Ui, app: &mut BananaApp) {
     ui.horizontal(|ui| {
         if ui.button(tr("Add Folder…")).clicked()
             && let Some(dir) = rfd::FileDialog::new()
-                .set_title(tr("Folder with OFX plug-ins"))
+                .set_title(crate::i18n::os_text(tr("Folder with OFX plug-ins")))
                 .pick_folder()
         {
             if !app.settings.ofx_folders.contains(&dir) {

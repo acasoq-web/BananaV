@@ -68,7 +68,10 @@ with. **VST** is a trademark of Steinberg Media Technologies GmbH. BananaV is
 not made, endorsed or certified by Steinberg: it hosts VST 3 plug-ins through
 the VST 3 SDK's MIT-licensed interfaces, and VST 2 plug-ins through a
 compatibility layer of its own, written without Steinberg's VST 2 SDK, its
-code or its headers. BananaV uses no VST logo.
+code or its headers. BananaV uses no VST logo. **Premiere Pro** is a
+trademark of Adobe: BananaV's "[Premiere Pro]" keyboard map only offers
+that editor's familiar keys to those who come from it; BananaV is not
+made, endorsed or certified by Adobe.
 
 ## Asking for permission, reporting misuse
 

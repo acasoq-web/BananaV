@@ -774,7 +774,7 @@ impl PreferencesDialog {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(tr("Browse…")).clicked()
                     && let Some(dir) = rfd::FileDialog::new()
-                        .set_title(tr("Temporary files folder:"))
+                        .set_title(crate::i18n::os_text(tr("Temporary files folder:")))
                         .set_directory(self.draft.prefs.temp_dir())
                         .pick_folder()
                 {
@@ -1409,11 +1409,14 @@ impl PreferencesDialog {
         );
         ui.label(tr("Preferred audio editor:"));
         let pick = |current: &Option<std::path::PathBuf>, title: &str, programs: bool| {
-            let mut d = rfd::FileDialog::new().set_title(title);
+            let mut d = rfd::FileDialog::new().set_title(crate::i18n::os_text(title));
             if programs {
-                d = d.add_filter(tr("Programs"), &["exe"]);
+                d = d.add_filter(crate::i18n::os_text(tr("Programs")), &["exe"]);
             } else {
-                d = d.add_filter(tr("Sound files"), bv_engine::AUDIO_EXTENSIONS);
+                d = d.add_filter(
+                    crate::i18n::os_text(tr("Sound files")),
+                    bv_engine::AUDIO_EXTENSIONS,
+                );
             }
             if let Some(dir) = current.as_ref().and_then(|c| c.parent()) {
                 d = d.set_directory(dir);
@@ -2121,7 +2124,8 @@ impl PreferencesDialog {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let pick = |from: Option<&PathBuf>| {
-                    let mut d = rfd::FileDialog::new().set_title(tr("VST search folders:"));
+                    let mut d = rfd::FileDialog::new()
+                        .set_title(crate::i18n::os_text(tr("VST search folders:")));
                     if let Some(dir) = from {
                         d = d.set_directory(dir);
                     }

@@ -433,6 +433,17 @@ impl Stream {
     }
 }
 
+/// The longest stream a plug-in makes (a state, a preset): what a frame to
+/// the 32-bit bridge holds. Its places and sizes are the plug-in's to ask
+/// for: past this they would ask for more memory than there is.
+const MAX_STREAM: usize = bv_bridge::wire::MAX_FRAME;
+
+/// The furthest place in a stream of `len` bytes, and its largest size:
+/// the longest stream's (its own, were it given longer).
+fn furthest(len: usize) -> usize {
+    len.max(MAX_STREAM)
+}
+
 unsafe extern "system" fn stream_read(
     this: Raw,
     buf: *mut c_void,
@@ -448,7 +459,10 @@ unsafe extern "system" fn stream_read(
         let mut d = lock(&s.data);
         let (bytes, pos) = &mut *d;
         let take = (n as usize).min(bytes.len().saturating_sub(*pos));
-        std::ptr::copy_nonoverlapping(bytes.as_ptr().add(*pos), buf.cast::<u8>(), take);
+        // A place past the end is no place in the bytes: nothing is read.
+        if take > 0 {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr().add(*pos), buf.cast::<u8>(), take);
+        }
         *pos += take;
         if !read.is_null() {
             *read = take as i32;
@@ -471,11 +485,29 @@ unsafe extern "system" fn stream_write(
         let s = object::<Stream>(this, 0);
         let mut d = lock(&s.data);
         let (bytes, pos) = &mut *d;
-        let end = *pos + n as usize;
+        // An end past the furthest (or one that wraps around, in the
+        // 32-bit bridge), or more memory than there is: nothing written.
+        let end = (*pos)
+            .checked_add(n as usize)
+            .filter(|&end| end <= furthest(bytes.len()));
+        let room = end
+            .is_some_and(|end| end <= bytes.len() || bytes.try_reserve(end - bytes.len()).is_ok());
+        let (Some(end), true) = (end, room) else {
+            if !written.is_null() {
+                *written = 0;
+            }
+            return result::FALSE;
+        };
         if bytes.len() < end {
             bytes.resize(end, 0);
         }
-        std::ptr::copy_nonoverlapping(buf.cast::<u8>(), bytes.as_mut_ptr().add(*pos), n as usize);
+        if n > 0 {
+            std::ptr::copy_nonoverlapping(
+                buf.cast::<u8>(),
+                bytes.as_mut_ptr().add(*pos),
+                n as usize,
+            );
+        }
         *pos = end;
         if !written.is_null() {
             *written = n;
@@ -494,7 +526,9 @@ unsafe extern "system" fn stream_seek(this: Raw, to: i64, mode: i32, at: *mut i6
         2 => d.0.len() as i64,
         _ => return result::INVALID_ARGUMENT,
     };
-    let pos = (from + to).max(0);
+    // No place before the start nor past the furthest (the sum may be past
+    // any number's).
+    let pos = from.saturating_add(to).clamp(0, furthest(d.0.len()) as i64);
     d.1 = pos as usize;
     if !at.is_null() {
         // SAFETY: `at` points at an i64.
@@ -534,8 +568,16 @@ unsafe extern "system" fn stream_set_size(this: Raw, size: i64) -> TResult {
     // SAFETY: a stream's table 1.
     let s = unsafe { object::<Stream>(this, 1) };
     let mut d = lock(&s.data);
-    d.0.resize(size as usize, 0);
-    d.1 = d.1.min(size as usize);
+    let len = d.0.len();
+    if size > furthest(len) as i64 {
+        return result::INVALID_ARGUMENT;
+    }
+    let size = size as usize;
+    if size > len && d.0.try_reserve(size - len).is_err() {
+        return result::FALSE;
+    }
+    d.0.resize(size, 0);
+    d.1 = d.1.min(size);
     result::OK
 }
 
@@ -1253,6 +1295,49 @@ mod tests {
         drop(p);
         // The host's reference is the last one.
         assert_eq!(s.get().refs().load(Ordering::Acquire), 1);
+    }
+
+    /// A stream's places and sizes are the plug-in's to ask for: past the
+    /// longest stream they are cut or refused, where they would ask for
+    /// more memory than there is (or wrap around, in the 32-bit bridge).
+    #[test]
+    fn a_streams_places_and_sizes_stay_within_the_longest() {
+        let s = Stream::new(b"abc".to_vec());
+        let (stream, sized) = (s.raw(0), s.raw(1));
+        let (mut at, mut n) = (0i64, 7);
+        let mut buf = [1u8; 4];
+        // SAFETY: the stream's own tables, called as a plug-in would.
+        unsafe {
+            // A place past the longest is the longest; on from there, the
+            // same (no number wraps around).
+            assert_eq!(stream_seek(stream, i64::MAX, 0, &mut at), result::OK);
+            assert_eq!(at, MAX_STREAM as i64);
+            assert_eq!(stream_seek(stream, i64::MAX, 1, &mut at), result::OK);
+            assert_eq!(at, MAX_STREAM as i64);
+            // Nothing to read there, and nothing written past it.
+            let r = stream_read(stream, buf.as_mut_ptr().cast(), 4, &mut n);
+            assert_eq!((r, n), (result::OK, 0));
+            n = 7;
+            let r = stream_write(stream, buf.as_mut_ptr().cast(), 4, &mut n);
+            assert_eq!((r, n), (result::FALSE, 0));
+            // Sizes past the longest are refused.
+            for size in [i64::MAX, MAX_STREAM as i64 + 1] {
+                assert_eq!(stream_set_size(sized, size), result::INVALID_ARGUMENT);
+            }
+            // A place before the start is the start.
+            assert_eq!(stream_seek(stream, i64::MIN, 1, &mut at), result::OK);
+            assert_eq!(at, 0);
+        }
+        assert_eq!(s.get().bytes(), b"abc");
+        // SAFETY: as above.
+        unsafe {
+            // Written after a gap, the gap is zeros.
+            assert_eq!(stream_seek(stream, 5, 0, &mut at), result::OK);
+            let r = stream_write(stream, buf.as_mut_ptr().cast(), 1, &mut n);
+            assert_eq!((r, n), (result::OK, 1));
+            assert_eq!(stream_set_size(sized, 8), result::OK);
+        }
+        assert_eq!(s.get().bytes(), [b'a', b'b', b'c', 0, 0, 1, 0, 0]);
     }
 
     #[test]

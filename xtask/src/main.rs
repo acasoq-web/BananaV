@@ -1,15 +1,18 @@
-//! `cargo xtask <comando>` — automação de CI do BananaV.
+//! `cargo xtask <command>` — BananaV's checks.
 //!
-//! Comandos:
-//!   fmt [--fix]  confere (ou aplica) a formatação
-//!   lint         clippy em todo o workspace, warnings viram erro
-//!   test         testes de todo o workspace
-//!   layers       confere a regra de camadas entre crates
-//!   wasm         compila para wasm32 as crates marcadas com `wasm = true`
-//!   ci           tudo acima, na ordem (e, no Windows, a ponte de 32 bits)
+//! Commands:
+//!   fmt [--fix]  checks (or applies) the formatting
+//!   lint         clippy on the whole workspace, warnings made errors
+//!   test         the whole workspace's tests
+//!   layers       checks the layer rule between crates
+//!   wasm         builds for wasm32 the crates marked `wasm = true`
+//!   ci           all of the above, in that order (and, on Windows, the
+//!                32-bit bridge); a note when `target/debug` has grown
+//!                large
 //!   i18n         lists, per interface language, the texts its catalog
 //!                lacks and the entries no text uses (also written to
 //!                `target/i18n/<tag>.txt`)
+//!   banana       writes `crates/banana/src/generated.rs` from its kernels
 //!   perf         the performance guards in an optimized build of their
 //!                own (`target/perf`): the interface's frame budget while
 //!                the preview plays, and with `BV_PLAY_FILE=<video>` how
@@ -22,14 +25,18 @@ use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
-const HELP: &str = "uso: cargo xtask <comando>
-  fmt [--fix]  confere (ou aplica) a formatação
-  lint         clippy em todo o workspace, warnings viram erro
-  test         testes de todo o workspace
-  layers       confere a regra de camadas entre crates
-  wasm         compila para wasm32 as crates marcadas com `wasm = true`
-  ci           tudo acima, na ordem
+#[path = "../../crates/banana/gen/gen.rs"]
+mod banana_gen;
+
+const HELP: &str = "usage: cargo xtask <command>
+  fmt [--fix]  checks (or applies) the formatting
+  lint         clippy on the whole workspace, warnings made errors
+  test         the whole workspace's tests
+  layers       checks the layer rule between crates
+  wasm         builds for wasm32 the crates marked `wasm = true`
+  ci           all of the above, in that order
   i18n         texts each interface language lacks (target/i18n/<tag>.txt)
+  banana       writes crates/banana/src/generated.rs from its kernels
   perf         the interface's frame budget while playing, in an optimized
                build (BV_PLAY_FILE=<video>: the preview playing that file)";
 
@@ -45,6 +52,7 @@ fn main() -> ExitCode {
         "wasm" => wasm(),
         "ci" => ci(),
         "i18n" => i18n(),
+        "banana" => banana(),
         "perf" => perf(),
         _ => {
             println!("{HELP}");
@@ -62,18 +70,16 @@ fn main() -> ExitCode {
 
 type Result<T> = std::result::Result<T, String>;
 
+/// Banana Split's kernels written as Rust for the processor.
+fn banana() -> Result<()> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/banana");
+    let text = banana_gen::generate(&dir.join("kernels"))?;
+    let path = dir.join("src/generated.rs");
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 fn cargo(args: &[&str]) -> Result<()> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    eprintln!("$ cargo {}", args.join(" "));
-    let status = Command::new(cargo)
-        .args(args)
-        .status()
-        .map_err(|e| format!("não foi possível executar cargo: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("`cargo {}` falhou", args.join(" ")))
-    }
+    cargo_env(args, &[])
 }
 
 /// `cargo` with `envs` set.
@@ -183,7 +189,57 @@ fn ci() -> Result<()> {
     lint()?;
     test()?;
     wasm()?;
-    bridge32()
+    bridge32()?;
+    debug_size_note();
+    Ok(())
+}
+
+/// What `target/debug` may hold before `ci` says so: a build of everything
+/// with its tests writes about a fifth of it.
+const DEBUG_ROOM: u64 = 60 << 30;
+
+/// A note when `target/debug` has grown past [`DEBUG_ROOM`]: cargo never
+/// removes what older compilers, profiles and dependency versions built
+/// there (360 GB of it by 2026-11-13, with a disk filling up as the only
+/// sign).
+fn debug_size_note() {
+    let debug = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("debug");
+    let mut size = 0;
+    if !within(&debug, DEBUG_ROOM, &mut size) {
+        eprintln!(
+            "note: target/debug holds over {} GB of builds, most of them old: \
+             `cargo clean --profile dev` frees them (the next build makes \
+             everything again)",
+            DEBUG_ROOM >> 30
+        );
+    }
+}
+
+/// Adds the sizes of `dir`'s files to `size`; false as soon as they pass
+/// `room` (the rest is not counted).
+fn within(dir: &std::path::Path, room: u64, size: &mut u64) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            if !within(&entry.path(), room, size) {
+                return false;
+            }
+        } else {
+            *size += meta.len();
+            if *size > room {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// BananaV's 32-bit bridge (`apps/bridge32`), built for 32-bit Windows on a
@@ -217,7 +273,7 @@ fn bridge32() -> Result<()> {
 #[derive(Debug)]
 struct Crate {
     name: String,
-    /// `None` para ferramentas de desenvolvimento (fora do grafo do produto).
+    /// `None` for development tools (outside the product's graph).
     layer: Option<u64>,
     wasm: bool,
     deps: Vec<(String, DepKind)>,
@@ -240,17 +296,19 @@ fn metadata() -> Result<Vec<Crate>> {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    let packages = v["packages"].as_array().ok_or("metadata sem pacotes")?;
+    let packages = v["packages"]
+        .as_array()
+        .ok_or("metadata without packages")?;
     let mut crates = Vec::new();
     for p in packages {
         let name = p["name"].as_str().unwrap_or_default().to_string();
         let meta = &p["metadata"]["bananav"];
         let layer = match &meta["layer"] {
-            Value::Number(n) => Some(n.as_u64().ok_or(format!("{name}: camada inválida"))?),
+            Value::Number(n) => Some(n.as_u64().ok_or(format!("{name}: not a layer"))?),
             Value::String(s) if s == "tool" => None,
             _ => {
                 return Err(format!(
-                    "{name}: falta `[package.metadata.bananav] layer = N` no Cargo.toml"
+                    "{name}: its Cargo.toml lacks `[package.metadata.bananav] layer = N`"
                 ));
             }
         };
@@ -279,21 +337,21 @@ fn metadata() -> Result<Vec<Crate>> {
     Ok(crates)
 }
 
-/// Regra: uma crate só depende (normal ou build) de crates de camada *menor*.
-/// Testes (dev-dependencies) podem usar a mesma camada. Nenhuma crate do
-/// produto depende de ferramentas.
+/// The rule: a crate depends (normal or build) only on crates of a *lower*
+/// layer. Tests (dev-dependencies) may use the same layer. No crate of the
+/// product depends on a tool.
 fn check_layers(crates: &[Crate]) -> Vec<String> {
     let by_name: BTreeMap<&str, &Crate> = crates.iter().map(|c| (c.name.as_str(), c)).collect();
     let mut errors = Vec::new();
     for c in crates {
         for (dep, kind) in &c.deps {
             let Some(d) = by_name.get(dep.as_str()) else {
-                continue; // dependência externa
+                continue; // not one of BananaV's
             };
             match (c.layer, d.layer) {
                 (None, _) => {}
                 (Some(_), None) => {
-                    errors.push(format!("{} depende da ferramenta {}", c.name, d.name))
+                    errors.push(format!("{} depends on the tool {}", c.name, d.name))
                 }
                 (Some(own), Some(theirs)) => {
                     let ok = match kind {
@@ -302,11 +360,11 @@ fn check_layers(crates: &[Crate]) -> Vec<String> {
                     };
                     if !ok {
                         errors.push(format!(
-                            "{} (camada {own}) não pode depender de {} (camada {theirs}){}",
+                            "{} (layer {own}) may not depend on {} (layer {theirs}){}",
                             c.name,
                             d.name,
                             if *kind == DepKind::Dev {
-                                " nem em testes"
+                                ", not even in tests"
                             } else {
                                 ""
                             }
@@ -325,7 +383,7 @@ fn layers() -> Result<Vec<Crate>> {
     if errors.is_empty() {
         Ok(crates)
     } else {
-        Err(format!("violação de camadas:\n  {}", errors.join("\n  ")))
+        Err(format!("layers broken:\n  {}", errors.join("\n  ")))
     }
 }
 
@@ -336,7 +394,7 @@ fn print_layers(crates: &[Crate]) {
             by_layer.entry(l).or_default().push(&c.name);
         }
     }
-    println!("camadas OK");
+    println!("layers OK");
     for (l, names) in by_layer {
         println!("  {l}: {}", names.join(", "));
     }
@@ -371,14 +429,30 @@ mod tests {
     }
 
     #[test]
-    fn regras_de_camada() {
+    fn a_folder_is_within_its_room_until_its_files_pass_it() {
+        let dir = std::env::temp_dir().join(format!("bv-xtask-room-{}", std::process::id()));
+        let inner = dir.join("inner");
+        std::fs::create_dir_all(&inner).expect("a folder");
+        std::fs::write(dir.join("a"), [0u8; 300]).expect("a file");
+        std::fs::write(inner.join("b"), [0u8; 500]).expect("a file");
+        let mut size = 0;
+        assert!(within(&dir, 800, &mut size));
+        assert_eq!(size, 800);
+        assert!(!within(&dir, 799, &mut 0));
+        // A folder that is not there holds nothing.
+        assert!(within(&dir.join("none"), 0, &mut 0));
+        std::fs::remove_dir_all(&dir).expect("removed");
+    }
+
+    #[test]
+    fn layer_rules() {
         let crates = vec![
             krate("core", Some(0), &[("serde", DepKind::Normal)]),
             krate("codec", Some(1), &[("core", DepKind::Normal)]),
             krate("codec2", Some(1), &[("codec", DepKind::Dev)]),
             krate("ui", Some(5), &[("codec", DepKind::Normal)]),
             krate(
-                "ruim",
+                "bad",
                 Some(1),
                 &[("ui", DepKind::Normal), ("codec", DepKind::Normal)],
             ),
@@ -387,8 +461,8 @@ mod tests {
         ];
         let errors = check_layers(&crates);
         assert_eq!(errors.len(), 3, "{errors:#?}");
-        assert!(errors[0].contains("ruim") && errors[0].contains("ui"));
-        assert!(errors[1].contains("ruim") && errors[1].contains("codec"));
-        assert!(errors[2].contains("ferramenta"));
+        assert!(errors[0].contains("bad") && errors[0].contains("ui"));
+        assert!(errors[1].contains("bad") && errors[1].contains("codec"));
+        assert!(errors[2].contains("the tool"));
     }
 }

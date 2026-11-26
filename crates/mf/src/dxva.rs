@@ -101,6 +101,9 @@ pub(crate) fn device(setting: &HardwareDecoding) -> Option<Arc<DecodeDevice>> {
         HardwareDecoding::Card(n) => list.into_iter().find(|(name, _)| name == n)?,
     };
     let mut devices = DEVICES.lock().ok()?;
+    // One whose card's driver was started again decodes nothing more.
+    // SAFETY: a device made below.
+    devices.retain(|(_, d)| unsafe { d._device.GetDeviceRemovedReason() }.is_ok());
     if let Some((_, d)) = devices.iter().find(|(n, _)| *n == name) {
         return Some(d.clone());
     }

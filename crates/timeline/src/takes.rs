@@ -1,9 +1,10 @@
 //! Takes: an event's other media, as VEGAS keeps them — alternate versions
 //! (voiceovers, camera angles) of which one, the active take, plays. The
 //! active take is the event's own `media` and `source_in`; [`Clip::takes`]
-//! lists all of them in order when there is more than one, each placed by
-//! its offset from the active take's `source_in`, so trims and splits move
-//! them all together and switching keeps each where it was.
+//! lists all of them in order when there is more than one (or its only
+//! one, when it has a name), each placed by its offset from the active
+//! take's `source_in`, so trims and splits move them all together and
+//! switching keeps each where it was.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +66,7 @@ impl Clip {
 
     /// Makes take `k` the active one: the event plays its media from where
     /// it is placed, and the others keep their places.
-    fn activate(&mut self, k: usize) {
+    pub(crate) fn activate(&mut self, k: usize) {
         if self.takes.is_empty() || k >= self.takes.len() || self.takes[k].none {
             return;
         }
@@ -79,6 +80,13 @@ impl Clip {
         self.media = self.takes[k].media;
         self.source_in += shift;
         self.active_take = k;
+        // A take placed before its media's start: without Loop the event
+        // plays it from its start (the other takes stay where they were).
+        if !self.looped && self.source_in < Tick::ZERO {
+            let back = self.source_in;
+            self.source_in = Tick::ZERO;
+            self.slip_active_take_only(-back);
+        }
     }
 
     /// The active take moved by `delta` in its media alone (a slip that
@@ -217,6 +225,11 @@ impl Project {
         }
         let name = name.trim();
         clip.takes[k].name = (!name.is_empty()).then(|| name.to_string());
+        // An only take is listed for its name alone.
+        if clip.takes.len() == 1 && clip.takes[0].name.is_none() {
+            clip.takes.clear();
+            clip.active_take = 0;
+        }
         Ok(())
     }
 
@@ -260,7 +273,9 @@ impl Project {
     pub(crate) fn drop_takes_of(&mut self, media: MediaId) {
         for t in &mut self.tracks {
             for c in &mut t.clips {
-                if c.takes.is_empty() {
+                // Events without a take of it stay as they are (an only
+                // take keeps its name).
+                if c.takes.is_empty() || !c.take_media().any(|m| m == media) {
                     continue;
                 }
                 if c.media == media
@@ -382,6 +397,61 @@ mod tests {
         let c = p.clip(clip).unwrap();
         assert_eq!(c.take_count(), 2);
         assert_ne!(c.media, blue);
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn naming_an_events_only_take_leaves_a_project_that_opens() {
+        let (mut p, clip, _, blue) = setup();
+        p.rename_take(clip, 0, "Wide shot").unwrap();
+        assert_eq!(p.clip(clip).unwrap().take_count(), 1);
+        assert_eq!(p.take_name(clip, 0).as_deref(), Some("Wide shot"));
+        p.check_invariants().unwrap();
+        // Saved and opened again, the name is there.
+        let back = Project::from_json(&p.to_json()).unwrap();
+        back.check_invariants().unwrap();
+        assert_eq!(back.take_name(clip, 0).as_deref(), Some("Wide shot"));
+        // Another media leaving the project leaves the name.
+        p.remove_media(blue).unwrap();
+        assert_eq!(p.take_name(clip, 0).as_deref(), Some("Wide shot"));
+        // An active take the event does not have is still refused.
+        let mut broken = p.clone();
+        broken.clip_mut(clip).unwrap().active_take = 3;
+        assert!(broken.check_invariants().is_err());
+        // Its name taken back: an event without takes again.
+        p.rename_take(clip, 0, " ").unwrap();
+        assert!(p.clip(clip).unwrap().takes.is_empty());
+        assert_eq!(
+            p.take_name(clip, 0),
+            p.media.first().map(|m| m.name.clone())
+        );
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_take_placed_before_its_media_plays_from_its_start_without_loop() {
+        let (mut p, clip, green, _) = setup();
+        let s = Tick::from_seconds;
+        // With Loop the media repeats: the take keeps its place.
+        let mut looped = p.clone();
+        looped.add_take_at(clip, green, s(-3)).unwrap();
+        assert_eq!(looped.clip(clip).unwrap().source_in, s(-3));
+        looped.check_invariants().unwrap();
+        // Without it, red 2 s into its media and green 3 s before its own
+        // start: green plays from its start.
+        {
+            let c = p.clip_mut(clip).unwrap();
+            c.looped = false;
+            c.source_in = s(2);
+        }
+        p.add_take_at(clip, green, s(-3)).unwrap();
+        assert_eq!(p.clip(clip).unwrap().source_in, Tick::ZERO);
+        p.check_invariants().unwrap();
+        // Red is where it was, and green stays at its start.
+        p.step_take(clip, false).unwrap();
+        assert_eq!(p.clip(clip).unwrap().source_in, s(2));
+        p.step_take(clip, false).unwrap();
+        assert_eq!(p.clip(clip).unwrap().source_in, Tick::ZERO);
         p.check_invariants().unwrap();
     }
 }

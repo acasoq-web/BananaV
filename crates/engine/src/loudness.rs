@@ -1,6 +1,7 @@
 //! Loudness scan (Tools › Generate Loudness Log): mixes the project in the
 //! background and measures it with the BS.1770 / EBU R 128 meter.
 
+use crate::LockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -63,12 +64,12 @@ impl LoudnessJob {
                         meter.push(&buf.channels);
                         pos += n as i64;
                         timeline.push((rate.sample_start(pos), meter.short_term()));
-                        let mut p = progress.lock().expect("progress");
+                        let mut p = progress.locked();
                         p.done = (pos - first) as u64;
                         drop(p);
                         repaint();
                     }
-                    let mut p = progress.lock().expect("progress");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.report = Some(meter.report());
                     p.timeline = timeline;
@@ -85,7 +86,7 @@ impl LoudnessJob {
     }
 
     pub(crate) fn progress(&self) -> LoudnessProgress {
-        self.progress.lock().expect("progress").clone()
+        self.progress.locked().clone()
     }
 }
 

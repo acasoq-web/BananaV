@@ -20,7 +20,7 @@ use crate::preferences::preview_display;
 pub(crate) struct ExternalMonitor {
     texture: Option<TextureHandle>,
     /// The frame shown (generation, time, size), so each is prepared once.
-    shown: Option<(u64, Tick, u32, u32)>,
+    shown: Option<bv_engine::FrameKey>,
     /// The frame's size once prepared (rotated back, scaled).
     size: (u32, u32),
 }
@@ -199,7 +199,7 @@ impl BananaApp {
                 (d.y as f32 + d.height as f32 / 2.0) / d.scale,
             );
             let builder = egui::ViewportBuilder::default()
-                .with_title(trf!("Display {}", number))
+                .with_title(crate::i18n::os_text(trf!("Display {}", number)))
                 .with_decorations(false)
                 .with_taskbar(false)
                 .with_always_on_top()
@@ -296,7 +296,7 @@ impl BananaApp {
             }
         };
         if let Some(f) = frame {
-            let key = (f.generation, f.time, f.width, f.height);
+            let key = f.key();
             // "Recompress edited frames" off: frames the project draws
             // (effects, transitions, compositing) are not sent, only plain
             // media.
@@ -344,7 +344,7 @@ impl BananaApp {
             }
         }
         let builder = egui::ViewportBuilder::default()
-            .with_title(tr("External Monitor"))
+            .with_title(crate::i18n::os_text(tr("External Monitor")))
             .with_decorations(false)
             .with_taskbar(false)
             .with_monitor(index);

@@ -17,6 +17,16 @@ Requirements
 - Media Foundation (part of Windows) to open and render video. On
   Windows "N" editions, install the Media Feature Pack.
 
+Command line and AI agents
+- bananav-cli.exe, beside BananaV.exe, is BananaV's command line: from a
+  terminal, "bananav-cli help" lists its commands (project info, render,
+  a frame as a picture, every editing tool). Its results come as JSON.
+- AI agents edit projects through the Model Context Protocol: their
+  program starts "BananaV.exe mcp" (a project of their own), or
+  "BananaV.exe mcp --live" for the project open in BananaV once
+  Options > BananaV Mods > AI agents is on (its "Copy MCP configuration"
+  button gives the settings). Only programs on this computer connect.
+
 Settings
 - Your settings (recent projects, window layouts, language, toolbars,
   keyboard maps, presets, video templates) are kept in

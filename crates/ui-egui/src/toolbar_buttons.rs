@@ -762,12 +762,95 @@ pub fn paint(ui: &mut crate::egui::Ui, app: &mut BananaApp, kind: ToolbarKind) {
             crate::widgets::toolbar_separator(ui);
             continue;
         };
+        if b == B::NormalTool {
+            edit_tool_button(ui, app);
+            continue;
+        }
         let on = b.checked(app).unwrap_or(false);
         let tip = b.tooltip(app);
         if crate::widgets::icon_button_ex(ui, icon, &tip, on, b.enabled(app)).clicked() {
             b.run(app);
         }
+        if b == B::AutoRipple {
+            ripple_menu(ui, app);
+        }
     }
+}
+
+/// The Normal Edit Tool's button, as VEGAS's: it stands for the editing
+/// mode last used — Normal, Shuffle, Slip, Slide, Time Stretch/Compress or
+/// Split Trim, its icon showing it — and the ▾ beside it picks one.
+fn edit_tool_button(ui: &mut crate::egui::Ui, app: &mut BananaApp) {
+    if Tool::EDIT_MODES.contains(&app.tool) {
+        app.edit_mode = app.tool;
+    }
+    let mode = app.edit_mode;
+    let keys = app.keymap.text_for(Action::Cmd(Cmd::UseTool(mode)));
+    let tip = if keys.is_empty() {
+        mode.label().to_string()
+    } else {
+        format!("{} ({keys})", mode.label())
+    };
+    if crate::widgets::icon_button_ex(ui, mode.icon(), &tip, app.tool == mode, true).clicked() {
+        app.set_tool(mode);
+    }
+    let arrow = crate::widgets::menu_arrow(ui, tr("Editing Tool"));
+    crate::egui::Popup::menu(&arrow).show(|ui| {
+        for t in Tool::EDIT_MODES {
+            if tool_item(ui, t, app.tool == t) {
+                app.set_tool(t);
+                app.edit_mode = t;
+                ui.close();
+            }
+        }
+    });
+}
+
+/// A row of the editing modes' menu: a dot by the mode in use, its icon,
+/// its name; clicked or not.
+fn tool_item(ui: &mut crate::egui::Ui, t: Tool, picked: bool) -> bool {
+    use crate::egui::{Atom, Button, Id, vec2};
+    let dot = Id::new(("edit-mode-dot", t.label()));
+    let icon = Id::new(("edit-mode-icon", t.label()));
+    let button = Button::new((
+        Atom::custom(dot, vec2(10.0, 16.0)),
+        Atom::custom(icon, vec2(16.0, 16.0)),
+        t.label(),
+    ));
+    let resp = button.atom_ui(ui);
+    if picked && let Some(r) = resp.rect(dot) {
+        ui.painter()
+            .circle_filled(r.center(), 4.0, crate::theme::text());
+    }
+    if let Some(r) = resp.rect(icon) {
+        crate::icons::paint(ui.painter(), r.shrink(1.0), t.icon(), crate::theme::text());
+    }
+    resp.response.widget_info(|| {
+        crate::egui::WidgetInfo::selected(
+            crate::egui::WidgetType::RadioButton,
+            true,
+            picked,
+            t.label(),
+        )
+    });
+    resp.response.clicked()
+}
+
+/// The ▾ beside the Auto Ripple button, as VEGAS's: its menu picks what a
+/// ripple moves (Options › Ripple's three), before Auto Ripple goes on
+/// too.
+fn ripple_menu(ui: &mut crate::egui::Ui, app: &mut BananaApp) {
+    use bv_timeline::RippleScope;
+    let arrow = crate::widgets::menu_arrow(ui, tr("Ripple"));
+    crate::egui::Popup::menu(&arrow).show(|ui| {
+        for scope in [
+            RippleScope::AffectedTracks,
+            RippleScope::AffectedTracksAndMarkers,
+            RippleScope::All,
+        ] {
+            crate::menus::cmd(ui, app, Cmd::RippleMode(scope));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -784,6 +867,182 @@ mod tests {
         }
         assert_eq!(all.len(), 48 + MAIN_DEFAULT.len());
         assert_eq!(B::Script(17).label(), "Stereo to Mono");
+    }
+
+    /// The timeline draws with the layout and its own view out of the
+    /// app: what its toolbar's buttons switch and open must still reach
+    /// them (a switch of the view used to land on a stand-in, a docked
+    /// window asked for was never shown).
+    #[test]
+    fn the_timeline_toolbar_switches_the_view_and_opens_docked_windows() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        // Only these two, and none on the main toolbar: found by their tips.
+        app.settings.main_toolbar = Some(Vec::new());
+        app.settings.timeline_toolbar = Some(vec![B::ShowVideoEventEdgeFrames, B::ColorGrading]);
+        let frames = app.timeline.show_thumbnails;
+        let open = app.is_tab_open(Tab::ColorGrading);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let tip = B::ShowVideoEventEdgeFrames.tooltip(h.state());
+        h.get_by_label(&tip).click();
+        h.run_steps(3);
+        assert_eq!(
+            h.state().timeline.show_thumbnails,
+            !frames,
+            "the view itself switched"
+        );
+        // And the button shows it: pressed with the frames shown.
+        assert_eq!(
+            B::ShowVideoEventEdgeFrames.checked(h.state()),
+            Some(!frames)
+        );
+        let tip = B::ColorGrading.tooltip(h.state());
+        h.get_by_label(&tip).click();
+        h.run_steps(3);
+        assert_eq!(
+            h.state().is_tab_open(Tab::ColorGrading),
+            !open,
+            "the docked window opened (or closed)"
+        );
+    }
+
+    /// The ▾ beside Auto Ripple, as VEGAS's: its menu's three ripple modes
+    /// (the one in use dotted), picked before Auto Ripple goes on too.
+    #[test]
+    fn the_auto_ripple_arrow_picks_the_ripple_mode() {
+        use bv_timeline::RippleScope;
+        use egui_kittest::kittest::{NodeT, Queryable};
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        app.settings.main_toolbar = Some(Vec::new());
+        app.settings.timeline_toolbar = Some(vec![B::AutoRipple]);
+        assert!(!app.auto_ripple);
+        assert_eq!(app.ripple_scope, RippleScope::AffectedTracks);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        let modes = [
+            (
+                "Affected Tracks, Bus Tracks, Markers, and Regions",
+                RippleScope::AffectedTracksAndMarkers,
+            ),
+            ("All Tracks, Markers, and Regions", RippleScope::All),
+            ("Affected Tracks", RippleScope::AffectedTracks),
+        ];
+        for (label, scope) in modes {
+            h.get_by_label("Ripple").click();
+            h.run_steps(3);
+            // The three, in VEGAS's order.
+            let items: Vec<String> = h
+                .query_all_by_role(crate::egui::accesskit::Role::Button)
+                .filter_map(|n| n.accesskit_node().label())
+                .map(|l| l.trim_end().to_string())
+                .filter(|l| l.contains("Tracks"))
+                .collect();
+            assert_eq!(
+                items,
+                [
+                    "Affected Tracks",
+                    "Affected Tracks, Bus Tracks, Markers, and Regions",
+                    "All Tracks, Markers, and Regions"
+                ]
+            );
+            h.query_all_by_role(crate::egui::accesskit::Role::Button)
+                .find(|n| {
+                    n.accesskit_node()
+                        .label()
+                        .is_some_and(|l| l.trim_end() == label)
+                })
+                .expect("the mode in the menu")
+                .click();
+            h.run_steps(3);
+            assert_eq!(h.state().ripple_scope, scope, "{label}");
+            assert_eq!(Cmd::RippleMode(scope).checked(h.state()), Some(true));
+            assert!(!h.state().auto_ripple, "picked with Auto Ripple off");
+        }
+        h.get_by_label(&B::AutoRipple.tooltip(h.state())).click();
+        h.run_steps(3);
+        assert!(h.state().auto_ripple);
+    }
+
+    /// The ▾ beside the Normal Edit Tool, as VEGAS's: its six editing
+    /// modes, the one in use dotted; picked, the button stands for it (its
+    /// tip and icon), and a click on it comes back to it from another tool.
+    #[test]
+    fn the_edit_tool_arrow_picks_the_editing_mode() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(crate::egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        app.settings.main_toolbar = Some(Vec::new());
+        app.settings.timeline_toolbar = Some(vec![B::NormalTool]);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(crate::egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(4);
+        h.get_by_label("Editing Tool").click();
+        h.run_steps(3);
+        let rows: Vec<(String, bool)> = h
+            .query_all_by_role(crate::egui::accesskit::Role::RadioButton)
+            .filter_map(|n| {
+                let a = n.accesskit_node();
+                Some((
+                    a.label()?,
+                    a.toggled() == Some(crate::egui::accesskit::Toggled::True),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Normal Edit Tool".to_string(), true),
+                ("Shuffle Tool".to_string(), false),
+                ("Slip Tool".to_string(), false),
+                ("Slide Tool".to_string(), false),
+                ("Time Stretch/Compress Tool".to_string(), false),
+                ("Split Trim Tool".to_string(), false),
+            ]
+        );
+        h.get_by_label("Slip Tool").click();
+        h.run_steps(3);
+        assert_eq!(h.state().tool, Tool::Slip);
+        // The button now stands for Slip: back to it from the Zoom tool.
+        h.state_mut().tool = Tool::Zoom;
+        h.run_steps(2);
+        h.get_by_label_contains("Slip Tool").click();
+        h.run_steps(2);
+        assert_eq!(h.state().tool, Tool::Slip);
     }
 
     #[test]

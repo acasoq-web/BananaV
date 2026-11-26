@@ -331,17 +331,7 @@ fn to_video_gamma(px: [f32; 4]) -> [f32; 4] {
 }
 
 fn from_video_gamma(px: [f32; 4], clip: bool) -> [f32; 4] {
-    let px = if clip {
-        let a = px[3].clamp(0.0, 1.0);
-        [
-            px[0].clamp(0.0, a),
-            px[1].clamp(0.0, a),
-            px[2].clamp(0.0, a),
-            a,
-        ]
-    } else {
-        px
-    };
+    let px = if clip { effects::clipped(px) } else { px };
     map_straight(px, bv_color::transfer::bt709_to_linear)
 }
 

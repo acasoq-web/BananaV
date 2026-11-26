@@ -624,6 +624,55 @@ impl Project {
         Ok(ids)
     }
 
+    /// An event's edge Ctrl-dragged: event `id` played at `rate`, its
+    /// group stretched with it as one — every member's speed changed by the
+    /// same factor and its start and end moved as far from the group's start
+    /// (its end, with `keep_end`: dragged by its start) as that scales them
+    /// —, so that events side by side stay side by side and grouped sound
+    /// stays with its picture. The same part of each one's media plays.
+    pub fn stretch_group(&mut self, id: ClipId, rate: f64, keep_end: bool) -> Result<()> {
+        let rate = rate.clamp(0.05, 20.0);
+        let old = self.clip(id).ok_or(EditError::UnknownClip(id))?.rate;
+        if old.is_nan() || old <= 0.0 {
+            return self.set_clip_rate(id, rate);
+        }
+        let factor = rate / old;
+        let members = self.member_positions(id)?;
+        let (Some(first), Some(last)) = (
+            members
+                .iter()
+                .map(|&(t, c)| self.tracks[t].clips[c].start)
+                .min(),
+            members
+                .iter()
+                .map(|&(t, c)| self.tracks[t].clips[c].end())
+                .max(),
+        ) else {
+            return Ok(());
+        };
+        let anchor = if keep_end { last } else { first };
+        // How far a time moves: its distance to the anchor scaled.
+        let place = |t: Tick| -> Tick {
+            let d = (t - anchor).0 as f64 / factor;
+            Tick(anchor.0 + d.round() as i64)
+        };
+        let min_dur = self.min_clip_duration();
+        for (t, c) in members {
+            let m = &mut self.tracks[t].clips[c];
+            let start = place(m.start).max(Tick::ZERO);
+            let end = place(m.end()).max(start + min_dur);
+            m.rate = (m.rate * factor).clamp(0.05, 20.0);
+            m.start = start;
+            m.duration = end - start;
+            clamp_fades(m);
+            if m.all_frames {
+                self.fit_all_frames(t, c);
+            }
+        }
+        self.sort_all();
+        Ok(())
+    }
+
     /// Muda a velocidade do clipe (e do grupo) mantendo o mesmo trecho da
     /// mídia: o clipe encurta ao acelerar e alonga ao desacelerar.
     pub fn set_clip_rate(&mut self, id: ClipId, rate: f64) -> Result<()> {
@@ -936,29 +985,25 @@ impl Project {
         }) {
             return Ok(Tick::ZERO);
         }
-        let mut delta = new_start - clip.start;
+        // How far back and how far forward the start may go, for every
+        // member of the group.
+        let (mut back, mut forward) = (Tick::MIN, Tick::MAX);
         for &(t, c) in &members {
             let m = &self.tracks[t].clips[c];
-            // Não antes do início da mídia (a não ser com Loop, que a
-            // repete) nem do zero da timeline…
+            // Not before the media's start (unless Loop repeats it) nor
+            // before the timeline's…
             if m.freeze.is_none() && !m.looped {
-                delta = delta.max(-m.to_timeline(m.source_in));
+                back = back.max(-m.to_timeline(m.source_in));
             }
-            delta = delta.max(-m.start);
-            // …e sem deixar o clipe menor que um quadro.
-            delta = delta.min(m.duration - min_dur.min(m.duration));
+            back = back.max(-m.start);
+            // …and no event shorter than a frame.
+            forward = forward.min(m.duration - min_dur.min(m.duration));
         }
+        // The limit forward is the last word: whatever the others ask, no
+        // member ends up shorter than a frame.
+        let delta = (new_start - clip.start).max(back).min(forward);
         for &(t, c) in &members {
-            let m = &mut self.tracks[t].clips[c];
-            rebase_keys(m, delta);
-            m.start += delta;
-            m.source_in += m.source_offset(delta);
-            rebase_envelopes(m, delta);
-            if !m.looped {
-                m.source_in = m.source_in.max(Tick::ZERO);
-            }
-            m.duration -= delta;
-            clamp_fades(m);
+            advance_start(&mut self.tracks[t].clips[c], delta);
         }
         self.sort_all();
         Ok(delta)
@@ -1169,19 +1214,86 @@ impl Project {
                     continue;
                 };
                 let holes = union(ranges);
+                let starts: Vec<Tick> = t.clips.iter().map(|c| c.start).collect();
+                let closings = hole_closings(&holes, &starts);
                 for c in &mut t.clips {
-                    let shift: i64 = holes
-                        .iter()
-                        .filter(|h| h.end() <= c.start)
-                        .map(|h| h.duration.0)
-                        .sum();
-                    c.start -= Tick(shift);
+                    c.start = closed(c.start, &holes, &closings);
                 }
                 t.sort();
             }
         }
         Ok(())
     }
+}
+
+/// How far each of `holes` (in order, apart) closes on a track whose
+/// events left start at `starts`: its whole length, or only up to the
+/// first event that starts inside it — one the deleted event crossfaded
+/// into, which comes to where the hole began and stays whole.
+pub(crate) fn hole_closings(holes: &[TimeRange], starts: &[Tick]) -> Vec<Tick> {
+    holes
+        .iter()
+        .map(|h| {
+            starts
+                .iter()
+                .filter(|&&s| s >= h.start)
+                .min()
+                .map_or(h.duration, |&s| s.min(h.end()) - h.start)
+        })
+        .collect()
+}
+
+/// Where time `t` is once `holes` have closed by `closings`
+/// ([`hole_closings`]): what was after the part of a hole that closed
+/// comes that much earlier, what was inside it lands where the hole began.
+pub(crate) fn closed(t: Tick, holes: &[TimeRange], closings: &[Tick]) -> Tick {
+    let mut out = t;
+    for (h, &closing) in holes.iter().zip(closings) {
+        if t > h.start {
+            out -= (t - h.start).min(closing);
+        }
+    }
+    out
+}
+
+/// The event's start `delta` later in it, its end where it was (a trim of
+/// its start): its keyframes, envelopes and fades go on showing what they
+/// showed.
+fn advance_start(m: &mut Clip, delta: Tick) {
+    rebase_keys(m, delta);
+    m.start += delta;
+    m.source_in += m.source_offset(delta);
+    rebase_envelopes(m, delta);
+    if !m.looped {
+        m.source_in = m.source_in.max(Tick::ZERO);
+    }
+    m.duration -= delta;
+    clamp_fades(m);
+}
+
+/// An event that does not loop starts no earlier than its media. One
+/// that does — left so when its Loop went off — keeps its picture in
+/// place and loses the part before its media's start, as a trim of its
+/// start would take it; with less than `min` (a frame) of it from there
+/// on, or a frozen frame or a velocity envelope (which hold a frame
+/// there), it plays from its media's start instead, its other takes
+/// where they were. Returns whether it changed (its track is then to be
+/// sorted).
+pub(crate) fn start_at_media(m: &mut Clip, min: Tick) -> bool {
+    if m.looped || m.source_in >= Tick::ZERO {
+        return false;
+    }
+    let lead = m.to_timeline(-m.source_in);
+    let cut = m.freeze.is_none() && m.velocity().is_none();
+    if cut && lead > Tick::ZERO && m.duration - lead >= min {
+        advance_start(m, lead);
+    }
+    if m.source_in < Tick::ZERO {
+        let back = m.source_in;
+        m.source_in = Tick::ZERO;
+        m.slip_active_take_only(-back);
+    }
+    true
 }
 
 /// Desloca os quadros-chave quando o início do clipe anda `delta`: o valor
@@ -1280,6 +1392,65 @@ mod tests {
         let c = p.insert_media(f, s(30), Some(v), None).unwrap()[0];
         assert_eq!(p.copy_generated_media(c), None);
         assert_eq!(p.clip(c).unwrap().media, f);
+    }
+
+    /// A group of events side by side on a track, Ctrl-stretched by one
+    /// event's edge: all of it stretches as one — no gap, no overlap —, its
+    /// grouped sound on another track with it; by an event's start, the
+    /// group keeps its end.
+    #[test]
+    fn a_stretched_group_stays_together() {
+        let mut p = Project::default();
+        let m = p.add_media(av_media(60));
+        let v = p
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Video)
+            .unwrap()
+            .id;
+        let a_track = p.add_track(TrackKind::Audio);
+        // A 0–4 s, B 4–6 s, C 6–10 s on the video track; S 0–10 s on audio.
+        let mut ids = Vec::new();
+        for (from, len) in [(0, 4), (4, 2), (6, 4)] {
+            let id = p.insert_media(m, s(from), Some(v), None).unwrap()[0];
+            p.clip_mut(id).unwrap().duration = s(len);
+            ids.push(id);
+        }
+        let sound = p.insert_media(m, Tick::ZERO, None, Some(a_track)).unwrap()[0];
+        p.clip_mut(sound).unwrap().duration = s(10);
+        ids.push(sound);
+        p.group_clips(&ids);
+        let spans = |p: &Project| -> Vec<(Tick, Tick, f64)> {
+            ids.iter()
+                .map(|&i| {
+                    let c = p.clip(i).unwrap();
+                    (c.start, c.end(), c.rate)
+                })
+                .collect()
+        };
+        // B's end dragged: B at half speed is twice as long, and so is the
+        // whole group, from its start.
+        let mut q = p.clone();
+        q.stretch_group(ids[1], 0.5, false).unwrap();
+        let got = spans(&q);
+        assert_eq!(
+            got.iter().map(|g| (g.0, g.1)).collect::<Vec<_>>(),
+            vec![(s(0), s(8)), (s(8), s(12)), (s(12), s(20)), (s(0), s(20))]
+        );
+        assert!(got.iter().all(|g| (g.2 - 0.5).abs() < 1e-9), "{got:?}");
+        // C's start dragged, twice as fast: the group halves, its end kept.
+        let mut q = p.clone();
+        q.stretch_group(ids[2], 2.0, true).unwrap();
+        assert_eq!(
+            spans(&q).iter().map(|g| (g.0, g.1)).collect::<Vec<_>>(),
+            vec![(s(5), s(7)), (s(7), s(8)), (s(8), s(10)), (s(5), s(10))]
+        );
+        // Members already at another speed keep their proportion.
+        let mut q = p.clone();
+        q.clip_mut(ids[0]).unwrap().rate = 2.0;
+        q.stretch_group(ids[1], 0.5, false).unwrap();
+        assert!((q.clip(ids[0]).unwrap().rate - 1.0).abs() < 1e-9);
+        q.check_invariants().unwrap();
     }
 
     #[test]
@@ -1551,6 +1722,83 @@ mod tests {
             assert_eq!(starts, vec![s(0), s(4)]);
         }
         assert_eq!(p.duration(), s(7));
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_rippled_delete_keeps_the_event_the_deleted_one_crossfaded_into() {
+        let mut p = Project::new(ProjectSettings::default());
+        let v = p.tracks[0].id;
+        let m = p.add_media(av_media(60));
+        let place = |p: &mut Project, from: i64, to: i64| {
+            let id = p.insert_media(m, s(from), Some(v), None).unwrap()[0];
+            p.trim_end(id, s(to)).unwrap();
+            id
+        };
+        // A crossfades into B over 2 s and C follows B; D and E after a gap.
+        let a = place(&mut p, 0, 10);
+        let b = place(&mut p, 8, 15);
+        let c = place(&mut p, 15, 20);
+        let d = place(&mut p, 30, 34);
+        let e = place(&mut p, 34, 40);
+        let span = |p: &Project, id| {
+            let c = p.clip(id).unwrap();
+            (c.start, c.end())
+        };
+        // B comes to where A began, and what follows stays as far behind
+        // it as it was.
+        let mut q = p.clone();
+        q.delete_clips(&[a], true).unwrap();
+        assert_eq!(span(&q, b), (s(0), s(7)));
+        assert_eq!(span(&q, c), (s(7), s(12)));
+        assert_eq!(span(&q, d), (s(22), s(26)));
+        q.check_invariants().unwrap();
+        // Two holes: A's closes up to B, D's whole length.
+        p.delete_clips(&[a, d], true).unwrap();
+        assert_eq!(span(&p, b), (s(0), s(7)));
+        assert_eq!(span(&p, c), (s(7), s(12)));
+        assert_eq!(span(&p, e), (s(22), s(28)));
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_start_trim_leaves_every_group_mate_a_frame() {
+        let (mut p, _, _, cv, ca) = setup();
+        // The picture a second long; the sound with Loop off while it
+        // starts 3 s before its media (as the Loop switch once left it).
+        p.clip_mut(cv).unwrap().duration = s(1);
+        {
+            let c = p.clip_mut(ca).unwrap();
+            c.source_in = -s(3);
+            c.looped = false;
+        }
+        let frame = p.min_clip_duration();
+        assert_eq!(p.trim_start(cv, s(5)).unwrap(), s(1) - frame);
+        assert_eq!(p.clip(cv).unwrap().duration, frame);
+        assert_eq!(p.clip(ca).unwrap().duration, s(9) + frame);
+        p.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_fade_made_longer_leaves_the_other_what_is_left() {
+        let (mut p, _, _, cv, _) = setup();
+        let fades = |p: &Project| {
+            let c = p.clip(cv).unwrap();
+            (c.fade_in, c.fade_out)
+        };
+        p.set_fades(cv, Some(s(6)), Some(s(4))).unwrap();
+        // Already as long: nothing changes.
+        p.clip_mut(cv).unwrap().fade_in_at_least(s(2));
+        assert_eq!(fades(&p), (s(6), s(4)));
+        p.clip_mut(cv).unwrap().fade_in_at_least(s(8));
+        assert_eq!(fades(&p), (s(8), s(2)));
+        p.clip_mut(cv).unwrap().fade_out_at_least(s(5));
+        assert_eq!(fades(&p), (s(5), s(5)));
+        // Never longer than the event.
+        p.clip_mut(cv).unwrap().fade_out_at_least(s(30));
+        assert_eq!(fades(&p), (Tick::ZERO, s(10)));
+        p.clip_mut(cv).unwrap().fade_in_at_least(s(30));
+        assert_eq!(fades(&p), (s(10), Tick::ZERO));
         p.check_invariants().unwrap();
     }
 

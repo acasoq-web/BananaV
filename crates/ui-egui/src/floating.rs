@@ -242,7 +242,7 @@ impl<'open> Window<'open> {
             st.centerings += 1;
         }
         let mut builder = ViewportBuilder::default()
-            .with_title(self.title.clone())
+            .with_title(crate::i18n::os_text(self.title.clone()))
             .with_inner_size(size)
             .with_resizable(self.resizable)
             .with_minimize_button(false)
@@ -262,6 +262,14 @@ impl<'open> Window<'open> {
         let mut add = Some(add);
         let mut measured = None;
         let mut close = false;
+        // One pass a frame in a dialog's own window. egui runs a window's
+        // contents again when something in them asks to discard the pass
+        // (a tooltip's or a list's first frame, a table's first layout),
+        // and a dialog's contents run once (`add`): the second pass left
+        // the window empty for that frame and dropped what its contents
+        // gave back. What asked is drawn right at the next frame instead.
+        let passes = ctx.options(|o| o.max_passes);
+        ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::MIN);
         let out = ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
             let add = add.take()?;
             let fill = ui.visuals().window_fill;
@@ -299,8 +307,12 @@ impl<'open> Window<'open> {
                 shield(ui.ctx(), egui::Order::Foreground, true);
                 close = false;
             }
+            if ui.ctx().output(|o| o.requested_discard()) {
+                ui.ctx().request_repaint();
+            }
             out
         });
+        ctx.options_mut(|o| o.max_passes = passes);
         if let Some(m) = measured {
             let m = vec2(m.x.ceil(), m.y.ceil());
             if st.size.is_none_or(|s| (s - m).length() > 0.5) {

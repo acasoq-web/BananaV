@@ -742,6 +742,23 @@ fn addresses() {
     );
 }
 
+/// Names whose fifth byte falls inside a letter (where `file:` would
+/// end) are paths like any other.
+#[test]
+fn addresses_with_letters_of_several_bytes() {
+    assert_eq!(url_path("maçã.mov").as_deref(), Some("maçã.mov"));
+    assert_eq!(url_path("日本語.mov").as_deref(), Some("日本語.mov"));
+    assert_eq!(url_path("ação").as_deref(), Some("ação"));
+    assert_eq!(
+        url_path("file:///C:/vídeos/maçã.mov").as_deref(),
+        Some("C:/vídeos/maçã.mov")
+    );
+    assert_eq!(
+        url_path("FILE:///tmp/日本語.mov").as_deref(),
+        Some("/tmp/日本語.mov")
+    );
+}
+
 #[test]
 fn lanes_for_what_transitions_cannot_say() {
     // Three at once, crossfades off, a muted event's overlap.

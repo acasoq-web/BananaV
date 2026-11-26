@@ -156,7 +156,11 @@ pub enum Extra {
     PlayFromStart,
     StepForward,
     StepBack,
+    /// L: plays, then faster at each press.
     ScrubRight,
+    /// K: slower at each press.
+    Slower,
+    /// Pauses, at normal speed again.
     ScrubPause,
     /// J: backwards, faster at each press (the picture; the sound waits for
     /// reverse playback).
@@ -191,6 +195,9 @@ pub enum Extra {
     PreviewZoom(i8),
     PreviewZoomDefault,
     PreviewBypassZoom,
+    /// The timeline's time zoomed in (+1) or out (−1), as ↑ and ↓ do (the
+    /// [Premiere Pro] map's = and −).
+    TimelineZoom(i8),
 }
 
 /// Where [`Extra::TrackCursor`] moves the track selection.
@@ -685,6 +692,10 @@ const TRACK_VIEW: &[(&str, &[&str], Action)] = cmds! {
     "Edit.Tool.SplitTrim" => [] C(Cmd::UseTool(Tool::SplitTrim));
     "Edit.Tool.TimeStretchCompress" => [] C(Cmd::UseTool(Tool::Stretch));
     "Edit.Tool.Trim" => [] Soon;
+    // A mod's (Options › BananaV Mods…), as other editors' keys: ahead of
+    // the keys' other commands while it is on, left out while it is off.
+    "Edit.Tool.TrackSelectBackward" => ["Shift+A"] C(Cmd::UseTool(Tool::TrackSelect { back: true }));
+    "Edit.Tool.TrackSelectForward" => ["A"] C(Cmd::UseTool(Tool::TrackSelect { back: false }));
     "Edit.Tool.Zoom" => [] C(Cmd::UseTool(Tool::Zoom));
     "Edit.Trim" => ["Ctrl+T"] C(Cmd::Trim);
     "Edit.Trim.End" => ["Alt+]"] C(Cmd::TrimEnd);
@@ -874,8 +885,9 @@ const TRACK_VIEW: &[(&str, &[&str], Action)] = cmds! {
     "Transport.Record" => ["Ctrl+R"] C(Cmd::Record);
     "Transport.Rewind" => [] X(Extra::Rewind);
     "Transport.ScrubLeft" => ["J"] X(Extra::ScrubLeft);
-    "Transport.ScrubPause" => ["K"] X(Extra::ScrubPause);
+    "Transport.ScrubPause" => [] X(Extra::ScrubPause);
     "Transport.ScrubRight" => ["L"] X(Extra::ScrubRight);
+    "Transport.Slower" => ["K"] X(Extra::Slower);
     "Transport.SetPathAndRecord" => ["Ctrl+Alt+Shift+R"] C(Cmd::SetPathAndRecord);
     "Transport.StepBack" => [] X(Extra::StepBack);
     "Transport.StepForward" => [] X(Extra::StepForward);
@@ -889,6 +901,9 @@ const TRACK_VIEW: &[(&str, &[&str], Action)] = cmds! {
     "View.RebuildAudioPeaks" => ["Shift+F5"] C(Cmd::RebuildPeaks);
     "View.Explorer" => [] C(Cmd::Window(Tab::Explorer));
     "View.VideoBusTrack" => ["Ctrl+Shift+B"] C(Cmd::VideoBusTrack);
+    // BananaV's: ↑ and ↓ as commands, for maps that give them keys.
+    "View.ZoomIn" => [] X(Extra::TimelineZoom(1));
+    "View.ZoomOut" => [] X(Extra::TimelineZoom(-1));
 };
 
 /// The Explorer context (the Explorer window focused): VEGAS lists the menu
@@ -1324,8 +1339,9 @@ const TRIMMER: &[(&str, &[&str], Action)] = cmds! {
     "Transport.PlayFromStart" => ["Shift+Space"] X(Extra::Trimmer(TrimmerOp::PlayFromStart));
     "Transport.Rewind" => [] X(Extra::Rewind);
     "Transport.ScrubLeft" => ["J"] X(Extra::ScrubLeft);
-    "Transport.ScrubPause" => ["K"] X(Extra::ScrubPause);
+    "Transport.ScrubPause" => [] X(Extra::ScrubPause);
     "Transport.ScrubRight" => ["L"] X(Extra::ScrubRight);
+    "Transport.Slower" => ["K"] X(Extra::Slower);
     "Transport.StepBack" => [] X(Extra::StepBack);
     "Transport.StepForward" => [] X(Extra::StepForward);
     "Transport.Stop" => ["Stop"] X(Extra::Trimmer(TrimmerOp::Stop));
@@ -1840,7 +1856,8 @@ fn global_id(cmd: Cmd) -> String {
         | Cmd::CustomizeKeyboard
         | Cmd::CustomizeToolbar
         | Cmd::CustomizeTimelineToolbar
-        | Cmd::EnvelopeAppearance => "Options",
+        | Cmd::EnvelopeAppearance
+        | Cmd::Mods => "Options",
         Cmd::HelpContents | Cmd::KeyboardShortcuts | Cmd::CheckUpdates | Cmd::About => "Help",
         _ => "Edit",
     };
@@ -1992,23 +2009,209 @@ pub struct Keymap {
     index: HashMap<(Context, Binding), usize>,
     /// First keys of the two-key shortcuts of each context.
     prefixes: std::collections::HashSet<(Context, Binding)>,
+    /// The mods on: their commands' keys are theirs.
+    mods: crate::mods::Mods,
+}
+
+/// Whether `action` is in use with `mods` on: a mod's command only while
+/// it is.
+pub fn action_on(action: Action, mods: &crate::mods::Mods) -> bool {
+    match action {
+        Action::Cmd(Cmd::UseTool(Tool::TrackSelect { .. })) => mods.track_select,
+        Action::Cmd(Cmd::Window(Tab::Transform)) => mods.transform,
+        Action::Cmd(Cmd::EnvelopeAppearance) => mods.envelope_look,
+        _ => true,
+    }
+}
+
+/// Whether `action` is a mod's.
+fn of_a_mod(action: Action) -> bool {
+    !action_on(action, &crate::mods::Mods::default())
 }
 
 pub const DEFAULT_MAP: &str = "[Default]";
+
+/// The map with another editor's keys, for those who come from it.
+pub const PREMIERE_MAP: &str = "[Premiere Pro]";
 
 pub fn default_bindings() -> Vec<Vec<Binding>> {
     registry().iter().map(|c| c.defaults.clone()).collect()
 }
 
+/// The [`PREMIERE_MAP`]'s keys: the commands BananaV has of that editor's
+/// default keyboard map (Windows), with its keys. A command's keys go to
+/// its Global row when it has one (they work in every window), else to
+/// its TrackView and TrackList rows.
+#[rustfmt::skip]
+const PREMIERE: &[(&str, &[&str])] = &[
+    // Tools.
+    ("Edit.Tool.Normal", &["V"]),
+    ("Edit.Tool.TrackSelectForward", &["A"]),
+    ("Edit.Tool.TrackSelectBackward", &["Shift+A"]),
+    ("Edit.Tool.TimeStretchCompress", &["R"]),
+    ("Edit.Tool.SplitTrim", &["C"]),
+    ("Edit.Tool.Slip", &["Y"]),
+    ("Edit.Tool.Slide", &["U"]),
+    ("Edit.Tool.Envelope", &["P"]),
+    ("Edit.Tool.Zoom", &["Z"]),
+    // Playback and the cursor.
+    ("Transport.ScrubLeft", &["J"]),
+    // K slows the preview down here too (the maintainer's decision).
+    ("Transport.Slower", &["K"]),
+    ("Transport.ScrubRight", &["L"]),
+    ("CursorTo.LeftByFrame", &["Left"]),
+    ("CursorTo.RightByFrame", &["Right"]),
+    ("CursorTo.LeftByEdit", &["Up", "Shift+Up"]),
+    ("CursorTo.RightByEdit", &["Down", "Shift+Down"]),
+    ("CursorTo.Home", &["Home"]),
+    ("CursorTo.End", &["End"]),
+    ("TrackView.Select.MarkIn", &["I"]),
+    ("TrackView.Select.MarkOut", &["O"]),
+    ("CursorTo.LoopHome", &["Shift+I"]),
+    ("CursorTo.LoopEnd", &["Shift+O"]),
+    ("Insert.Marker", &["M"]),
+    ("CursorTo.RightByMarker", &["Shift+M"]),
+    ("CursorTo.LeftByMarker", &["Ctrl+Shift+M"]),
+    // Editing.
+    ("Edit.Split", &["Ctrl+K", "Ctrl+Shift+K"]),
+    ("Edit.Delete", &["Delete", "Backspace"]),
+    ("Edit.Trim.Start", &["Ctrl+Alt+Q"]),
+    ("Edit.Trim.End", &["Ctrl+Alt+W"]),
+    ("Edit.Undo", &["Ctrl+Z"]),
+    ("Edit.Redo", &["Ctrl+Shift+Z"]),
+    ("Edit.Cut", &["Ctrl+X"]),
+    ("Edit.Copy", &["Ctrl+C"]),
+    ("Edit.Paste", &["Ctrl+V"]),
+    ("Edit.PasteInsert", &["Ctrl+Shift+V"]),
+    ("Edit.PasteEventAttributes", &["Ctrl+Alt+V"]),
+    ("Edit.Select.All", &["Ctrl+A"]),
+    ("Edit.Select.None", &["Ctrl+Shift+A"]),
+    ("Edit.Group.CreateNew", &["Ctrl+G"]),
+    ("Edit.Group.Clear", &["Ctrl+Shift+G"]),
+    ("Edit.Event.Mute", &["Shift+E"]),
+    ("Insert.Transition1", &["Ctrl+D", "Ctrl+Shift+D", "Shift+D"]),
+    ("Edit.Trimmer.CutFromCursor", &[","]),
+    ("Edit.Trimmer.Overwrite", &["."]),
+    ("TrackView.Nudge.LeftByFrames", &["Alt+Left"]),
+    ("TrackView.Nudge.RightByFrames", &["Alt+Right"]),
+    ("TrackView.Nudge.Up", &["Alt+Up"]),
+    ("TrackView.Nudge.Down", &["Alt+Down"]),
+    ("Options.EnableSnapping", &["S"]),
+    ("Tools.Audio.OpenInAudioEditor", &["Ctrl+E"]),
+    // The timeline's view.
+    ("View.ZoomIn", &["="]),
+    ("View.ZoomOut", &["-"]),
+    ("TrackView.Zoom.MoreTrackHeight", &["Shift+=", "Ctrl+=", "Alt+="]),
+    ("TrackView.Zoom.LessTrackHeight", &["Shift+-", "Ctrl+-", "Alt+-"]),
+    ("View.MinimizeAll", &["`"]),
+    // Windows.
+    ("View.ProjectMedia", &["Shift+1"]),
+    ("View.Trimmer", &["Shift+2"]),
+    ("View.FocusToTrackView", &["Shift+3"]),
+    ("View.Video Preview", &["Shift+4"]),
+    ("View.MixingConsole", &["Shift+6"]),
+    ("View.VideoFX", &["Shift+7"]),
+    ("View.Explorer", &["Shift+8"]),
+    ("Options.CustomizeKeyboard", &["Ctrl+Alt+K"]),
+    // Files.
+    ("File.New", &["Ctrl+Alt+N"]),
+    ("File.Open", &["Ctrl+O"]),
+    ("File.Save", &["Ctrl+S"]),
+    ("File.SaveAs", &["Ctrl+Shift+S"]),
+    ("File.ImportMedia", &["Ctrl+I"]),
+    ("File.RenderAs", &["Ctrl+M"]),
+    ("File.Close", &["Ctrl+Shift+W"]),
+    ("File.Exit", &["Ctrl+Q"]),
+];
+
+/// Keys that went from one command to a newer one: (the newer, the older,
+/// the key). A map saved before the newer command was made, whose older
+/// command still has the key, gives it to the newer one.
+const MOVED: &[(&str, &str, &str)] = &[
+    // K: pause, then slower (2026-11-25, the maintainer's).
+    ("Transport.Slower", "Transport.ScrubPause", "K"),
+];
+
+/// [`MOVED`]'s keys taken from the older commands of `saved` (a saved
+/// map's lists, `None` where it has none) to the newer ones it lacks.
+fn moved_keys(saved: &mut [Option<Vec<Binding>>]) {
+    let reg = registry();
+    for (to, from, key) in MOVED {
+        let Some(key) = Binding::parse(key) else {
+            continue;
+        };
+        for i in 0..reg.len() {
+            if reg[i].id != *to || saved[i].is_some() {
+                continue;
+            }
+            let older = (0..reg.len()).find(|j| {
+                reg[*j].id == *from
+                    && reg[*j].context == reg[i].context
+                    && saved[*j].as_ref().is_some_and(|s| s.contains(&key))
+            });
+            if let Some(j) = older {
+                if let Some(s) = saved[j].as_mut() {
+                    s.retain(|b| *b != key);
+                }
+                saved[i] = Some(vec![key]);
+            }
+        }
+    }
+}
+
+/// The registry's rows a [`PREMIERE`] command's keys go to: its Global
+/// row, else its TrackView and TrackList rows.
+fn premiere_rows(id: &str) -> Vec<usize> {
+    let reg = registry();
+    let rows = |ctx: &[Context]| -> Vec<usize> {
+        reg.iter()
+            .enumerate()
+            .filter(|(_, c)| c.id == id && ctx.contains(&c.context))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let global = rows(&[Context::Global]);
+    if global.is_empty() {
+        rows(&[Context::TrackView, Context::TrackList])
+    } else {
+        global
+    }
+}
+
+/// The [`PREMIERE_MAP`]: the default map with [`PREMIERE`]'s keys, and
+/// those keys taken from the other commands of the timeline's and the
+/// Global lists (each key one command's).
+pub fn premiere_bindings() -> Vec<Vec<Binding>> {
+    let reg = registry();
+    let mut bindings = default_bindings();
+    let mut ours = vec![false; reg.len()];
+    let mut keys: Vec<Binding> = Vec::new();
+    for (id, list) in PREMIERE {
+        let parsed = parse_keys(list, id);
+        for i in premiere_rows(id) {
+            bindings[i] = parsed.clone();
+            ours[i] = true;
+        }
+        keys.extend(parsed);
+    }
+    let shared = [Context::TrackView, Context::TrackList, Context::Global];
+    for (i, c) in reg.iter().enumerate() {
+        if !ours[i] && shared.contains(&c.context) {
+            bindings[i].retain(|b| !keys.contains(b));
+        }
+    }
+    bindings
+}
+
 impl Keymap {
     pub fn load() -> Keymap {
         let path = store_path();
-        let store: Store = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
+        // A file that does not parse is set aside, not written over.
+        let (store, _) = path
+            .as_deref()
+            .map(crate::safe_file::load_json::<Store>)
             .unwrap_or_default();
-        Keymap::with_store(store, path)
+        Keymap::with_store(store.unwrap_or_default(), path)
     }
 
     pub fn in_memory() -> Keymap {
@@ -2023,6 +2226,7 @@ impl Keymap {
             path,
             index: HashMap::new(),
             prefixes: std::collections::HashSet::new(),
+            mods: crate::mods::Mods::default(),
         };
         if let Some(name) = k.store.active.clone()
             && let Some(b) = k.map_bindings(&name)
@@ -2034,21 +2238,47 @@ impl Keymap {
         k
     }
 
-    /// Names of the saved maps.
+    /// Names of the saved maps (the [`PREMIERE_MAP`]'s, listed with
+    /// the default one, left out).
     pub fn map_names(&self) -> Vec<String> {
-        self.store.maps.keys().cloned().collect()
+        self.store
+            .maps
+            .keys()
+            .filter(|n| n.as_str() != PREMIERE_MAP)
+            .cloned()
+            .collect()
     }
 
     /// The bindings of a saved map (commands it does not mention keep their
     /// defaults).
     pub fn map_bindings(&self, name: &str) -> Option<Vec<Vec<Binding>>> {
         let map = self.store.maps.get(name)?;
+        let mut saved: Vec<Option<Vec<Binding>>> = registry()
+            .iter()
+            .map(|c| {
+                let list = map.get(&entry_key(c))?;
+                Some(list.iter().filter_map(|s| Binding::parse(s)).collect())
+            })
+            .collect();
+        moved_keys(&mut saved);
+        // A command made since the map was saved has its default keys but
+        // those the map gives another one.
+        let taken = |c: &KeyCommand, b: &Binding| {
+            registry()
+                .iter()
+                .zip(&saved)
+                .any(|(o, s)| o.context == c.context && s.as_ref().is_some_and(|s| s.contains(b)))
+        };
         Some(
             registry()
                 .iter()
-                .map(|c| match map.get(&entry_key(c)) {
-                    Some(list) => list.iter().filter_map(|s| Binding::parse(s)).collect(),
-                    None => c.defaults.clone(),
+                .zip(&saved)
+                .map(|(c, s)| match s {
+                    Some(list) => list.clone(),
+                    None => {
+                        let keys = c.defaults.iter().filter(|b| !taken(c, b));
+                        keys.cloned().collect()
+                    }
                 })
                 .collect(),
         )
@@ -2062,7 +2292,7 @@ impl Keymap {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let json = serde_json::to_string_pretty(&self.store).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        crate::safe_file::write(path, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     /// Uses `bindings` from now on, as the map `name` (`None` = default).
@@ -2097,18 +2327,38 @@ impl Keymap {
         self.save()
     }
 
+    /// The mods on (their commands' keys).
+    pub fn mods(&self) -> crate::mods::Mods {
+        self.mods
+    }
+
+    /// Uses `mods`' commands' keys from now on: ahead of the same keys'
+    /// other commands, as the mods are on.
+    pub fn set_mods(&mut self, mods: crate::mods::Mods) {
+        self.mods = mods;
+        self.reindex();
+    }
+
     fn reindex(&mut self) {
         self.index.clear();
         self.prefixes.clear();
         let reg = registry();
-        for (i, c) in reg.iter().enumerate() {
-            if !Context::LISTED.contains(&c.context) || c.action == Action::Soon {
-                continue;
-            }
-            for b in &self.bindings[i] {
-                self.index.entry((c.context, *b)).or_insert(i);
-                if b.then.is_some() {
-                    self.prefixes.insert((c.context, b.first()));
+        // The mods' commands first: their keys are theirs while they are
+        // on (A, Shift+A).
+        for first in [true, false] {
+            for (i, c) in reg.iter().enumerate() {
+                if !Context::LISTED.contains(&c.context)
+                    || c.action == Action::Soon
+                    || of_a_mod(c.action) != first
+                    || !action_on(c.action, &self.mods)
+                {
+                    continue;
+                }
+                for b in &self.bindings[i] {
+                    self.index.entry((c.context, *b)).or_insert(i);
+                    if b.then.is_some() {
+                        self.prefixes.insert((c.context, b.first()));
+                    }
                 }
             }
         }
@@ -2319,6 +2569,10 @@ pub fn dispatch(app: &mut BananaApp, ctx: &egui::Context) {
             Action::Extra(e) => app.run_extra(e),
             Action::Soon => {}
         }
+        if app.cursor != from {
+            // The view goes with a cursor a key moved.
+            app.timeline.reveal_cursor = true;
+        }
         if extend {
             app.extend_selection(from);
         }
@@ -2328,6 +2582,74 @@ pub fn dispatch(app: &mut BananaApp, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The [Premiere Pro] map: each of its commands is BananaV's, and each
+    /// of its keys runs that command alone, in the timeline and in every
+    /// window (the defaults that had them let them go).
+    #[test]
+    fn the_premiere_map_has_its_keys_and_no_clash() {
+        let reg = registry();
+        for (id, _) in PREMIERE {
+            assert!(!premiere_rows(id).is_empty(), "{id} is not a command");
+        }
+        let bindings = premiere_bindings();
+        let shared = [Context::TrackView, Context::TrackList, Context::Global];
+        for (id, keys) in PREMIERE {
+            for key in *keys {
+                let b = Binding::parse(key).expect("a key");
+                for (i, c) in reg.iter().enumerate() {
+                    if shared.contains(&c.context) && bindings[i].contains(&b) {
+                        assert_eq!(c.id, *id, "{key} runs {} too", c.id);
+                    }
+                }
+            }
+        }
+        let mut k = Keymap::in_memory();
+        k.apply(Some(PREMIERE_MAP.into()), bindings)
+            .expect("in memory");
+        k.set_mods(crate::mods::Mods {
+            track_select: true,
+            ..Default::default()
+        });
+        let runs = |key: &str| {
+            let b = Binding::parse(key).expect("a key");
+            k.lookup(&b, Context::TrackView).map(|i| reg[i].id.as_str())
+        };
+        for (key, id) in [
+            ("Ctrl+K", "Edit.Split"),
+            ("S", "Options.EnableSnapping"),
+            ("A", "Edit.Tool.TrackSelectForward"),
+            ("Shift+A", "Edit.Tool.TrackSelectBackward"),
+            ("V", "Edit.Tool.Normal"),
+            ("Left", "CursorTo.LeftByFrame"),
+            ("Down", "CursorTo.RightByEdit"),
+            ("=", "View.ZoomIn"),
+            ("Shift+M", "CursorTo.RightByMarker"),
+            ("Ctrl+Shift+Z", "Edit.Redo"),
+        ] {
+            assert_eq!(runs(key), Some(id), "{key}");
+        }
+    }
+
+    /// A mod's keys are theirs while it is on (A over the Trimmer's), and
+    /// its commands are left out while it is off.
+    #[test]
+    fn a_mods_keys_are_theirs_while_it_is_on() {
+        let mut k = Keymap::in_memory();
+        let a = Binding::parse("A").expect("a key");
+        let runs = |k: &Keymap| {
+            k.lookup(&a, Context::TrackView)
+                .map(|i| registry()[i].id.clone())
+        };
+        assert_eq!(runs(&k).as_deref(), Some("Edit.Trimmer.CutFromCursor"));
+        k.set_mods(crate::mods::Mods {
+            track_select: true,
+            ..Default::default()
+        });
+        assert_eq!(runs(&k).as_deref(), Some("Edit.Tool.TrackSelectForward"));
+        k.set_mods(crate::mods::Mods::default());
+        assert_eq!(runs(&k).as_deref(), Some("Edit.Trimmer.CutFromCursor"));
+    }
 
     #[test]
     fn compact_names_like_vegas() {
@@ -2380,7 +2702,9 @@ mod tests {
         let defaults = default_bindings();
         let mut seen: HashMap<(Binding, Context), Action> = HashMap::new();
         for (c, keys) in reg.iter().zip(&defaults) {
-            if c.action == Action::Soon {
+            // A mod's keys go ahead of the others' only while it is on
+            // (`a_mods_keys_are_theirs_while_it_is_on`).
+            if c.action == Action::Soon || of_a_mod(c.action) {
                 continue;
             }
             for b in keys {
@@ -2434,6 +2758,31 @@ mod tests {
             Some(split),
             "back to the default map"
         );
+    }
+
+    /// A map saved while K paused (before Transport.Slower was made) slows
+    /// down with K now, in every list that has both.
+    #[test]
+    fn maps_saved_with_k_pausing_slow_down_with_it() {
+        let reg = registry();
+        let mut map = BTreeMap::new();
+        for c in reg.iter().filter(|c| c.id == "Transport.ScrubPause") {
+            map.insert(entry_key(c), vec!["K".to_string()]);
+        }
+        assert!(map.len() >= 3, "TrackView, TrackList and Trimmer");
+        let mut store = Store::default();
+        store.maps.insert(PREMIERE_MAP.into(), map);
+        store.active = Some(PREMIERE_MAP.into());
+        let km = Keymap::with_store(store, None);
+        let k = Binding::parse("K").expect("K");
+        for ctx in [Context::TrackView, Context::TrackList, Context::Trimmer] {
+            let i = km.lookup(&k, ctx).expect("K does something");
+            assert_eq!(reg[i].id, "Transport.Slower", "{ctx:?}");
+        }
+        // And the map made anew.
+        let fresh = premiere_bindings();
+        let slower = reg.iter().position(|c| c.id == "Transport.Slower");
+        assert_eq!(fresh[slower.expect("slower")], vec![k]);
     }
 
     #[test]
@@ -2499,7 +2848,8 @@ mod tests {
             .iter()
             .filter(|c| c.context == Context::Trimmer)
             .collect();
-        assert_eq!(trimmer.len(), 140);
+        // VEGAS's 140, and BananaV's Transport.Slower.
+        assert_eq!(trimmer.len(), 141);
         assert_eq!(trimmer[0].id, "CursorTo.Center");
         assert_eq!(
             trimmer.last().map(|c| c.id.as_str()),

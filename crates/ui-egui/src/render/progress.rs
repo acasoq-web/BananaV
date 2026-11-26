@@ -58,13 +58,11 @@ fn size0(bytes: f64) -> String {
 }
 
 fn open_with_system(path: &Path) {
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    let _ = crate::app::more_actions::open_externally(path);
 }
 
 fn show_in_folder(path: &Path) {
-    let _ = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn();
+    let _ = crate::app::more_actions::reveal_in_folder(path);
 }
 
 /// What the file is, for the window's title ("Writing MP4 File").
@@ -367,6 +365,18 @@ impl ProgressWindow {
                     let share = |v: Option<f64>| {
                         v.map_or("—".into(), |v| format!("{} %", crate::fmt::num(v, 2)))
                     };
+                    // What does the work: a slow render shows here where
+                    // it goes (the users' reports).
+                    if p.video {
+                        let card = match app.engine.gpu_status() {
+                            bv_engine::GpuStatus::Ready(name) => name,
+                            _ => tr("Processor (software)").to_string(),
+                        };
+                        Self::row(ui, tr("Video Processing:"), &card);
+                        if !p.encoder.is_empty() {
+                            Self::row(ui, tr("Video Encoder:"), &p.encoder);
+                        }
+                    }
                     Self::row(ui, tr("CPU Usage:"), &share(self.measured.0));
                     Self::row(
                         ui,

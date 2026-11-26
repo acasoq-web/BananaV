@@ -223,6 +223,25 @@ fn a_project_comes_back_from_a_veg() {
     back.check_invariants().expect("a sound project");
 }
 
+/// Fades that together are longer than their event (its length rounded to
+/// the project's frames may be shorter than the file's) give way: the
+/// fade-out to the fade-in.
+#[test]
+fn fades_longer_than_their_event_are_cut_to_it() {
+    let p = project();
+    let mut doc = read(&write(&p, &options())).expect("it reads");
+    for e in doc.tracks.iter_mut().flat_map(|t| &mut t.events) {
+        (e.fade_in, e.fade_out) = (e.length, e.length);
+    }
+    let found: Vec<Option<MediaInfo>> = p.media.iter().cloned().map(Some).collect();
+    let back = build(&doc, &found, &ProjectSettings::default(), &|_, _| None).project;
+    assert!(back.clips().count() >= 2);
+    for (_, c) in back.clips() {
+        assert!(c.fade_in > Tick::ZERO && c.fade_in + c.fade_out <= c.duration);
+    }
+    back.check_invariants().expect("a sound project");
+}
+
 #[test]
 fn effects_keep_parameters_of_every_size() {
     // Records as the files have them: the value's size, the name's, the

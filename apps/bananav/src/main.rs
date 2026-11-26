@@ -9,6 +9,10 @@ fn main() {
     if let Some(code) = bv_ui_egui::plugin_scan_child() {
         std::process::exit(code);
     }
+    // The command line and MCP for AI agents: no window.
+    if let Some(code) = bv_ui_egui::command_line() {
+        std::process::exit(code);
+    }
     if let Err(e) = bv_ui_egui::run() {
         eprintln!("BananaV: {e}");
         std::process::exit(1);

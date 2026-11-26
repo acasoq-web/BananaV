@@ -36,6 +36,8 @@ pub struct GeneratedMediaWindow {
 
 /// The window's least width (VEGAS's).
 const LEAST_WIDTH: f32 = 500.0;
+/// The tallest the keyframe controller gets in it.
+const MOST_KEYS: f32 = 420.0;
 
 /// How long generated media lasts: its own duration when it has one (a
 /// `.veg`'s, or one typed here), else its event's.
@@ -211,6 +213,31 @@ impl BananaApp {
         }
     }
 
+    /// For review: a Titles & Text event on an adjustment track of its own,
+    /// at the cursor, its Video Media Generators window open.
+    pub fn titles_for_review(&mut self) {
+        let Some(titles) = crate::ofx::generators()
+            .into_iter()
+            .find(|p| p.identifier == bv_engine::plugins::TITLES_ID)
+        else {
+            return;
+        };
+        self.insert_adjustment_track(None);
+        let Some(track) = self.project().tracks.first().map(|t| t.id) else {
+            return;
+        };
+        let g = Generator::Plugin(Box::new(crate::ofx::plugin_fx(&titles)));
+        self.add_generator(g, self.cursor, Some(track));
+        if let Some(clip) = self
+            .project()
+            .track(track)
+            .and_then(|t| t.clips.first())
+            .map(|c| c.id)
+        {
+            self.open_generated_media(clip);
+        }
+    }
+
     pub(crate) fn generated_media_window(&mut self, ctx: &egui::Context) {
         let Some(mut w) = self.generated_media.take() else {
             return;
@@ -237,7 +264,24 @@ impl GeneratedMediaWindow {
         };
         let rate = app.frame_rate();
         let (key, plugin, presets) = crate::tabs::generators::plugin_of(app, &generator);
-        let place = crate::ofx::generator_place(app.project(), self.clip, app.cursor);
+        // A plug-in's editor; its settings show the time of its keyframe
+        // controller's own cursor while that does not go with the
+        // timeline's.
+        let editor = match &generator {
+            Generator::Plugin(fx) => Some(crate::ofx::EditorKey {
+                owner: crate::ofx::EditorOwner::Generator(media),
+                index: 0,
+                id: fx.id.clone(),
+            }),
+            _ => None,
+        };
+        let cursor = editor
+            .as_ref()
+            .and_then(|k| app.ofx.cursor_of(k))
+            .unwrap_or(app.cursor);
+        let place = crate::ofx::generator_place(app.project(), self.clip, cursor);
+        // Where the keyframe controller sends the timeline's cursor.
+        let mut seek: Option<Tick> = None;
         let video = info.video;
         let title = if video.is_some() {
             tr("Video Media Generators")
@@ -406,19 +450,46 @@ impl GeneratedMediaWindow {
                 ui.add_space(4.0);
                 let top = ui.min_rect().width();
                 match &generator {
-                    // An OFX generator's settings, as it describes them.
+                    // An OFX generator's settings, as it describes them;
+                    // under them, once a parameter is animated (its
+                    // Animate button), the keyframe controller, as VEGAS's
+                    // Video Media Generators window has it at its foot.
                     Generator::Plugin(fx) => {
-                        let key = crate::ofx::EditorKey {
-                            owner: crate::ofx::EditorOwner::Generator(media),
-                            index: 0,
-                            id: fx.id.clone(),
-                        };
                         let columns = usize::from(app.settings.fx_columns.clamp(1, 3));
-                        if let Some(place) = place
-                            && let Some(new) =
-                                crate::ofx::params(ui, &mut app.ofx, key, fx, &place, columns)
-                        {
-                            chosen = Some(Generator::Plugin(Box::new(new)));
+                        if let (Some(place), Some(key)) = (place, editor.clone()) {
+                            let mut now = (**fx).clone();
+                            if let Some(new) = crate::ofx::params(
+                                ui,
+                                &mut app.ofx,
+                                key.clone(),
+                                &now,
+                                &place,
+                                columns,
+                            ) {
+                                now = new;
+                            }
+                            let tray = app.ofx.keyframes_height(&key, &now);
+                            if tray > 0.0 {
+                                // The bar between them sets its height.
+                                if let Some(h) = crate::fx_window::splitter(ui, tray, MOST_KEYS) {
+                                    app.ofx.set_keyframes_height(&key, h);
+                                }
+                                let (keyed, to) = crate::ofx::keyframes(
+                                    ui,
+                                    &mut app.ofx,
+                                    &key,
+                                    &now,
+                                    &place,
+                                    tray.min(MOST_KEYS),
+                                );
+                                if let Some(k) = keyed {
+                                    now = k;
+                                }
+                                seek = to;
+                            }
+                            if now != **fx {
+                                chosen = Some(Generator::Plugin(Box::new(now)));
+                            }
                         }
                     }
                     _ => {
@@ -438,6 +509,9 @@ impl GeneratedMediaWindow {
         {
             self.width = w.max(LEAST_WIDTH);
             ctx.request_repaint();
+        }
+        if let Some(t) = seek {
+            app.seek(t);
         }
         // A color being chosen.
         if let Some((which, picker)) = &mut self.picking {
@@ -695,5 +769,135 @@ mod tests {
         p.media.iter_mut().for_each(|m| m.name = "Reference".into());
         set_generator(&mut p, id, Generator::ColorBars);
         assert_eq!(p.media(id).unwrap().name, "Reference");
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use bv_core::Tick;
+    use bv_timeline::{Generator, MediaSource};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use crate::app::BananaApp;
+    use crate::egui;
+
+    fn harness(app: BananaApp) -> Harness<'static, BananaApp> {
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(6);
+        h
+    }
+
+    /// A click of the mouse on the first control named `label`.
+    fn click(h: &mut Harness<'_, BananaApp>, label: &str) {
+        let at = h
+            .query_all_by_label(label)
+            .next()
+            .unwrap_or_else(|| panic!("no {label}"))
+            .rect()
+            .center();
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        h.run_steps(6);
+    }
+
+    /// Two Titles & Text events crossing on an adjustment track, the
+    /// second coming in with a transition: the user's own case.
+    fn titles_on_an_adjustment_track() -> (BananaApp, bv_timeline::ClipId, bv_timeline::ClipId) {
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.insert_adjustment_track(None);
+        let track = app.project().tracks[0].id;
+        let titles = crate::ofx::generators()
+            .into_iter()
+            .find(|p| p.identifier == bv_engine::plugins::TITLES_ID)
+            .expect("Titles & Text");
+        for at in [0, 8] {
+            let g = Generator::Plugin(Box::new(crate::ofx::plugin_fx(&titles)));
+            app.add_generator(g, Tick::from_seconds(at), Some(track));
+        }
+        let clips: Vec<_> = app.project().tracks[0].clips.iter().map(|c| c.id).collect();
+        assert_eq!(clips.len(), 2, "two events on the adjustment track");
+        let transition = crate::ofx::transitions()
+            .into_iter()
+            .next()
+            .expect("a transition");
+        let fx = crate::ofx::plugin_fx(&transition);
+        app.modify(|p| {
+            if let Some(c) = p.clip_mut(clips[1]) {
+                c.transition_fx = Some(Box::new(fx));
+            }
+        });
+        (app, clips[0], clips[1])
+    }
+
+    #[test]
+    fn animate_brings_the_keyframe_controller_up_in_the_generators_window() {
+        let (mut app, first, _) = titles_on_an_adjustment_track();
+        app.open_generated_media(first);
+        let mut h = harness(app);
+        assert!(
+            h.query_by_label("Sync Cursor").is_none(),
+            "no controller before a parameter is animated"
+        );
+        click(&mut h, "Animate");
+        assert!(
+            h.query_by_label("Sync Cursor").is_some(),
+            "the keyframe controller, at the window's foot"
+        );
+        // The generator has the keyframe.
+        let p = h.state().project().clone();
+        let media = p.clip(first).map(|c| c.media).expect("the event");
+        let keys: usize = match p.media(media).map(|m| &m.source) {
+            Some(MediaSource::Generated(Generator::Plugin(fx))) => {
+                fx.params.values().map(|p| p.keys.len()).sum()
+            }
+            _ => 0,
+        };
+        assert_eq!(keys, 1);
+        // Animated no more: the controller goes.
+        click(
+            &mut h,
+            "Animated: changes set keyframes. Click to stop animating.",
+        );
+        assert!(h.query_by_label("Sync Cursor").is_none());
+    }
+
+    #[test]
+    fn animate_brings_the_keyframe_controller_up_in_a_transitions_window() {
+        let (mut app, _, second) = titles_on_an_adjustment_track();
+        app.open_transition_window(second, false);
+        let mut h = harness(app);
+        assert!(h.query_by_label("Sync Cursor").is_none());
+        click(&mut h, "Animate");
+        assert!(
+            h.query_by_label("Sync Cursor").is_some(),
+            "the keyframe controller, at the window's foot"
+        );
+        let p = h.state().project().clone();
+        let keys: usize = p
+            .clip(second)
+            .and_then(|c| c.transition_fx.as_ref())
+            .map_or(0, |fx| fx.params.values().map(|p| p.keys.len()).sum());
+        assert_eq!(keys, 1);
     }
 }

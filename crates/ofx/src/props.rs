@@ -20,6 +20,11 @@ use bv_ofx_sys::{OfxPropertySetHandle, OfxPropertySuiteV1, OfxStatus};
 /// What starts every property set, to tell it from other handles.
 const MAGIC: u64 = u64::from_le_bytes(*b"bvOFXprp");
 
+/// The most values a property takes one by one: setting an index grows the
+/// property to it, and the index is the plug-in's (one of millions would
+/// ask for gigabytes).
+const MAX_VALUES: usize = 1 << 16;
+
 /// What sort of object a set describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetKind {
@@ -297,7 +302,7 @@ impl PropSet {
     }
 
     fn set_one(&self, name: &CStr, index: c_int, value: One) -> OfxStatus {
-        let Ok(i) = usize::try_from(index) else {
+        let Some(i) = usize::try_from(index).ok().filter(|&i| i < MAX_VALUES) else {
             return kOfxStatErrBadIndex;
         };
         let mut map = self.lock();
@@ -997,6 +1002,33 @@ mod tests {
             );
         }
         assert_eq!(set.ints(c"MyCount"), vec![0, 0, 7]);
+    }
+
+    /// An index far past any property's is refused: setting it would grow
+    /// the property to it (gigabytes of values).
+    #[test]
+    fn an_index_past_the_most_values_is_refused() {
+        let set = PropSet::new(SetKind::EffectInstance);
+        let h = set.handle();
+        let s = &PROPERTY_SUITE;
+        // SAFETY: a valid handle and C strings.
+        unsafe {
+            for index in [c_int::MAX, MAX_VALUES as c_int] {
+                assert_eq!(
+                    (s.prop_set_int)(h, c"MyCount".as_ptr(), index, 7),
+                    kOfxStatErrBadIndex
+                );
+                assert_eq!(
+                    (s.prop_set_string)(h, c"MyName".as_ptr(), index, c"x".as_ptr()),
+                    kOfxStatErrBadIndex
+                );
+            }
+            // The last one taken.
+            let last = MAX_VALUES as c_int - 1;
+            assert_eq!((s.prop_set_int)(h, c"MyCount".as_ptr(), last, 7), 0);
+        }
+        assert_eq!(set.ints(c"MyCount").len(), MAX_VALUES);
+        assert!(set.strs(c"MyName").is_empty());
     }
 
     #[test]

@@ -51,7 +51,7 @@ impl Channel for u8 {
 
 /// Row `y` of a float RGBA image (most hosts' pictures): its pixels'
 /// numbers as they are, to read whole.
-pub(crate) fn rgba_row(img: &Image, y: c_int) -> Option<&[[f32; 4]]> {
+pub fn rgba_row(img: &Image, y: c_int) -> Option<&[[f32; 4]]> {
     if img.depth != Depth::Float || img.channels != 4 {
         return None;
     }
@@ -100,7 +100,7 @@ pub(crate) fn write_out(
 
 /// The pixel of `img` at `x`, `y` as it keeps it (alpha 1 when it has
 /// none); `None` outside it or for an alpha-only image.
-pub(crate) fn pixel(img: &Image, x: c_int, y: c_int) -> Option<[f32; 4]> {
+pub fn pixel(img: &Image, x: c_int, y: c_int) -> Option<[f32; 4]> {
     let [x1, _, x2, _] = img.bounds;
     if img.channels < 3 || !(x1..x2).contains(&x) {
         return None;
@@ -292,7 +292,7 @@ fn render_rgba_at(
 ///
 /// # Safety
 /// `row` is a row of `img` and `x` is inside its bounds.
-pub(crate) unsafe fn put_pixel(img: &Image, row: *mut u8, x: c_int, v: [f32; 4]) {
+pub unsafe fn put_pixel(img: &Image, row: *mut u8, x: c_int, v: [f32; 4]) {
     /// # Safety
     /// `row` holds pixel `i`, `channels` channels of `T` each.
     unsafe fn put<T: Channel>(row: *mut u8, i: usize, channels: usize, v: [f32; 4]) {

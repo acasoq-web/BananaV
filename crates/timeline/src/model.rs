@@ -803,8 +803,8 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse: Option<Tick>,
     /// Its takes in order, the active one among them, when it has more
-    /// than one (VEGAS's takes: other media it can play instead;
-    /// [`crate::takes`]).
+    /// than one, or its only one a name (VEGAS's takes: other media it
+    /// can play instead; [`crate::takes`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<crate::takes::Take>,
     /// Its sound's loudness as Auto Ducking read it, when its track is a
@@ -985,6 +985,26 @@ impl Clip {
             }
             (true, None) => self.out_transition = None,
         }
+    }
+
+    /// Its fade-in made at least `len` long — a crossfade made over its
+    /// start (Smart Split, a cut turned into an overlap) —, no longer
+    /// than the event; its fade-out gives way to what is left.
+    pub fn fade_in_at_least(&mut self, len: Tick) {
+        self.fade_in = self.fade_in.max(len).clamp(Tick::ZERO, self.duration);
+        self.fade_out = self
+            .fade_out
+            .clamp(Tick::ZERO, self.duration - self.fade_in);
+    }
+
+    /// Its fade-out made at least `len` long (a crossfade made over its
+    /// end), no longer than the event; its fade-in gives way to what is
+    /// left.
+    pub fn fade_out_at_least(&mut self, len: Tick) {
+        self.fade_out = self.fade_out.max(len).clamp(Tick::ZERO, self.duration);
+        self.fade_in = self
+            .fade_in
+            .clamp(Tick::ZERO, self.duration - self.fade_out);
     }
 
     /// Its snap offset flag's place, within it.
@@ -2956,11 +2976,10 @@ impl Project {
                 let m = self
                     .media(c.media)
                     .ok_or_else(|| format!("clip {:?} points to missing media", c.id))?;
-                if c.takes.len() == 1 || (!c.takes.is_empty() && c.active_take >= c.takes.len()) {
-                    return Err(format!(
-                        "clip {:?} with a lone or missing active take",
-                        c.id
-                    ));
+                // A lone take is an event's only one, named
+                // (`Project::rename_take`).
+                if !c.takes.is_empty() && c.active_take >= c.takes.len() {
+                    return Err(format!("clip {:?} with a missing active take", c.id));
                 }
                 for take in &c.takes {
                     let tm = self

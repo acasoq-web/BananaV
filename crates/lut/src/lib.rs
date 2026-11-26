@@ -222,11 +222,21 @@ impl Table1 {
 }
 
 impl Table3 {
+    /// The color at a point of the lattice: black where the table has
+    /// fewer colors than its size asks for (never one this crate read).
     fn at(&self, r: usize, g: usize, b: usize) -> [f32; 3] {
-        self.entries[r + self.size * (g + self.size * b)]
+        self.entries
+            .get(r + self.size * (g + self.size * b))
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn apply(&self, c: [f32; 3], how: Interpolation) -> [f32; 3] {
+        // A lattice has two points each way at least: with fewer there is
+        // nothing between them to work out, and the color stays as it is.
+        if self.size < 2 {
+            return c;
+        }
         let top = (self.size - 1) as f32;
         let t: [f32; 3] = std::array::from_fn(|k| unit(c[k], self.min[k], self.max[k]) * top);
         let i: [usize; 3] = std::array::from_fn(|k| (t[k] as usize).min(self.size - 2));
@@ -363,6 +373,27 @@ mod tests {
             lut.apply([1.0, 2.0, 0.0], Interpolation::Linear),
             [0.5, 1.0, 0.0]
         ));
+    }
+
+    #[test]
+    fn a_lattice_without_its_points_does_not_take_the_program_down() {
+        let table = |size: usize, colors: usize| Table3 {
+            min: [0.0; 3],
+            max: [1.0; 3],
+            size,
+            entries: vec![[1.0; 3]; colors],
+        };
+        let c = [0.2, 0.4, 0.6];
+        for how in [Interpolation::Linear, Interpolation::Tetrahedral] {
+            // Fewer than two points each way: the color stays as it is.
+            for (size, colors) in [(0, 0), (1, 1), (1, 0)] {
+                assert_eq!(table(size, colors).apply(c, how), c, "size {size}");
+            }
+            // Fewer colors than the size asks for: black where one is
+            // missing.
+            assert_eq!(table(2, 7).apply([1.0; 3], how), [0.0; 3]);
+            assert_eq!(table(2, 7).apply([0.0; 3], how), [1.0; 3]);
+        }
     }
 
     #[test]

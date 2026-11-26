@@ -32,7 +32,13 @@ fn the_bundle_loads_in_a_host_and_crops() {
     let bin = Binary::load(&binaries[0]).expect("it loads");
     let (plugins, failures) = bin.plugins().unwrap();
     assert!(failures.is_empty(), "{failures:?}");
-    let ids: Vec<_> = plugins.iter().map(|p| p.info.identifier.as_str()).collect();
+    // Banana Split's after BananaV's own.
+    let (pack, own): (Vec<_>, Vec<_>) = plugins
+        .iter()
+        .map(|p| p.info.identifier.as_str())
+        .partition(|id| id.starts_with("org.bananav.bananasplit."));
+    assert!(pack.len() > 250, "{}", pack.len());
+    let ids = own;
     assert_eq!(
         ids,
         [

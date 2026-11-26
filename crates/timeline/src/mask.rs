@@ -914,14 +914,15 @@ impl PanCropMask {
 
     /// How much of each pixel of a `w` × `h` picture of the media the masks
     /// keep `t` (in the box's unit of time) after the event's start (0–1, rows
-    /// from the top), in 8-bit steps: the media's pixels times `scale`
+    /// from the top), in 8-bit steps but where a feather fades (smooth
+    /// there, any fraction of a step): the media's pixels times `scale`
     /// are the picture's, `aspect` wide. The first path starts from nothing,
     /// or from everything when it is negative; each adds what is inside it or
     /// takes it away, as far as its opacity says.
     pub fn coverage(&self, t: i64, w: usize, h: usize, scale: [f64; 2], aspect: f64) -> Vec<f32> {
         crate::mask_raster::alpha(&self.paths_at_units(t), w, h, scale, aspect)
             .into_iter()
-            .map(|v| f32::from(v) / 255.0)
+            .map(|v| v / 255.0)
             .collect()
     }
 }

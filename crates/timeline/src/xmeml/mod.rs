@@ -39,20 +39,23 @@ use bv_core::FrameRate;
 
 use crate::xml::Element;
 
-/// A `<rate>`'s frame rate: its timebase, made NTSC's (×1000⁄1001) when
-/// it says so.
+/// A `<rate>`'s frame rate: its timebase — whole frames a second, 1 to
+/// 1000 —, made NTSC's (×1000⁄1001) when it says so. `None` for any
+/// other timebase: no rate, or a number too large to be one.
 fn rate_of(rate: &Element) -> Option<FrameRate> {
     let timebase: f64 = rate.child_text("timebase")?.trim().parse().ok()?;
-    let timebase = timebase.round() as u32;
+    let timebase = timebase.round();
+    if !(1.0..=1000.0).contains(&timebase) {
+        return None;
+    }
+    let timebase = timebase as u32;
     let ntsc = rate
         .child_text("ntsc")
         .is_some_and(|t| t.eq_ignore_ascii_case("true"));
-    (timebase > 0).then(|| {
-        if ntsc {
-            FrameRate::new(timebase * 1000, 1001)
-        } else {
-            FrameRate::new(timebase, 1)
-        }
+    Some(if ntsc {
+        FrameRate::new(timebase * 1000, 1001)
+    } else {
+        FrameRate::new(timebase, 1)
     })
 }
 

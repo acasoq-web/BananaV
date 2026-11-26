@@ -40,12 +40,14 @@ color management and most of its file formats are its own code, and the
 interface speaks English and Brazilian Portuguese, with the essentials in
 Simplified and Traditional Chinese, Russian, Ukrainian, Spanish (Spain and
 Latin America), Portuguese (Portugal), German, Japanese, French, Italian,
-Polish, Czech, Hungarian, Swedish, Turkish, Thai and Korean.
+Polish, Czech, Hungarian, Swedish, Turkish, Thai, Korean and Arabic.
 
-**New in 0.3.0:** macOS (experimental), smooth playback in 4K, VST 2 and VST 3
-plug-ins with their editors, a Transform mode on the preview, windows that
-dock where you drop them or float on another monitor, updates from within
-BananaV and 18 more interface languages. BananaV has not reached 1.0, so save
+**New in 0.4.0:** 267 professional effects (Banana Split: 147 video
+effects, 38 generators and 82 transitions, over 700 presets) drawn on the
+graphics card; a command line and an MCP server for
+AI agents; the preview's speed changed as it plays with voices keeping their
+pitch; SVG drawings, more MOV files, BananaV Mods and faster, steadier
+renders. BananaV has not reached 1.0, so save
 often: see the
 [changelog](CHANGELOG.md) for what changed in each version and the
 [roadmap](docs/ROADMAP.md) for what comes next.
@@ -96,7 +98,9 @@ package has a README with the details and the licenses of what it includes.
 - **Media** — most video and audio through the system's codecs (Media
   Foundation on Windows, FFmpeg on Linux), decoded and encoded on the graphics
   card when it can; BananaV's own code for PNG, JPEG, TIFF, OpenEXR, DPX,
-  Photoshop documents, WAV, Wave64, AIFF, FLAC and ProRes.
+  Photoshop documents, WAV, Wave64, AIFF, FLAC, ProRes and QuickTime's
+  Animation and uncompressed video; phone videos shot upright come in
+  standing.
 - **Rendering** — MP4 and MOV (H.264, HEVC, AV1, ProRes, with the encoders
   the computer has), image sequences and audio files; compositing on the
   graphics card (through wgpu: Direct3D 12, Vulkan or OpenGL) with the
@@ -107,9 +111,14 @@ package has a README with the details and the licenses of what it includes.
 - **Discs and capture** — DVD-Video authoring and burning, Video CDs and audio
   CDs, with BananaV's own MPEG-2 and MPEG-1 encoders; screen capture of
   displays, windows, cameras and the computer's sound.
+- **Command line and AI agents** — a command line (`bananav-cli` on
+  Windows) to read projects, render them, save frames and run any editing
+  tool from scripts, with JSON results; a Model Context Protocol server so AI
+  agents edit projects — one of their own, or the one open in the window,
+  where saving and rendering wait for your yes ([docs/agents.md](docs/agents.md)).
 - **Workspace** — dockable windows and saved layouts, customizable keyboard
   shortcuts, four interface color schemes from dark to white, English and
-  Brazilian Portuguese (and the essentials in eight more languages).
+  Brazilian Portuguese (and the essentials in nineteen more languages).
 
 ## Building from source
 

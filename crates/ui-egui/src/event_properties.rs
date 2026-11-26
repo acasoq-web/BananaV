@@ -348,8 +348,8 @@ impl EventPropertiesDialog {
                     if now.past_end != was.past_end
                         && let Some(end) = now.past_end
                     {
+                        let _ = p.set_looped(id, end == PastEnd::Loop);
                         if let Some(c) = p.clip_mut(id) {
-                            c.looped = end == PastEnd::Loop;
                             c.hold_last = end == PastEnd::Hold;
                         }
                         let _ = p.set_all_frames(id, end == PastEnd::AllFrames);
@@ -365,7 +365,6 @@ impl EventPropertiesDialog {
                     c.resample = now.resample;
                     c.undersample = now.undersample;
                 } else {
-                    c.looped = now.looped;
                     c.invert_phase = now.invert_phase;
                     c.preserve_pitch = now.preserve_pitch;
                     c.pitch = now.pitch;
@@ -374,6 +373,9 @@ impl EventPropertiesDialog {
                     } else if let Some(Some(g)) = gain {
                         c.normalize = Some(g);
                     }
+                }
+                if !video {
+                    let _ = p.set_looped(id, now.looped);
                 }
             });
             if let Some(fill) = fill {

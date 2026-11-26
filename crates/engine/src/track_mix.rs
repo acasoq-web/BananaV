@@ -96,7 +96,7 @@ impl TrackThreads {
             }
         }
         // The busses' and chains' latencies, from where they mix.
-        let delays = Arc::new(bv_mixer::delays(project, &mut self.master));
+        let delays = Arc::new(bv_mixer::delays_at(project, start, &mut self.master));
         // All of them at work at once, then summed in the tracks' order.
         let mut asked = Vec::new();
         for &id in &tracks {

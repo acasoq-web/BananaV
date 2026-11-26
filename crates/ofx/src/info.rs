@@ -390,7 +390,7 @@ impl ParamInfo {
             curves: props
                 .int(kOfxParamPropParametricDimension, 0)
                 .unwrap_or(1)
-                .max(0) as u32,
+                .clamp(0, crate::param::MAX_CURVES as i32) as u32,
             curve_range: [
                 range.first().copied().unwrap_or(0.0),
                 range.get(1).copied().unwrap_or(1.0),

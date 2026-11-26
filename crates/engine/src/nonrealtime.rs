@@ -4,6 +4,7 @@
 //! (`bv_mixer::dsp::Chain`) into a new WAV file, which the interface adds
 //! to the event as its new take.
 
+use crate::LockExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -101,9 +102,10 @@ impl NrtJob {
             std::thread::Builder::new()
                 .name("bv-nonrealtime-fx".into())
                 .spawn(move || {
+                    let _awake = bv_platform::KeepAwake::new("Applying effects");
                     let mut last = Instant::now();
                     let mut tick = |seconds: f64| {
-                        progress.lock().expect("progress").done += seconds;
+                        progress.locked().done += seconds;
                         if last.elapsed() > Duration::from_millis(100) {
                             last = Instant::now();
                             repaint();
@@ -114,7 +116,7 @@ impl NrtJob {
                     if result.is_err() {
                         let _ = std::fs::remove_file(&src.path);
                     }
-                    let mut p = progress.lock().expect("progress");
+                    let mut p = progress.locked();
                     p.finished = true;
                     p.done = p.total;
                     p.error = result.err();
@@ -131,7 +133,15 @@ impl NrtJob {
     }
 
     pub(crate) fn progress(&self) -> NrtProgress {
-        self.progress.lock().expect("progress").clone()
+        crate::settled(
+            &self.progress,
+            self.thread.as_ref(),
+            |p| p.finished,
+            |p| {
+                p.finished = true;
+                p.error = Some(crate::STOPPED.into());
+            },
+        )
     }
 
     pub(crate) fn cancel(&self) {

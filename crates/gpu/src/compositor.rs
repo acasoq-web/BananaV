@@ -19,6 +19,7 @@ use bv_timeline::{
 use crate::kernels::{Grid, K, Params};
 use crate::shared::{self, Shared};
 
+mod banana;
 mod color;
 mod own;
 use crate::{Gpu, GpuError};
@@ -167,6 +168,9 @@ pub struct Compositor {
     uploaded: HashMap<u64, (Arc<ImageRgbaF32>, Img)>,
     /// The events whose pictures this frame used.
     seen: Vec<u64>,
+    /// Pictures of effects' inputs at other times, kept for the next
+    /// frames.
+    past: banana::Past,
     /// Transfer tables on the card: (encode, curve).
     luts: HashMap<(bool, TransferCharacteristic), wgpu::Buffer>,
     readback: Option<wgpu::Buffer>,
@@ -227,11 +231,18 @@ impl Compositor {
             used: Vec::new(),
             uploaded: HashMap::new(),
             seen: Vec::new(),
+            past: banana::Past::default(),
             luts: HashMap::new(),
             readback: None,
             shared: Vec::new(),
             plugin_readbacks: Vec::new(),
         }
+    }
+
+    /// Lets go of the pictures of other times kept for effects that read
+    /// them, and of their readers.
+    pub fn let_go(&mut self) {
+        self.past = banana::Past::default();
     }
 
     pub fn gpu(&self) -> &Arc<Gpu> {
@@ -381,7 +392,11 @@ impl Compositor {
             .map(|e| e.to_string())
             .or_else(|| gpu.take_stray());
         let result = match failed {
-            Some(e) => Err(GpuError::Failed(e)),
+            Some(e) => {
+                // What it was to keep may not be there.
+                self.past = banana::Past::default();
+                Err(GpuError::Failed(e))
+            }
             None => self.read(&readback, submitted, bytes, (out.w, out.h), output),
         };
         self.readback = Some(readback);
@@ -474,6 +489,7 @@ impl Compositor {
         while kept > KEEP_FREE && !self.free.is_empty() {
             kept -= self.free.remove(0).size();
         }
+        self.past.end_frame();
         let seen = std::mem::take(&mut self.seen);
         self.uploaded.retain(|owner, _| seen.contains(owner));
     }

@@ -4,6 +4,7 @@
 //! recebe `None` e o pedido entra na fila. Quando fica pronto, a interface é
 //! avisada para redesenhar.
 
+use crate::LockExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
@@ -188,7 +189,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
                 loop {
                     let (key, job) = {
                         let (lock, cv) = &*worker;
-                        let mut st = lock.lock().expect("fila");
+                        let mut st = lock.locked();
                         loop {
                             if st.quit {
                                 drop(st);
@@ -201,7 +202,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
                             if std::mem::take(&mut st.release) {
                                 drop(st);
                                 close_thread_readers();
-                                st = lock.lock().expect("fila");
+                                st = lock.locked();
                                 continue;
                             }
                             if holds
@@ -217,11 +218,13 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
                             if let Some(j) = st.queue.pop_back() {
                                 break j;
                             }
-                            st = cv.wait(st).expect("fila");
+                            st = cv
+                                .wait(st)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                         }
                     };
                     let value = job().map(Arc::new);
-                    let mut st = worker.0.lock().expect("fila");
+                    let mut st = worker.0.locked();
                     st.pending.remove(&key);
                     st.order.push_back(key.clone());
                     st.done.insert(key, value);
@@ -244,7 +247,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
     /// Resultado pronto, ou enfileira o cálculo. Pedidos recentes vêm primeiro.
     fn get(&self, key: K, job: impl FnOnce() -> Option<V> + Send + 'static) -> Option<Arc<V>> {
         let (lock, cv) = &*self.shared;
-        let mut st = lock.lock().expect("fila");
+        let mut st = lock.locked();
         if let Some(v) = st.done.get(&key) {
             return v.clone();
         }
@@ -262,7 +265,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
     }
 
     fn clear(&self) {
-        let mut st = self.shared.0.lock().expect("fila");
+        let mut st = self.shared.0.locked();
         st.done.clear();
         st.order.clear();
     }
@@ -270,7 +273,7 @@ impl<K: Eq + Hash + Clone + Send + 'static, V: Send + Sync + 'static> Service<K,
     /// Has the worker close the files it keeps open.
     fn release(&self) {
         let (lock, cv) = &*self.shared;
-        lock.lock().expect("fila").release = true;
+        lock.locked().release = true;
         cv.notify_all();
     }
 }
@@ -279,7 +282,7 @@ impl<K, V> Drop for Service<K, V> {
     fn drop(&mut self) {
         {
             let (lock, cv) = &*self.shared;
-            lock.lock().expect("fila").quit = true;
+            lock.locked().quit = true;
             cv.notify_all();
         }
         if let Some(t) = self.thread.take() {
@@ -340,7 +343,7 @@ impl Thumbs {
         self.images.clear();
         self.waves.clear();
         self.chunks.clear();
-        self.shown.lock().expect("miniaturas").clear();
+        self.shown.locked().clear();
     }
 
     /// One second (`index`) of the media's audio stream, sample by sample.
@@ -412,7 +415,7 @@ impl Thumbs {
                 rgba: bv_color::linear_to_display_rgba8(&small, TransferCharacteristic::Bt709),
             })
         });
-        let mut shown = self.shown.lock().expect("miniaturas");
+        let mut shown = self.shown.locked();
         let seen = shown.entry((key, height)).or_default();
         match exact {
             Some(t) => {

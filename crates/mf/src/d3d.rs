@@ -33,6 +33,8 @@ pub(crate) struct Device {
     context: ID3D11DeviceContext,
     /// The CPU-writable texture frames are copied through.
     staging: Option<ID3D11Texture2D>,
+    /// Tells when the card has done the copy.
+    done: Option<ID3D11Query>,
 }
 
 impl Device {
@@ -82,6 +84,7 @@ impl Device {
                 device,
                 context,
                 staging: None,
+                done: None,
             })
         }
     }
@@ -129,6 +132,40 @@ impl Device {
         tex.ok_or(Error::Unavailable)
     }
 
+    /// Waits until the card has done the copies asked for: an encoder that
+    /// reads the texture through a queue of its own would not wait for
+    /// them, and now and then encoded a frame half written.
+    fn wait_for_copy(&mut self) -> Result<()> {
+        unsafe {
+            if self.done.is_none() {
+                let desc = D3D11_QUERY_DESC {
+                    Query: D3D11_QUERY_EVENT,
+                    MiscFlags: 0,
+                };
+                let mut q = None;
+                self.device.CreateQuery(&desc, Some(&mut q)).map_err(win)?;
+                self.done = q;
+            }
+            let Some(q) = &self.done else {
+                return Ok(());
+            };
+            self.context.End(q);
+            self.context.Flush();
+            let started = std::time::Instant::now();
+            let mut ready = 0i32;
+            loop {
+                let into = Some(std::ptr::from_mut(&mut ready).cast());
+                let size = std::mem::size_of::<i32>() as u32;
+                // Not there yet: no error, `ready` left 0.
+                self.context.GetData(q, into, size, 0).map_err(win)?;
+                if ready != 0 || started.elapsed() > std::time::Duration::from_secs(2) {
+                    return Ok(());
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+
     /// A media buffer holding `data` (NV12 or P010: `height` rows of luma,
     /// then the chroma rows) as a texture of the device.
     pub(crate) fn upload(
@@ -165,6 +202,7 @@ impl Device {
             }
             self.context.Unmap(&staging, 0);
             self.context.CopyResource(&frame, &staging);
+            self.wait_for_copy()?;
             let buffer =
                 MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &frame, 0, false).map_err(win)?;
             if let Ok(b2) = buffer.cast::<IMF2DBuffer>()

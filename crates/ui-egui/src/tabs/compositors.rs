@@ -152,6 +152,7 @@ fn apply(app: &mut BananaApp, fx: &PluginFx) {
 
 pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
     let mut state = std::mem::take(&mut app.choosers.compositors);
+    state.keys = app.browse.take(crate::dock::Tab::Compositors);
     let categories = categories();
     let list = crate::ofx::compositors();
     let plugins = plugins(&list);

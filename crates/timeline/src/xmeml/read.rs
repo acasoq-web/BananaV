@@ -996,7 +996,15 @@ pub fn read(text: &str) -> Result<Document, String> {
         depth: 0,
         vegas: by_vegas(seq),
     };
-    let rate = seq.child("rate").and_then(rate_of);
+    // The sequence's rate times everything in it: with a timebase that is
+    // no frame rate, the file is refused (a clip's or a file's own falls
+    // back to the sequence's).
+    let rate = match seq.child("rate") {
+        Some(r) if r.child("timebase").is_some() => {
+            Some(rate_of(r).ok_or("the sequence's timebase is not a frame rate")?)
+        }
+        _ => None,
+    };
     let mut merged = HashMap::new();
     let video = r.tracks(seq, TrackKind::Video, &mut merged);
     let audio = r.tracks(seq, TrackKind::Audio, &mut merged);

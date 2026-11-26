@@ -1083,7 +1083,7 @@ fn levels(frame: &PreviewFrame, with_lab: bool) -> Levels {
 #[derive(Clone)]
 struct Trace {
     /// The frame, what the scope shows and the plot's size in pixels.
-    key: (u64, bv_core::Tick, u32, u32, u64, [usize; 2]),
+    key: (bv_engine::FrameKey, u64, [usize; 2]),
     texture: Option<TextureHandle>,
     levels: Option<Arc<Levels>>,
 }
@@ -1113,14 +1113,7 @@ fn trace(
 ) -> Trace {
     let id = ui.id().with(("scope-trace", scope));
     let ppp = ui.ctx().pixels_per_point();
-    let key = (
-        frame.generation,
-        frame.time,
-        frame.width,
-        frame.height,
-        look(scope, prefs),
-        plot_pixels(plot, ppp),
-    );
+    let key = (frame.key(), look(scope, prefs), plot_pixels(plot, ppp));
     let mut cached: Option<Trace> = ui.data(|d| d.get_temp(id));
     if let Some(c) = &cached
         && c.key == key

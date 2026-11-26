@@ -4,6 +4,237 @@ What changed in each public build of BananaV. The
 [Releases page](https://github.com/acasoq-web/BananaV/releases) has the
 downloads, and each release's notes say how to install it.
 
+## 0.4.0 — 2026-11-26
+
+For Windows and Linux (x64 and ARM64) and, experimental, macOS (one app
+for Apple's chips and Intel).
+
+### Highlights
+
+- **267 new professional effects: Banana Split** — 147 video effects
+  (light, color, distortions, blurs, stylized looks, time effects), 38
+  generators and 82 transitions, with over 700 presets, drawn on the
+  graphics card.
+- **The preview's speed** from 0.25x to 4x, changed with K and L as it
+  plays, voices keeping their pitch; sped-up events and fast playback stay
+  smooth in 4K.
+- **AI agents and a command line**: `bananav-cli` renders and edits
+  projects from scripts, and `bananav mcp` lets AI agents such as Claude
+  open, edit, render and save projects — the one open in the window too,
+  with your Allow.
+- **Faster, steadier renders**: no more crawl at the end of recordings
+  whose sound outlasts the picture, no render left waiting for ever on a
+  graphics card's encoder, and the computer kept awake while rendering.
+- **SVG drawings, more MOV files** and phones' portrait videos standing
+  up.
+- **BananaV Mods** (Options › BananaV Mods…): BananaV's own extras, each
+  switched on by you — the Track Select tools, envelope points selected
+  with events, the Transform window, AI agents.
+
+### Everything that changed
+
+- Banana Split, a new pack of 267 effects that comes with BananaV: glows,
+  rays and lens flares, blurs and sharpening, distortions, color looks,
+  stylized drawings and old film, echoes and other time effects, 38
+  generators (skies, nebulas, lightning, textures, gradients) and
+  82 transitions (dissolves, wipes and camera moves), with over 700
+  presets. They are in a category of their own in Video FX, Transitions
+  and Media Generators, filtered by group, work with keyframes, masks
+  with tracking and handles on the preview, and draw on the graphics card
+  (every one also on the processor, alike). A preview below full quality
+  shows what the render will, only softer. Lightning follows a curve
+  through up to ten points of your own, put in and taken out on the
+  preview, and looks the same at any length, curve and frame size.
+- Effects that read other frames of a video no longer read it again at
+  every frame: what they need is kept between frames.
+- Each drag of an effect's handle on the preview is an undo step of its
+  own (drags one after another were undone together).
+- The preview's speed is picked on the Video Preview's bar, beside the
+  quality (0.25x to 4x), and K (slower) and L (faster) change it as it
+  plays, without a stop, in every keyboard map. Voices keep their pitch
+  at any speed, and sound clean, as a video site's do sped up.
+- Events sped up a lot, and faster playback, play smoothly: 4K at 60
+  frames a second four times as fast went from 13 to 59 frames a second.
+- Renders, recordings and discs being burned keep the computer from going
+  to sleep or hibernating by itself.
+- Open Folder after a render opens the file's folder with the file picked
+  (folders and files with spaces in their names opened another one).
+- The Render window's icons stay inside it whatever the template's notes,
+  and its tree scrolls.
+- The timeline's scroll bars take the mouse wheel, and a press on their
+  empty part brings the bar there, held by it.
+- The Properties window opens from View › Window only, no longer by itself
+  when an effect is put on an event.
+- A video frame a graphics card decodes damaged, or fails at, is decoded
+  again instead of going into the render; frames sent to AMD's encoders
+  are waited for.
+- Renders no longer crawl at the end of recordings whose sound lasts
+  longer than their picture (a 4K render slowed to 3 frames a second
+  there), and a graphics card's encoder that stops answering fails the
+  render with a message instead of holding it for ever. The render's
+  progress shows what does the work: the graphics card (or the
+  processor) and the encoder.
+- Video FX's previews move under the pointer when their effect moves by
+  itself (noise, flickers, lightning).
+- Explorer, Project Media, Media Generators, Transitions and Video FX:
+  typing a name's first letters picks it, and the arrows move through
+  them.
+- A track's volume and pan sliders share its row half and half, both
+  growing as the track list widens.
+- An envelope lying on an event's Opacity or Gain line takes the clicks
+  there, and the line's handle in the event's middle still changes the
+  event's level; one tooltip shows at a time. A double-click held on an
+  envelope's line and dragged puts a point there and pulls it at once.
+- BananaV Mods: Envelope points with events — the selection rectangle and
+  the Track Select tools pick the track envelopes' points with the
+  events, which move and are deleted with them. Each mod's description
+  unfolds from an arrow after its name.
+- With the Transform mod on, the preview still zooms with the wheel and
+  pans dragged with it.
+- The Properties window keyframes as the FX and Pan/Crop windows do: each
+  effect's settings with the clocks that animate them and its keyframe
+  controller, and Pan/Crop's keyframe controller.
+
+- More `.mov` files open. A phone's portrait video comes in standing up:
+  the turn the file stores sets the media's Rotation, as Media Properties
+  would (also in `.mp4`). On Windows, BananaV decodes itself what the
+  system cannot: QuickTime Animation (16, 24 and 32 bits with alpha,
+  palettes and grays), uncompressed video (2vuy, yuv2, v210, v410, v308,
+  v408, raw RGB and ARGB, r210, R10k, b48r, b64a, BGRA), PNG and TIFF
+  frames (with alpha), and µ-law, A-law and IMA 4:1 sound (it was left
+  out silently). Formats still unsupported are named right ("DV", not
+  "cvd"). On Linux the import dialogs show `.MOV` files in capitals too.
+- A command line and AI agents (see `docs/agents.md`). `bananav-cli` (on
+  Windows, beside BananaV.exe; elsewhere BananaV itself) reads projects,
+  renders them, saves frames as pictures and runs any editing tool from
+  scripts, its results as JSON. `bananav mcp` is a Model Context Protocol
+  server: AI agents such as Claude open, edit, render and save projects
+  of their own, about fifty tools from tracks and events to effects with
+  keyframes, titles, transitions, envelopes and the whole project model.
+  With Options › BananaV Mods › AI agents on, `bananav mcp --live` edits
+  the project open in the window, every edit an undo step: only programs
+  on this computer connect, and saving, rendering and opening another
+  project wait for your Allow. The Copy MCP configuration button gives an
+  agent's program the settings to start it.
+- Pan/Crop masks' feathers fade smoothly, pixel by pixel: a wide feather,
+  In and Out above all, showed bands (flat strips with steps of up to
+  five levels between them). Picking a Feather type in the mask's
+  properties when the feather is at 0 % sets it to 5 %, as the small
+  toolbar under the mask does. (In 0.3.0 the Feather type and Feather (%)
+  picked in the properties went back at once; fixed since.)
+- Envelope points can be picked several at a time, as events are:
+  Ctrl+click adds a point or takes it away, Shift+click picks the points
+  from the last one clicked (Ctrl+Shift adds them). Dragging one of them
+  moves them all together, Delete removes them, and the point's shortcut
+  menu (Delete, the curve types, the preset values) acts on all of them.
+  The picked points show white.
+
+- Arabic (العربية) in Options › Preferences › Language, partial as the
+  other added languages: the menus, the main windows, the timeline and
+  the render dialog, written right to left with the letters joined; the
+  rest shows in English.
+- The timeline toolbar's Normal Edit Tool has a ▾: a menu of the editing
+  tools — Normal Edit, Shuffle, Slip, Slide, Time Stretch/Compress and
+  Split Trim — with a dot by the one in use; the button then stands for
+  the one picked.
+- Ctrl+dragging an edge of a grouped event to change the playback rate
+  changes the whole group's together: its events stay butted, with no
+  gaps and no overlaps (they came apart or ran into each other).
+- Zooming far into the timeline with waveforms shown no longer slows the
+  interface down (a frame took about 22 ms at the closest zoom, now about
+  3 ms at every zoom).
+
+- SVG drawings (`.svg` and gzipped `.svgz`) import as still images,
+  drawn by BananaV as big as fits a 4K frame so they stay sharp: shapes,
+  strokes and dashes, solid colors and gradients, groups and reused
+  symbols, transparency, clip paths and masks, CSS styles, and the
+  pictures they hold. Text, filters and patterns are not drawn yet.
+
+- Options › BananaV Mods…: BananaV's own features, each switched on by a
+  box (all off at first). The Transform window and Transform mode and the
+  Envelope Appearance settings moved there, and a new mod adds the Track
+  Select Forward (A) and Track Select Backward (Shift+A) tools: a click
+  selects every event from there to the end, or to the start, on all
+  tracks (Shift: that track only; Alt+Shift: without the events' groups),
+  and dragging one moves them all.
+- Customize Keyboard: a "[Premiere Pro]" keyboard map with that editor's
+  keys for the commands BananaV has, to make the move easier.
+
+- Auto Ripple: the ▾ beside its toolbar button picks what a ripple moves —
+  Affected Tracks; Affected Tracks, Bus Tracks, Markers, and Regions; All
+  Tracks, Markers, and Regions — before Auto Ripple goes on too. Ripples
+  now move the tracks' envelopes and keyframes with their events, and the
+  two wider modes the bus tracks' (video bus, busses, effects chains).
+
+- Pan/Crop: with Sync Cursor, the keyframe controller's needle follows
+  playback as the timeline's does (it stayed at the edit cursor), and a
+  click or drag in it while playing moves playback there. Space,
+  Shift+Space, Enter and Esc work in the FX window too, so playback starts
+  and stops while you go through the keyframes.
+
+- Pan/Crop: moving the cursor while a drag on the workspace was still
+  held — on macOS a drag let go just outside the window could stay held,
+  the needle or the mask following the pointer — no longer leaves a
+  keyframe at every step; a drag edits only the time it began at. The
+  same for Track Motion and the Video Preview's Transform mode. The Mask
+  row's properties (Position, Mode, Opacity, Feather…) now change the
+  picked path; they were put back at once.
+
+- Saving a project writes it whole or not at all, and keeps the save
+  before as `<name>.bak`: a full disk or BananaV closed mid-save no
+  longer leaves an empty project. Settings files are written the same
+  way, and one that cannot be read is kept aside (`.damaged`) instead of
+  being replaced by the defaults.
+- A damaged project file opens mended where it can be, saying what was
+  mended, instead of not opening. Edits that saved projects BananaV then
+  refused to open are fixed: naming an event's only take, a bus send left
+  at its lowest level, Loop switched off on an event that starts before
+  its media, Smart Split inside a fade, a transition over a short event
+  without Automatic Crossfades, shuffling grouped events.
+- Opening a project from the Explorer and File › Import › VEG Project ask
+  about unsaved changes first.
+- Autosave: the copy goes once the project is saved, two BananaV windows
+  no longer take each other's copy for a crash, and a copy opened back is
+  kept until it is saved.
+- Tools › Burn Disc starts its job; the timeline toolbar's Color Grading,
+  Show Video Event Edge Frames and Show Event Media Markers buttons,
+  Customize Toolbar's Help and Open in Trimmer from the media windows
+  work.
+- A render that fails mid-way ends with a message instead of a window
+  that never closes; so do Detect Scenes, beat detection, audio sync and
+  Apply Non-Real-Time Event FX.
+- Damaged or crafted pictures, sounds and archives (GIF, PNG, JPEG, TIFF,
+  TGA, BMP, DPX, EXR, PSD, WAV, Wave64, CAF, MP4/MOV, ProRes, ZIP, OCIO
+  configurations and LUTs, OpenTimelineIO, Final Cut Pro XML, VEG) give an
+  error instead of freezing or closing BananaV.
+- Audio: automated effects on busses and FX chains no longer reset at
+  every block; Track EQ no longer clicks while its values move;
+  Multi-Tap Delay above 100 % feedback no longer runs away; bypassing an
+  effect keeps the state of those after it; a sample that is not a number
+  (a plug-in's, a file's) no longer silences the mix until a seek; a
+  track's envelopes land in place after effects with latency; a ripple
+  delete next to a crossfade keeps the track in order.
+- Plug-ins: OFX plug-ins of one file load one at a time, VST 3 and VST 2
+  plug-ins that crashed are no longer called again, the 32-bit bridge no
+  longer hangs when it fails to start, and BananaV's window has a larger
+  stack for plug-in editors.
+- The Video Preview shows the exact frame after a seek where it kept the
+  stand-in; the timeline no longer copies and compares the whole project
+  at every frame, and long tracks label only the transitions in sight.
+
+- Ctrl+Q, Ctrl+Shift+Q and Ctrl+Shift+Alt+Q (Insert › Audio Track, Video
+  Track and Adjustment Track) no longer close BananaV when the keys are
+  in another window.
+- The Video Media Generators window shows the keyframe controller once a
+  parameter is animated; a color's row shows the color along the time.
+- Markers' flags sit at the timeline's top and end in the loop region's
+  bar, their lines going down the ruler and the tracks. A double-click on
+  the marker bar selects the time between the two markers around it, and
+  a drag along it makes a time selection.
+- The timeline's view follows the cursor when the arrow keys (or any
+  command) move it past the view's edge.
+- A window's tab shows the moving pointer only while it is held.
+
 ## 0.3.0 — 2026-11-10
 
 For Windows and Linux (x64 and ARM64) and, experimental, macOS (one app

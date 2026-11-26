@@ -1,5 +1,8 @@
 //! Propriedades do clipe selecionado (ou da trilha dele): tempo, nível,
-//! fades, transição, enquadramento (pan/crop) e cadeia de efeitos.
+//! fades, transição, enquadramento (pan/crop) e cadeia de efeitos. Its
+//! keyframes as in the FX window's: the Pan/Crop keyframe controller under
+//! the framing, and each plug-in effect's settings — the clocks that
+//! animate them — with its keyframe controller (the user's).
 
 use crate::i18n::tr;
 use bv_core::{Tick, timecode};
@@ -12,6 +15,28 @@ use crate::app::BananaApp;
 use crate::dock::Tab;
 use crate::egui::{self, Color32, RichText};
 use crate::theme;
+
+/// The Properties window's Pan/Crop keyframe controller, as the FX
+/// window's: its own state, its needle (from the event's start), the row
+/// picked, Sync Cursor.
+#[derive(Debug)]
+pub(crate) struct PropsKeys {
+    strip: crate::pancrop_keys::KeyStrip,
+    pos: Tick,
+    row: crate::pancrop_keys::KeyRow,
+    sync: bool,
+}
+
+impl Default for PropsKeys {
+    fn default() -> PropsKeys {
+        PropsKeys {
+            strip: Default::default(),
+            pos: Tick::ZERO,
+            row: crate::pancrop_keys::KeyRow::Position,
+            sync: true,
+        }
+    }
+}
 
 const CURVES: [(FadeCurve, &str); 5] = [
     (FadeCurve::Linear, "Linear"),
@@ -34,7 +59,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
         );
         return;
     };
-    let project = app.project().clone();
+    let project = app.project_snapshot();
     let (Some(clip), Some(track)) = (project.clip(id), project.clip_track(id)) else {
         return;
     };
@@ -228,6 +253,7 @@ pub fn ui(ui: &mut egui::Ui, app: &mut BananaApp) {
                         super::hint(ui, tr("Animated: edits the keyframe at the cursor."));
                     }
                 });
+                pan_crop_keys(ui, app, clip);
             }
             ui.separator();
             effects_chain(ui, &mut c, app, !is_video);
@@ -318,12 +344,15 @@ fn bv_mixer_gain_db(g: f32) -> f32 {
 
 fn apply_clip(app: &mut BananaApp, key: egui::Id, id: ClipId, c: Clip) {
     // Propriedades que valem para o grupo inteiro (como no VEGAS): fades e travamento.
-    let (fade_in, fade_out, locked) = (c.fade_in, c.fade_out, c.locked);
+    let (fade_in, fade_out, locked, looped) = (c.fade_in, c.fade_out, c.locked, c.looped);
     app.modify_merged(key, |p: &mut Project| {
         let group = p.group_members(id);
         if let Some(slot) = p.clip_mut(id) {
             *slot = c;
         }
+        // Loop off on an event before its media's start: what Loop
+        // repeated there goes, its picture in place.
+        let _ = p.set_looped(id, looped);
         for m in group.into_iter().filter(|&m| m != id) {
             if let Some(o) = p.clip_mut(m) {
                 o.fade_in = fade_in.min(o.duration);
@@ -406,12 +435,164 @@ fn effects_chain(ui: &mut egui::Ui, c: &mut Clip, app: &mut BananaApp, audio: bo
             app.show_tab(Tab::VideoFx, false);
         }
     });
-    chain_editor(ui, &mut c.effects, audio, "props");
+    let id = c.id;
+    chain_editor(ui, &mut c.effects, audio, "props", |ui, i, e| {
+        plugin_settings(ui, app, id, i, e)
+    });
+}
+
+/// The Pan/Crop keyframe controller of `clip`, under the framing's
+/// sliders, as the FX window's: its rows' keyframes made, moved and
+/// deleted, its needle the timeline's cursor while Sync Cursor is on.
+fn pan_crop_keys(ui: &mut egui::Ui, app: &mut BananaApp, clip: &Clip) {
+    let rate = app.project().settings.frame_rate;
+    let mut k = std::mem::take(&mut app.properties_keys);
+    let last = (clip.duration - rate.frame_duration()).max(Tick::ZERO);
+    let now = app.display_time();
+    if k.sync && now >= clip.start && now < clip.end() {
+        k.pos = rate.snap_floor(now) - clip.start;
+    }
+    k.pos = k.pos.clamp(Tick::ZERO, last);
+    let place = app.project().clip_place_in(clip.id);
+    let cx = crate::pancrop_keys::StripCtx {
+        clip,
+        media: place.map_or([1.0; 2], |p| p.media),
+        aspect: place.map_or(1.0, |p| p.media_aspect),
+        rate,
+        pos: k.pos,
+        row: k.row,
+        sync: k.sync,
+        curve: app.settings.prefs.new_motion_keys().0,
+        // Its keys (Delete, Ctrl+C…) only while the window has them.
+        keys_on: app.keys_tab == Some(Tab::Properties),
+    };
+    let height = crate::pancrop_keys::height();
+    let answer = ui
+        .allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+            ui.set_min_height(height);
+            k.strip.show(ui, &cx)
+        })
+        .inner;
+    if let Some(r) = answer.row {
+        k.row = r;
+    }
+    if let Some(s) = answer.sync {
+        k.sync = s;
+    }
+    let id = clip.id;
+    if answer.toggle_mask {
+        app.modify(|p| {
+            if let Some(c) = p.clip_mut(id) {
+                match &mut c.mask {
+                    Some(m) => m.enabled = !m.enabled,
+                    None => {
+                        c.mask = Some(bv_timeline::mask::PanCropMask {
+                            enabled: true,
+                            ..Default::default()
+                        })
+                    }
+                }
+            }
+        });
+    }
+    if let Some((keys, drag)) = answer.keys {
+        let set = move |p: &mut Project| {
+            let media = p.clip_place_in(id).map(|place| place.media);
+            let Some(c) = p.clip_mut(id) else { return };
+            if keys.position != c.pan_crop.keys {
+                c.pan_crop.keys = keys.position.clone();
+                if let Some(m) = media {
+                    c.pan_crop.size = [m[0] as u32, m[1] as u32];
+                }
+            }
+            if let Some(m) = c.mask.as_mut()
+                && (!m.keys.is_empty() || !keys.mask.is_empty())
+                && keys.mask != m.keys
+            {
+                m.keys = keys.mask.clone();
+            }
+        };
+        match drag {
+            // A drag undoes as one step.
+            Some(n) => app.modify_merged(egui::Id::new(("props-pancrop-keys", id, n)), set),
+            None => app.modify(set),
+        }
+    }
+    if let Some(np) = answer.pos {
+        k.pos = np;
+        if k.sync {
+            let t = rate.snap_floor(clip.start + np);
+            if app.is_playing() {
+                app.seek_playback(t);
+            } else {
+                app.seek(t);
+            }
+        }
+    }
+    app.properties_keys = k;
+}
+
+/// A plug-in effect's settings in the Properties window (`i` its place in
+/// event `clip`'s chain), as the FX window shows them: its rows with the
+/// clocks that animate them, Animate for one animated as a whole, and its
+/// keyframe controller while it has keyframes. The effect changes in
+/// place; the controller's needle moves the cursor.
+fn plugin_settings(ui: &mut egui::Ui, app: &mut BananaApp, clip: ClipId, i: usize, e: &mut Effect) {
+    let Some(fx) = e.plugin.clone() else {
+        return;
+    };
+    let target = crate::fx_window::FxTarget::Clip(clip);
+    let key = crate::ofx::EditorKey {
+        owner: crate::ofx::EditorOwner::Fx(target),
+        index: i,
+        id: fx.id.clone(),
+    };
+    let cursor = app.ofx.cursor_of(&key).unwrap_or(app.cursor);
+    let place = crate::ofx::place_of(target, app.project(), cursor);
+    let mut fx = *fx;
+    if let Some(changed) = crate::ofx::params(ui, &mut app.ofx, key.clone(), &fx, &place, 1) {
+        fx = changed;
+    }
+    let tray = app.ofx.keyframes_height(&key, &fx);
+    if tray == 0.0
+        && crate::ofx::animate_button(&app.ofx, &key, &fx)
+        && ui
+            .button(tr("Animate"))
+            .on_hover_text(tr("Animate the effect: its keyframe controller opens"))
+            .clicked()
+    {
+        fx = crate::ofx::animate_whole(&app.ofx, &key, &fx, &place);
+    }
+    if tray > 0.0 {
+        ui.add_space(4.0);
+        let (keyed, seek) = ui
+            .allocate_ui(egui::vec2(ui.available_width(), tray), |ui| {
+                ui.set_min_height(tray);
+                crate::ofx::keyframes(ui, &mut app.ofx, &key, &fx, &place, tray)
+            })
+            .inner;
+        if let Some(k) = keyed {
+            fx = k;
+        }
+        if let Some(t) = seek {
+            app.seek(t);
+        }
+    }
+    if e.plugin.as_deref() != Some(&fx) {
+        e.plugin = Some(Box::new(fx));
+    }
 }
 
 /// Editor de uma cadeia de efeitos: adicionar, ligar/desligar, reordenar,
-/// remover e ajustar parâmetros. `audio` escolhe o catálogo.
-pub(crate) fn chain_editor(ui: &mut egui::Ui, effects: &mut Vec<Effect>, audio: bool, salt: &str) {
+/// remover e ajustar parâmetros. `audio` escolhe o catálogo; `plugin`
+/// draws a plug-in effect's settings (its place in the chain).
+pub(crate) fn chain_editor(
+    ui: &mut egui::Ui,
+    effects: &mut Vec<Effect>,
+    audio: bool,
+    salt: &str,
+    mut plugin: impl FnMut(&mut egui::Ui, usize, &mut Effect),
+) {
     ui.menu_button(tr("+ Add Effect"), |ui| {
         let list: &[EffectKind] = if audio {
             &EffectKind::AUDIO
@@ -461,7 +642,7 @@ pub(crate) fn chain_editor(ui: &mut egui::Ui, effects: &mut Vec<Effect>, audio: 
                     }
                 });
                 if e.plugin.is_some() {
-                    super::hint(ui, tr("Its settings are in the FX window."));
+                    plugin(ui, i, e);
                 } else {
                     params(ui, e);
                 }
@@ -824,5 +1005,70 @@ pub fn param_slider(
             }
             r
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The Properties window keyframes as the FX window does (the user's):
+    /// a plug-in effect's rows with their clocks and, once it has
+    /// keyframes, its keyframe controller; the Pan/Crop keyframe controller
+    /// under the framing, its Sync Cursor there.
+    #[test]
+    fn properties_show_the_keyframe_controllers() {
+        use bv_timeline::{KeyCurve, PluginFx, PluginKey, PluginParam, PluginValue};
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let clip = app.project().tracks[0].clips[0].id;
+        let s = Tick::from_seconds;
+        let strength = PluginParam {
+            value: PluginValue::Num(vec![1.0]),
+            keys: vec![
+                PluginKey::new(s(0), PluginValue::Num(vec![1.0]), KeyCurve::Linear),
+                PluginKey::new(s(1), PluginValue::Num(vec![0.5]), KeyCurve::Linear),
+            ],
+        };
+        let fx = PluginFx {
+            id: "org.bananav.Sepia".into(),
+            version: [1, 0],
+            name: "Sepia".into(),
+            params: [("blendingStrength".to_string(), strength)]
+                .into_iter()
+                .collect(),
+        };
+        app.modify(|p| {
+            if let Some(c) = p.clip_mut(clip) {
+                c.effects.push(Effect::plugin(fx));
+            }
+        });
+        app.select_clip(clip, false);
+        app.show_tab(Tab::Properties, false);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1400.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(
+                |ui, app: &mut BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        h.run_steps(6);
+        assert!(
+            h.query_all_by_label_contains("Keyframe of")
+                .next()
+                .is_some(),
+            "the effect's keyframe controller"
+        );
+        assert!(
+            h.query_all_by_label("Sync Cursor").next().is_some(),
+            "the Pan/Crop keyframe controller"
+        );
     }
 }

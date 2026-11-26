@@ -183,6 +183,9 @@ pub(crate) struct MaskEditor {
     /// anchor closes it.
     drawing: Option<usize>,
     drag: Option<MaskDrag>,
+    /// The needle's time (from the event's start) the drag began at: it
+    /// edits the shapes there.
+    drag_at: Tick,
     /// The pointer the drag going on shows: the one its press showed.
     held: Option<Cursor>,
     /// The rectangle picking anchors, while it is dragged.
@@ -218,6 +221,7 @@ impl Default for MaskEditor {
             boxed: false,
             drawing: None,
             drag: None,
+            drag_at: Tick::ZERO,
             held: None,
             marquee: None,
             hidden: HashMap::new(),
@@ -373,13 +377,19 @@ impl MaskEditor {
                     .iter()
                     .map(|&v| (v, tr(v.name())))
                     .collect();
-                prop_choice(
+                // A feather picked with none set: 5 %, as the small
+                // toolbar's (at 0 % it would not show).
+                if prop_choice(
                     ui,
                     tr("Feather type"),
                     "pcm-pena",
                     &mut p.feather,
                     &feathers,
-                );
+                ) && p.feather != MaskFeather::None
+                    && p.feather_pct <= 0.0
+                {
+                    p.feather_pct = 5.0;
+                }
                 // Greyed with no feather, as VEGAS's.
                 let on = p.feather != MaskFeather::None;
                 prop_name(ui, tr("Feather (%)"), on);
@@ -453,6 +463,7 @@ impl MaskEditor {
             };
             if primary {
                 self.held = mask_cursor(self.tool, self.spot(sp, &shapes, o));
+                self.drag_at = local;
             }
             match self.tool {
                 MaskTool::Normal => self.press_normal(&h, sp, &shapes, &mut m, local),
@@ -477,6 +488,15 @@ impl MaskEditor {
                     }
                 }
             }
+        }
+
+        // A drag edits the shapes at the needle's time it began at. The
+        // needle gone elsewhere meanwhile (Sync Cursor following playback,
+        // a drag the system never let go of), it ends: the shapes it took
+        // would be written at every time the needle passes, a keyframe at
+        // each.
+        if self.drag.is_some() && self.drag_at != local {
+            self.drag = None;
         }
 
         // The drag, from the shapes as they were when it began.

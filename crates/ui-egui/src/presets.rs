@@ -910,9 +910,9 @@ pub fn builtin_pan_crop() -> Vec<(&'static str, Transform)> {
 
 impl Presets {
     pub fn load() -> Presets {
-        std::fs::read_to_string(path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+        // A file that does not parse is set aside, not written over.
+        crate::safe_file::load_json::<Presets>(&path())
+            .0
             .unwrap_or_default()
     }
 
@@ -922,7 +922,7 @@ impl Presets {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&p, json).map_err(|e| e.to_string())
+        crate::safe_file::write(&p, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     pub fn user(&self, k: EffectKind) -> &[(String, Vec<f32>)] {

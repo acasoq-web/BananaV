@@ -422,6 +422,7 @@ fn slider_response(
     automation: bool,
 ) -> (Option<f32>, bool, egui::Response) {
     let resp = ui.interact(rect, id, Sense::click_and_drag());
+    resp.widget_info(|| egui::WidgetInfo::slider(true, f64::from(pos), tip));
     let painter = ui.painter();
     let y = rect.center().y + if thumb == Thumb::Triangle { 3.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(rect.left(), y - 1.0), pos2(rect.right(), y + 1.0));
@@ -1609,7 +1610,13 @@ pub(crate) fn ui(
                                 theme::text(),
                             );
                             value_text(view, ui, app, tid, HeaderValue::Volume, text, typed);
-                            Rect::from_min_size(pos2(x0 + 44.0, y - 8.0), vec2(38.0, 16.0))
+                            // Half the row with the pan's (the user's: the
+                            // two grow alike as the list widens).
+                            let end = if pan_too { middle - 6.0 } else { x0 + 82.0 };
+                            Rect::from_min_max(
+                                pos2(x0 + 44.0, y - 8.0),
+                                pos2(end.max(x0 + 82.0), y + 8.0),
+                            )
                         }
                         // Sliders alone: the volume's half the row when the
                         // pan has the other half.
@@ -1697,7 +1704,7 @@ pub(crate) fn ui(
                                 )
                             }
                             Tier::Values => {
-                                let px = vol.right() + 10.0;
+                                let px = middle + 4.0;
                                 let text = painter.text(
                                     pos2(px, y),
                                     Align2::LEFT_CENTER,
@@ -2896,6 +2903,51 @@ impl BananaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An audio header's volume and pan share its second row half and
+    /// half, both growing as the list widens (the user's), once their
+    /// values show.
+    #[test]
+    fn volume_and_pan_share_the_row_alike() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::set_language(crate::i18n::Language::English);
+        let mut app = crate::app::BananaApp::new(egui::Context::default());
+        app.welcome_for_review("closed");
+        app.load_demo();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1600.0, 960.0))
+            .build_ui_state(
+                |ui, app: &mut crate::app::BananaApp| {
+                    crate::apply_theme(ui.ctx());
+                    app.frame(ui);
+                },
+                app,
+            );
+        let mut widths = Vec::new();
+        for w in [300.0, 380.0] {
+            h.state_mut().settings.track_list_width = w;
+            h.run_steps(3);
+            let vol = h
+                .get_all_by_label_contains("Volume (")
+                .next()
+                .expect("volume")
+                .rect();
+            let pan = h
+                .get_all_by_label_contains("Pan (")
+                .next()
+                .expect("pan")
+                .rect();
+            assert!(
+                (vol.width() - pan.width()).abs() < 4.0,
+                "{w}: volume {} and pan {}",
+                vol.width(),
+                pan.width()
+            );
+            assert!(vol.right() < pan.left());
+            widths.push(vol.width());
+        }
+        assert!(widths[1] > widths[0] + 30.0, "{widths:?}");
+    }
 
     /// The level slider's fine drag, as VEGAS's: half a step a pixel,
     /// rounded away from zero, both ways.

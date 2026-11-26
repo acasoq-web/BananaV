@@ -37,6 +37,12 @@ use bv_timeline::{MediaInfo, Project, RenderQuality};
 use crate::RepaintFn;
 use crate::accel::{Accel, Painter};
 
+/// What tells two frames apart for the screen: which project state, the
+/// time, the size, and whether it is the exact frame or a stand-in drawn
+/// while the exact one is on its way (the same time and size: without it,
+/// the exact frame following a stand-in was never shown).
+pub type FrameKey = (u64, Tick, u32, u32, bool);
+
 /// A frame ready for the screen.
 #[derive(Debug)]
 pub struct PreviewFrame {
@@ -55,6 +61,19 @@ pub struct PreviewFrame {
     /// `false` while scrubbing, when pictures on the way to the frame stood
     /// in for some of its pictures (the exact frame follows).
     pub exact: bool,
+}
+
+impl PreviewFrame {
+    /// See [`FrameKey`].
+    pub fn key(&self) -> FrameKey {
+        (
+            self.generation,
+            self.time,
+            self.width,
+            self.height,
+            self.exact,
+        )
+    }
 }
 
 impl Drop for PreviewFrame {
@@ -104,6 +123,26 @@ pub(crate) struct Drawing {
     /// The pixels the screen shows the frames in: drawn larger, they come
     /// back reduced to it on the card ((0, 0): as drawn).
     pub(crate) room: (u32, u32),
+    /// Played faster than normal, the frames shown: every how many ticks
+    /// one is (a whole number of frames or not; 0: one after another).
+    pub(crate) stride: f64,
+}
+
+/// The frame shown at `t` when one is every `stride` ticks, and the one
+/// shown next: always the same ones however playback got there, so that
+/// the next is known and no decoder goes past one asked for after.
+pub(crate) fn strided(rate: bv_core::FrameRate, t: Tick, stride: f64) -> (Tick, Tick) {
+    // A frame's start, rounded to the tick, is that frame's.
+    const HAIR: i64 = 64;
+    let at = |k: f64| rate.snap_floor(Tick((k * stride).round() as i64 + HAIR));
+    let mut k = ((t.0 + 2 * HAIR) as f64 / stride).floor();
+    // Between two of them the one before shows.
+    if at(k) > t {
+        k -= 1.0;
+    } else if at(k + 1.0) <= t {
+        k += 1.0;
+    }
+    (at(k), at(k + 1.0))
 }
 
 /// A frame for the screen as `drawing` says, the size of its pixels, and
@@ -581,8 +620,25 @@ impl State {
         let next = req.ahead?;
         let step = Tick((next - req.time).0.max(1));
         let rate = req.project.settings.frame_rate;
+        let stride = req.drawing.stride;
+        // The one after `n`, and the first at `t` or after.
+        let after = |n: Tick| match stride > 0.0 {
+            true => strided(rate, n, stride).1,
+            false => rate.snap_floor(n + step),
+        };
+        let from = |t: Tick| {
+            let t = rate.snap_floor(t);
+            match stride > 0.0 {
+                true => {
+                    let (shown, then) = strided(rate, t, stride);
+                    if shown >= t { shown } else { then }
+                }
+                false => t,
+            }
+        };
         // Seconds of the timeline a second of playing shows.
-        let speed = step.0 as f64 / rate.frame_duration().0.max(1) as f64;
+        let ticks = if stride > 0.0 { stride } else { step.0 as f64 };
+        let speed = ticks / rate.frame_duration().0.max(1) as f64;
         // A little longer than frames take lately, and the screen's
         // refresh.
         let lead = Tick::from_seconds_f64((self.pace.cost * 1.25 + 0.008) * speed);
@@ -593,7 +649,7 @@ impl State {
         let keeps_up = self.pace.typical() < rate.frame_duration().as_seconds_f64() * 0.9;
         let mut t = match keeps_up {
             true => next,
-            false => rate.snap_floor(req.time + lead).max(next),
+            false => from(req.time + lead).max(next),
         };
         let newest = self
             .ahead
@@ -610,7 +666,7 @@ impl State {
             .filter(|&x| x >= req.time && x <= horizon)
             .max();
         if let Some(n) = newest {
-            t = t.max(rate.snap_floor(n + step));
+            t = t.max(after(n));
         }
         (t <= horizon).then_some(t)
     }
@@ -843,6 +899,9 @@ impl Worker {
     }
 
     fn run(mut self, shared: &Shared, repaint: &RepaintFn) {
+        // What effects' other frames take (memory, open files) is let go of
+        // a while after the last frame.
+        let mut holding = false;
         loop {
             let job = {
                 let mut st = lock(shared);
@@ -855,6 +914,8 @@ impl Worker {
                         drop(st);
                         self.pool.clear();
                         self.pool_media.clear();
+                        self.painter.let_go();
+                        holding = false;
                         st = lock(shared);
                         continue;
                     }
@@ -867,9 +928,24 @@ impl Worker {
                         self.readied = st.readied;
                         break Job::Ready(project, window, size);
                     }
+                    if holding {
+                        let (woken, late) = shared
+                            .1
+                            .wait_timeout(st, Duration::from_secs(12))
+                            .unwrap_or_else(|e| e.into_inner());
+                        st = woken;
+                        if late.timed_out() {
+                            drop(st);
+                            self.painter.let_go();
+                            holding = false;
+                            st = lock(shared);
+                        }
+                        continue;
+                    }
                     st = shared.1.wait(st).unwrap_or_else(|e| e.into_inner());
                 }
             };
+            holding = true;
             match job {
                 Job::Asked(req) => self.asked(shared, repaint, &req),
                 Job::Ahead(req, t) => self.ahead(shared, repaint, &req, t),
@@ -1349,6 +1425,40 @@ mod tests {
         st.drawing.push(r.key(rate.frame_start(due)));
         st.drawing.push(r.key(rate.frame_start(due + 1)));
         assert_eq!(st.next_ahead(&r), None);
+    }
+
+    /// Played faster, the frames shown are the same ones however playback
+    /// comes by them, each once, at their speed.
+    #[test]
+    fn faster_playback_shows_the_same_frames() {
+        for rate in [bv_core::FrameRate::FPS_59_94, bv_core::FrameRate::FPS_29_97] {
+            for speed in [1.3, 1.5, 2.0, 3.0, 4.0] {
+                let stride = rate.frame_duration().0 as f64 * speed;
+                let mut shown = Vec::new();
+                for n in 0..600 {
+                    let t = rate.frame_start(n);
+                    let (now, then) = strided(rate, t, stride);
+                    assert!(now <= t && then > t, "{speed}: {now:?} {t:?} {then:?}");
+                    assert_eq!(
+                        strided(rate, now, stride),
+                        (now, then),
+                        "{speed}, frame {n}"
+                    );
+                    if shown.last() != Some(&now) {
+                        if let Some(last) = shown.last() {
+                            assert_eq!(strided(rate, *last, stride).1, now);
+                        }
+                        shown.push(now);
+                    }
+                }
+                let want = 600.0 / speed;
+                assert!(
+                    (shown.len() as f64 - want).abs() <= 1.0,
+                    "{speed}: {}",
+                    shown.len()
+                );
+            }
+        }
     }
 
     /// A second thread is tried when one cannot keep up and the frames do

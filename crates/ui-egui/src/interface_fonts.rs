@@ -1,12 +1,12 @@
 //! The interface's fonts: egui's own (Latin, Greek, Cyrillic) and, behind
 //! them, the computer's Chinese, Japanese and Korean faces (Traditional
-//! Chinese's for its interface), one with many other scripts and one with
-//! Thai's — so what is typed in any language (a caption, a marker's name,
-//! a file's) and the Asian languages' interface show their letters instead
-//! of boxes. The faces' files are big (tens of megabytes
-//! together): they are read on a thread of their own and added when they
-//! are in, except for an Asian interface language, whose first frame needs
-//! them.
+//! Chinese's for its interface), one with many other scripts, one with
+//! Thai's and one with Arabic's — so what is typed in any language (a
+//! caption, a marker's name, a file's) and the Asian and Arabic interfaces
+//! show their letters instead of boxes. The faces' files are big (tens of
+//! megabytes together): they are read on a thread of their own and added
+//! when they are in, except for an Asian, Thai or Arabic interface
+//! language, whose first frame needs them.
 
 use crate::egui;
 use crate::i18n::Language;
@@ -31,6 +31,7 @@ fn needs_them(lang: Language) -> bool {
             | Language::Japanese
             | Language::Korean
             | Language::Thai
+            | Language::Arabic
     )
 }
 
@@ -103,6 +104,7 @@ mod tests {
             Cjk::ChineseTraditional
         );
         assert!(needs_them(Language::Thai));
+        assert!(needs_them(Language::Arabic));
         assert_eq!(first_for(Language::English), Cjk::Chinese);
         assert!(needs_them(Language::Japanese));
         assert!(!needs_them(Language::German));

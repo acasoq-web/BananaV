@@ -662,8 +662,8 @@ fn header(ui: &mut egui::Ui, app: &mut BananaApp, cx: Option<&Cx>) {
 /// Export LUT: the grade at this level as a `.cube` file.
 fn export_lut(app: &mut BananaApp, cx: &Cx) {
     let Some(path) = rfd::FileDialog::new()
-        .set_title(tr("Export LUT"))
-        .add_filter(tr("Cube LUT"), &["cube"])
+        .set_title(crate::i18n::os_text(tr("Export LUT")))
+        .add_filter(crate::i18n::os_text(tr("Cube LUT")), &["cube"])
         .set_file_name("Color Grading.cube")
         .save_file()
     else {
@@ -1394,7 +1394,7 @@ fn lut_column(ui: &mut egui::Ui, app: &mut BananaApp, cx: &Cx, k: usize, rect: R
     let (mut bar, mut body) = column(ui, rect, title, false);
     if crate::widgets::icon_button(&mut bar, Icon::Folder, tr("Browse")).clicked()
         && let Some(path) = rfd::FileDialog::new()
-            .add_filter(tr("Cube LUT"), &["cube"])
+            .add_filter(crate::i18n::os_text(tr("Cube LUT")), &["cube"])
             .pick_file()
     {
         let key = egui::Id::new(("cg-lut-file", k));

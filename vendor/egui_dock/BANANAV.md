@@ -34,5 +34,13 @@ see `LICENSE`), used through `[patch.crates-io]` in the workspace's
   of every tab bar for the viewer's own buttons (VEGAS's docked windows'
   Maximize and Restore), drawn for the window's tabs.
 
-Everything else is as published. To update it, copy the new release over
-`src/` and make these changes again.
+- A tab shows the moving pointer only while it is held (a press that may
+  drag it elsewhere), and so does the tab bar's empty room that drags the
+  whole window (`leaf.rs`): the arrow while the pointer is only over
+  them. egui_dock showed the moving pointer over every tab.
+
+Everything else is as published. To update it: the changes as a patch are
+`diff -ru <the published 0.21.1's src> vendor/egui_dock/src` (about 400
+lines in nine files) — copy the new release over `src/` and apply that
+patch, mending what the release moved. `cargo test -p bv-ui-egui dock`
+tells what was lost.

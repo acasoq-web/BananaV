@@ -17,7 +17,7 @@ use bv_ofx_sys::OfxPlugin;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn OfxGetNumberOfPlugins() -> c_int {
     // SAFETY: as the host calls this one.
-    unsafe { bv_effects::number_of_plugins() }
+    unsafe { bv_effects::number_of_plugins() + bv_banana::number_of_plugins() }
 }
 
 /// The specification's `OfxGetPlugin`.
@@ -27,6 +27,14 @@ pub unsafe extern "C" fn OfxGetNumberOfPlugins() -> c_int {
 #[allow(unsafe_code, non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn OfxGetPlugin(nth: c_int) -> *mut OfxPlugin {
+    // BananaV's own, then Banana Split's.
     // SAFETY: as the host calls this one.
-    unsafe { bv_effects::get_plugin(nth) }
+    unsafe {
+        let own = bv_effects::number_of_plugins();
+        if nth < own {
+            bv_effects::get_plugin(nth)
+        } else {
+            bv_banana::get_plugin(nth - own)
+        }
+    }
 }

@@ -41,6 +41,8 @@ pub(crate) struct Drag {
     /// The picture's middle and the point that stays (frame pixels).
     center: [f64; 2],
     anchor: [f64; 2],
+    /// The time it edits, the one a change went to when it began.
+    at: Tick,
 }
 
 /// The event the mode works on: the selected video event at the cursor
@@ -248,6 +250,10 @@ fn pointer_for(grip: Grip) -> CursorIcon {
 
 /// The button by Preview Quality.
 pub(crate) fn toolbar_button(ui: &mut egui::Ui, app: &mut BananaApp) {
+    // A mod's (Options › BananaV Mods…).
+    if !app.settings.mods.transform {
+        return;
+    }
     let on = app.preview.transform;
     if crate::widgets::icon_toggle(
         ui,
@@ -301,8 +307,10 @@ pub(crate) fn overlay(ui: &mut egui::Ui, app: &mut BananaApp, frame_rect: Rect, 
     let playing = app.is_playing();
     let about_middle = ui.input(|i| i.modifiers.alt);
     // A drag: the framing follows the pointer.
+    // The left button's (the wheel's pans and zooms the preview).
+    let primary = egui::PointerButton::Primary;
     if !playing
-        && resp.drag_started()
+        && resp.drag_started_by(primary)
         && let Some(o) = ui.input(|i| i.pointer.press_origin())
         && let Some(q) = corners(&tf, &place)
         && let Some(grip) = grip_at(&q, to_frame(o), reach)
@@ -319,10 +327,22 @@ pub(crate) fn overlay(ui: &mut egui::Ui, app: &mut BananaApp, frame_rect: Rect, 
             start: tf,
             center: center_of(&tf, &place),
             anchor,
+            at,
         });
     }
+    // The cursor gone elsewhere meanwhile (playback started, a drag the
+    // system never let go of), the drag ends: it would set the framing at
+    // every time the cursor passes, a keyframe at each.
+    if app
+        .preview
+        .transform_drag
+        .as_ref()
+        .is_some_and(|d| d.at != at)
+    {
+        app.preview.transform_drag = None;
+    }
     if let Some(d) = app.preview.transform_drag.clone() {
-        if resp.dragged()
+        if resp.dragged_by(primary)
             && d.clip == clip
             && let Some(p) = ui.input(|i| i.pointer.latest_pos())
         {
@@ -334,6 +354,7 @@ pub(crate) fn overlay(ui: &mut egui::Ui, app: &mut BananaApp, frame_rect: Rect, 
             app.preview.transform_drag = None;
         }
     } else if !playing
+        && !ui.input(|i| i.pointer.middle_down())
         && let Some(p) = resp.hover_pos()
         && let Some(q) = corners(&tf, &place)
         && let Some(grip) = grip_at(&q, to_frame(p), reach)
@@ -378,6 +399,9 @@ impl BananaApp {
     /// Transform mode on, its event at `scale` (×) and moved right a tenth
     /// of the frame (screen tests).
     pub fn transform_for_review(&mut self, scale: f64) {
+        // Its mod on (never saved).
+        self.settings = self.settings.unsaved();
+        self.settings.mods.transform = true;
         self.preview.transform = true;
         if let Some(clip) = target(self)
             && let Some((tf, place, at)) = framing(self, clip)
@@ -441,6 +465,7 @@ mod tests {
             start,
             center: center_of(&start, &p),
             anchor,
+            at: Tick::ZERO,
         };
         // Moved 100 right, 50 down.
         let moved = dragged(

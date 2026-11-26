@@ -138,6 +138,9 @@ pub struct State {
     modifiers: egui::Modifiers,
 
     pointer_pos_in_points: Option<egui::Pos2>,
+    /// BananaV: where the pointer was last seen, kept after it left the
+    /// window, for a release that comes when its position is unknown.
+    last_pointer_pos_in_points: Option<egui::Pos2>,
     any_pointer_button_down: bool,
     current_cursor_icon: Option<egui::CursorIcon>,
 
@@ -202,6 +205,7 @@ impl State {
             egui_input,
             modifiers: egui::Modifiers::default(),
             pointer_pos_in_points: None,
+            last_pointer_pos_in_points: None,
             any_pointer_button_down: false,
             current_cursor_icon: None,
             current_custom_cursor: None,
@@ -853,10 +857,21 @@ impl State {
         state: winit::event::ElementState,
         button: winit::event::MouseButton,
     ) {
-        if let Some(pos) = self.pointer_pos_in_points
+        let pressed = state == winit::event::ElementState::Pressed;
+        // BananaV: a release is never dropped. On macOS the window hears
+        // that the pointer left even while a button drags, and a release
+        // let go outside the window can come with no move after that: it
+        // was dropped, and egui went on dragging what was pressed with no
+        // button down. A release goes where the pointer was last seen.
+        let pos = if pressed {
+            self.pointer_pos_in_points
+        } else {
+            self.pointer_pos_in_points
+                .or(self.last_pointer_pos_in_points)
+        };
+        if let Some(pos) = pos
             && let Some(button) = translate_mouse_button(button)
         {
-            let pressed = state == winit::event::ElementState::Pressed;
 
             self.egui_input.events.push(egui::Event::PointerButton {
                 pos,
@@ -905,6 +920,7 @@ impl State {
             pos_in_pixels.y as f32 / pixels_per_point,
         );
         self.pointer_pos_in_points = Some(pos_in_points);
+        self.last_pointer_pos_in_points = Some(pos_in_points);
 
         if self.simulate_touch_screen {
             if self.any_pointer_button_down {

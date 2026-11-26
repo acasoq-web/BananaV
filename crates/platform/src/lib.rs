@@ -7,14 +7,17 @@
 //! It also tells how much room a disk has left and the time of day, and
 //! what long jobs need (see [`Usage`], [`taskbar_progress`]).
 
+mod awake;
 mod crash;
 mod disc;
 mod library;
 mod midi;
 mod monitor;
 mod plugin_window;
+mod process;
 mod screen;
 
+pub use awake::KeepAwake;
 pub use crash::{on_crash, set_restart};
 pub use disc::{
     BurnError, Burner, CD_1X, CD_SECTOR, CdOptions, CdTrackData, DVD_1X, burn_audio_disc,
@@ -27,6 +30,7 @@ pub use plugin_window::{
     EDITOR_POINTS, EMBEDDED_EDITORS, EmbeddedSizer, EmbeddedWindow, PLUGIN_WINDOWS, PluginWindow,
     Resizer,
 };
+pub use process::{end_with_this_process, protocol_output};
 pub use screen::{AppWindow, Grab, app_windows, grab_area, grab_window};
 
 /// Where this user's settings go: `%APPDATA%` on Windows,
@@ -455,10 +459,13 @@ fn wake() {
 }
 
 /// Called on the main thread before the window library runs the program
-/// (macOS: Quit and the files Finder opens get BananaV's answers).
+/// (macOS: Quit and the files Finder opens get BananaV's answers; Windows:
+/// COM's shared apartment kept for the program's life).
 pub fn before_run() {
     #[cfg(target_os = "macos")]
     imp::before_run();
+    #[cfg(windows)]
+    imp::keep_com();
 }
 
 /// This process shows nothing: a plug-in scan's child (macOS: no icon in
@@ -491,6 +498,30 @@ mod imp {
         SetWindowLongPtrW, SetWindowPos,
     };
     use windows::core::BOOL;
+
+    /// Keeps COM's multithreaded apartment for the program's life (the
+    /// first call does; the others nothing).
+    ///
+    /// That apartment is the whole process's: while it is there, threads
+    /// that never started COM use it too (the shell does, looking up what
+    /// opens a file type). It ends when the last thread that started it
+    /// gives it back, and the system then unloads the libraries COM loaded
+    /// for it — under the threads still running them. Listing the drives
+    /// that write discs on a thread of its own did that to a thread asking
+    /// what opens a file type: an access violation in an unloaded
+    /// `Windows.System.Launcher.dll`, once in some hundred times. With a
+    /// count of BananaV's own on the apartment, never given back, a thread
+    /// that starts COM and gives it back ends nothing.
+    #[allow(unsafe_code)]
+    pub fn keep_com() {
+        use windows::Win32::System::Com::CoIncrementMTAUsage;
+        static KEPT: std::sync::Once = std::sync::Once::new();
+        KEPT.call_once(|| {
+            // SAFETY: no arguments; what it returns would only give the
+            // count back, which never happens.
+            let _ = unsafe { CoIncrementMTAUsage() };
+        });
+    }
 
     /// Top-level windows of this process, with their titles.
     struct Windows {

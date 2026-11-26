@@ -385,6 +385,35 @@ fn a_plugin_without_its_source_fails_without_crashing() {
     assert_eq!(e.to_string(), "Render answered kOfxStatFailed");
 }
 
+/// A clip whose picture fails as it is made (a failure of BananaV's own).
+struct Broken;
+
+impl ClipSource for Broken {
+    fn picture(&self, _time: f64) -> Option<Arc<ImageRgbaF32>> {
+        panic!("no picture here (the test's own failure)")
+    }
+
+    fn full_size(&self) -> (f64, f64) {
+        (2.0, 2.0)
+    }
+}
+
+/// A failure of BananaV's own while a plug-in fetches a clip's picture
+/// does not leave through the plug-in's code (that would end the program):
+/// the plug-in hears the picture could not be had, and the render fails.
+#[test]
+fn a_source_that_fails_as_its_picture_is_fetched_fails_the_render_only() {
+    let inst = Instance::new(
+        plugin("org.bananav.test.Invert"),
+        Context::Filter,
+        &setup(2.0, 2.0),
+    )
+    .unwrap();
+    inst.connect("Source", Arc::new(Broken));
+    let e = inst.render(&request(0.0, 2, 2)).unwrap_err();
+    assert_eq!(e.to_string(), "Render answered kOfxStatFailed");
+}
+
 /// The test plug-ins built as a library, as a vendor ships them.
 fn built_library() -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -786,4 +815,82 @@ fn a_plug_in_that_crashes_is_switched_off_not_the_host() {
         // Its next render fails at once, without calling it.
         assert!(inst.render(&request(0.0, 16, 16)).is_err());
     }
+}
+
+/// A binary's functions listing its plug-ins, and the actions that load
+/// and describe them, are calls OpenFX wants made one at a time: two
+/// threads that first use two of its plug-ins take turns.
+#[allow(unsafe_code)]
+#[test]
+fn a_binarys_plug_ins_load_one_at_a_time() {
+    use std::ffi::c_int;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static INSIDE: AtomicUsize = AtomicUsize::new(0);
+    static TOGETHER: AtomicBool = AtomicBool::new(false);
+    /// The test plug-ins counted slowly, noting another thread counting
+    /// them meanwhile.
+    extern "C" fn count() -> c_int {
+        if INSIDE.fetch_add(1, Ordering::SeqCst) > 0 {
+            TOGETHER.store(true, Ordering::SeqCst);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        INSIDE.fetch_sub(1, Ordering::SeqCst);
+        // SAFETY: the test plug-ins' own function.
+        unsafe { bv_ofx_testplug::OfxGetNumberOfPlugins() }
+    }
+    let bin = Binary::built_in("testplug-turns", count, bv_ofx_testplug::OfxGetPlugin, None);
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|s| {
+        for index in [0, 1] {
+            let (bin, start) = (&bin, &start);
+            s.spawn(move || {
+                start.wait();
+                bin.plugin(index).expect("it loads alone");
+            });
+        }
+    });
+    assert!(
+        !TOGETHER.load(Ordering::SeqCst),
+        "two threads were in the binary at once"
+    );
+}
+
+/// A binary that crashes as it lists its plug-ins — counting them, or
+/// handing one over — is switched off as one that crashes in an action:
+/// the host goes on, and it is not asked again. Windows only (the guard
+/// is structured exception handling).
+#[cfg(all(windows, target_env = "msvc"))]
+#[allow(unsafe_code)]
+#[test]
+fn a_binary_that_crashes_listing_its_plug_ins_is_switched_off_not_the_host() {
+    use std::ffi::c_int;
+    /// A crash: a write where nothing is.
+    fn crash() {
+        // SAFETY: none — an access violation is the point.
+        unsafe { std::ptr::write_volatile(16 as *mut u32, 1) };
+    }
+    extern "C" fn crashing_count() -> c_int {
+        crash();
+        1
+    }
+    extern "C" fn one() -> c_int {
+        1
+    }
+    extern "C" fn crashing_get(_nth: c_int) -> *mut bv_ofx_sys::OfxPlugin {
+        crash();
+        std::ptr::null_mut()
+    }
+    let counting = Binary::built_in(
+        "crash-counting",
+        crashing_count,
+        bv_ofx_testplug::OfxGetPlugin,
+        None,
+    );
+    assert!(matches!(counting.plugins(), Err(bv_ofx::Error::Crashed(_))));
+    assert!(counting.crashed(), "switched off");
+    let handing = Binary::built_in("crash-handing", one, crashing_get, None);
+    assert!(matches!(handing.plugin(0), Err(bv_ofx::Error::Crashed(_))));
+    assert!(handing.crashed(), "switched off");
+    // Switched off, its functions are not called again.
+    assert!(matches!(handing.plugins(), Err(bv_ofx::Error::Crashed(_))));
 }

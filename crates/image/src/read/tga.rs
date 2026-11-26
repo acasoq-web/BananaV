@@ -1,7 +1,7 @@
 //! Truevision TGA: color-mapped, true-color (15, 16, 24 and 32 bits) and
 //! gray, raw or run-length encoded, any of the four origins.
 
-use super::{Picture, ReadError, Result, corrupt, unsupported};
+use super::{Picture, ReadError, Result, checked_size, corrupt, pixel_count, unsupported};
 
 pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let bad = || ReadError::Corrupt("damaged TGA".into());
@@ -25,24 +25,40 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let rle = kind >= 9;
     let mapped = kind & 7 == 1;
     let gray = kind & 7 == 3;
-    if !matches!(depth, 8 | 15 | 16 | 24 | 32) || (mapped && depth != 8 && depth != 16) {
+    // True color is 15, 16, 24 or 32 bits: 8 are an index or a gray.
+    if !matches!(depth, 8 | 15 | 16 | 24 | 32)
+        || (mapped && depth != 8 && depth != 16)
+        || (!mapped && !gray && depth == 8)
+    {
         return unsupported(format!("TGA of {depth} bits"));
     }
+    let n = pixel_count(width, height)?;
     let mut pos = 18 + id_len;
     // The color map (also skipped when the image does not use it).
     let mut cmap = Vec::new();
     if cmap_type == 1 {
         let entry = cmap_bits.div_ceil(8);
-        for i in 0..cmap_len {
-            let e = d
-                .get(pos + i * entry..pos + i * entry + entry)
-                .ok_or_else(bad)?;
-            cmap.push(color(e, cmap_bits));
+        // Its entries are colors of 15, 16, 24 or 32 bits: a map of any
+        // other size is only passed over, and an image that uses it is
+        // refused.
+        if matches!(cmap_bits, 15 | 16 | 24 | 32) {
+            for i in 0..cmap_len {
+                let e = d
+                    .get(pos + i * entry..pos + i * entry + entry)
+                    .ok_or_else(bad)?;
+                cmap.push(color(e, cmap_bits));
+            }
+        } else if mapped {
+            return unsupported(format!("TGA color map of {cmap_bits} bits"));
         }
         pos += cmap_len * entry;
     }
     let bytes = depth.div_ceil(8);
-    let n = width * height;
+    // Raw pixels are all in the file, or it is cut short: their room is
+    // not made on the header's word alone.
+    if !rle && d.len().saturating_sub(pos) < checked_size(n, bytes)? {
+        return corrupt("truncated TGA");
+    }
     // Pixels in file order.
     let mut px: Vec<[u8; 4]> = Vec::with_capacity(n);
     let pixel = |e: &[u8]| -> [u8; 4] {
@@ -104,7 +120,7 @@ pub(super) fn read(d: &[u8]) -> Result<Picture> {
     let premultiplied = footer_alpha == Some(4);
     let right_to_left = desc & 0x10 != 0;
     let top_down = desc & 0x20 != 0;
-    let mut out = vec![0u8; n * 4];
+    let mut out = vec![0u8; checked_size(n, 4)?];
     for y in 0..height {
         let sy = if top_down { y } else { height - 1 - y };
         for x in 0..width {
@@ -181,5 +197,77 @@ mod tests {
         // The file's first row is the bottom one.
         assert_eq!(&px[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
         assert_eq!(&px[8..], &[0, 0, 255, 255, 0, 0, 255, 255]);
+    }
+
+    /// A TGA header: the color map's use, length and entry size, the
+    /// image's type, its size and its depth.
+    fn header(
+        cmap: u8,
+        cmap_len: u8,
+        cmap_bits: u8,
+        kind: u8,
+        size: [u16; 2],
+        depth: u8,
+    ) -> Vec<u8> {
+        let [w, h] = size.map(u16::to_le_bytes);
+        vec![
+            0, cmap, kind, 0, 0, cmap_len, 0, cmap_bits, 0, 0, 0, 0, w[0], w[1], h[0], h[1], depth,
+            0,
+        ]
+    }
+
+    #[test]
+    fn color_sizes_without_a_layout_are_refused() {
+        // True color of 8 bits; a color map of 8-bit entries, and of none.
+        for (mut d, pixels) in [
+            (header(0, 0, 0, 2, [1, 1], 8), 1),
+            (header(1, 1, 8, 1, [1, 1], 8), 2),
+            (header(1, 1, 0, 1, [1, 1], 8), 1),
+        ] {
+            d.extend(std::iter::repeat_n(7, pixels));
+            assert!(matches!(
+                super::read(&d),
+                Err(crate::read::ReadError::Unsupported(_))
+            ));
+        }
+        // Such a map before true color pixels is only passed over.
+        let mut d = header(1, 2, 8, 2, [1, 1], 24);
+        d.extend([9, 9, 1, 2, 3]);
+        let PictureData::Rgba8(px) = super::read(&d).unwrap().data else {
+            panic!()
+        };
+        assert_eq!(px, [3, 2, 1, 255]);
+    }
+
+    #[test]
+    fn raw_pixels_missing_from_the_file_are_refused() {
+        // 2×2 of 24 bits with one pixel short.
+        let mut d = header(0, 0, 0, 2, [2, 2], 24);
+        d.extend([0u8; 9]);
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Corrupt(_))
+        ));
+        d.extend([0u8; 3]);
+        assert!(super::read(&d).is_ok());
+    }
+
+    #[test]
+    fn a_picture_over_the_pixel_budget_is_refused() {
+        // 18 bytes that claim 65535 × 65535 pixels, raw and run-length
+        // encoded.
+        for kind in [2, 10] {
+            let d = header(0, 0, 0, kind, [65_535, 65_535], 24);
+            assert!(matches!(
+                super::read(&d),
+                Err(crate::read::ReadError::Unsupported(_))
+            ));
+        }
+        // Within the budget, raw: the pixels are not there.
+        let d = header(0, 0, 0, 2, [20_000, 20_000], 24);
+        assert!(matches!(
+            super::read(&d),
+            Err(crate::read::ReadError::Corrupt(_))
+        ));
     }
 }

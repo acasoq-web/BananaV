@@ -349,7 +349,7 @@ fn write_projects(projects: &[(PathBuf, String)]) -> io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, text)?;
+        crate::safe_file::save(path, text.as_bytes())?;
     }
     Ok(())
 }
@@ -659,8 +659,8 @@ pub(crate) fn archive_dialog(ctx: &egui::Context, app: &mut BananaApp) {
                                 .file_name()
                                 .map_or_else(String::new, |n| n.to_string_lossy().to_string());
                             if let Some(p) = rfd::FileDialog::new()
-                                .set_title(tr("Archive"))
-                                .add_filter(tr("BananaV Project"), &["bvproj"])
+                                .set_title(crate::i18n::os_text(tr("Archive")))
+                                .add_filter(crate::i18n::os_text(tr("BananaV Project")), &["bvproj"])
                                 .set_file_name(name)
                                 .save_file()
                             {
@@ -781,7 +781,7 @@ fn start_archive(app: &mut BananaApp, path: PathBuf, plan: CopyPlan) {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, text)?;
+        crate::safe_file::save(&path, text.as_bytes())?;
         Ok(Done::Archived(path, missing))
     }));
 }

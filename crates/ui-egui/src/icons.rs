@@ -202,6 +202,16 @@ pub enum Icon {
     SaveBank,
     /// Invert Track Phase: two waves crossing.
     Phase,
+    /// The editing tools of the Normal Edit Tool's menu: Shuffle (two
+    /// events trading places), Slip (the media sliding inside an event),
+    /// Slide (an event sliding between its neighbours), Time
+    /// Stretch/Compress (an event with a spring) and Split Trim (an event
+    /// cut where it is trimmed).
+    ShuffleTool,
+    SlipTool,
+    SlideTool,
+    StretchTool,
+    SplitTrimTool,
 }
 
 /// The grid the paths are drawn on.
@@ -272,7 +282,7 @@ struct Layer {
     subs: Vec<Sub>,
 }
 
-const COUNT: usize = Icon::Phase as usize + 1;
+const COUNT: usize = Icon::SplitTrimTool as usize + 1;
 
 /// Each icon's layers, made the first time it is drawn.
 static LAYERS: [OnceLock<Vec<Layer>>; COUNT] = [const { OnceLock::new() }; COUNT];

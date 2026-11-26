@@ -701,6 +701,13 @@ fn captura_render() {
     snap(&mut h, "render_imagens");
     tree_row(&mut h, "Audio");
     snap(&mut h, "render_audio");
+    // Every branch open: the tree scrolls instead of going on past it.
+    for label in ["Audio", "Video"] {
+        let row = tree_row_rect(&h, label);
+        click_at(&mut h, egui::pos2(row.left() + 12.0, row.center().y));
+        settle(&mut h);
+    }
+    snap(&mut h, "render_arvore_aberta");
     h.get_by_label("Filter the templates").click();
     snap(&mut h, "render_filtro");
     h.key_press(egui::Key::Escape);
@@ -1100,14 +1107,17 @@ fn captura_miniaturas() {
 /// Clicks the Render window's tree row `label` (other widgets may have the
 /// same label: the row is the one in the tree's column, below "Use Case").
 fn tree_row(h: &mut Harness<'_, BananaApp>, label: &str) {
-    let use_case = h.get_by_label("Use Case").rect();
-    let row = h
-        .get_all_by_label(label)
-        .map(|n| n.rect())
-        .find(|r| r.top() > use_case.top() && (r.left() - use_case.left()).abs() < 2.0)
-        .expect("tree row");
+    let row = tree_row_rect(h, label);
     click_at(h, row.center());
     settle(h);
+}
+
+fn tree_row_rect(h: &Harness<'_, BananaApp>, label: &str) -> egui::Rect {
+    let use_case = h.get_by_label("Use Case").rect();
+    h.get_all_by_label(label)
+        .map(|n| n.rect())
+        .find(|r| r.top() > use_case.top() && (r.left() - use_case.left()).abs() < 2.0)
+        .expect("tree row")
 }
 
 /// The test OFX plug-ins, as if a folder had them (they are built into the
@@ -7237,6 +7247,12 @@ fn captura_paineis_de_geradores() {
         settle(&mut h);
         h.state_mut().show_tab_named("Media Generators");
         settle(&mut h);
+        // Scrolled into view first: the pack's are many.
+        h.get_all_by_label(generator)
+            .find(|n| n.accesskit_node().toggled().is_some())
+            .expect(generator)
+            .scroll_to_me();
+        settle(&mut h);
         h.get_all_by_label(generator)
             .find(|n| n.accesskit_node().toggled().is_some())
             .expect(generator)
@@ -7380,6 +7396,52 @@ fn captura_alcas_padrao() {
             snap(&mut h, "alca_spherize_arrastada");
         }
     }
+}
+
+/// Lightning's path on the preview: its small pluses dragged out into
+/// places it bends through, which the panel then shows; undone, they go.
+#[test]
+#[ignore = "renders images for visual review"]
+fn captura_raio() {
+    let mut app = new_app();
+    app.load_demo();
+    app.welcome_for_review("closed");
+    assert!(app.plugin_effect_for_review("org.bananav.bananasplit.Lightning"));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 960.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .build_ui_state(
+            |ui, app: &mut BananaApp| {
+                apply_theme(ui.ctx());
+                app.frame(ui);
+            },
+            app,
+        );
+    settle(&mut h);
+    snap(&mut h, "raio");
+    // A part of the frame, on the preview.
+    let at = |x: f32, y: f32| egui::pos2(1129.0 + (x - 0.5) * 668.0, 315.0 - (y - 0.5) * 376.0);
+    drag(&mut h, at(0.475, 0.525), at(0.75, 0.62), None);
+    assert_eq!(corrector_value(&h, "points"), [1.0]);
+    let c = corrector_value(&h, "point1");
+    assert!(
+        (c[0] - 0.75).abs() < 0.02 && (c[1] - 0.62).abs() < 0.02,
+        "{c:?}"
+    );
+    // Between the start and it, off to the left.
+    // Halfway along the curve there.
+    drag(&mut h, at(0.5375, 0.848), at(0.3, 0.75), None);
+    assert_eq!(corrector_value(&h, "points"), [2.0]);
+    assert!((corrector_value(&h, "point2")[0] - 0.75).abs() < 0.02);
+    snap(&mut h, "raio_curva");
+    assert!(h.query_by_label("Point 2").is_some());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    settle(&mut h);
+    assert_eq!(corrector_value(&h, "points"), [1.0]);
+    snap(&mut h, "raio_desfeito");
+    assert!(h.query_by_label("Point 2").is_none());
+    assert!(h.query_by_label("Point 1").is_some());
 }
 
 /// The panels of the audio effects that follow VEGAS's, each on the demo's
