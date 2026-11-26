@@ -2276,13 +2276,9 @@ mod tests {
             },
             SIZE,
         );
-        for k in 0..f.numbers.len() {
+        for (k, n) in f.numbers.iter().enumerate() {
             let expected = if k % 2 == 1 { 2.0 } else { 0.0 };
-            assert!(
-                (f.numbers[k][0] - expected).abs() < 1e-6,
-                "{k}: {:?}",
-                f.numbers[k]
-            );
+            assert!((n[0] - expected).abs() < 1e-6, "{k}: {n:?}");
         }
         // An unticked component stays as filmed.
         let mut s = smooth(Model::Similar);

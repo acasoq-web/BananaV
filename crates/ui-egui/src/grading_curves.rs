@@ -356,9 +356,9 @@ pub fn editor(
         egui::Popup::menu(&b)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                for k in 0..n {
+                for (k, on) in view.active.iter_mut().enumerate().take(n) {
                     let name = labels.get(k).cloned().unwrap_or_default();
-                    crate::widgets::checkbox(ui, &mut view.active[k], &name);
+                    crate::widgets::checkbox(ui, on, &name);
                 }
             });
     }

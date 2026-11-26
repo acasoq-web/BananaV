@@ -930,11 +930,11 @@ fn paint_graph(
 fn toolbar(ui: &mut Ui, view: &mut View, s: &mut Settings) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        for b in 0..eq::BANDS {
-            if !s.bands[b].used {
+        for (b, slot) in s.bands.iter_mut().enumerate().take(eq::BANDS) {
+            if !slot.used {
                 continue;
             }
-            let band = s.bands[b];
+            let band = *slot;
             let (rect, resp) = ui.allocate_exact_size(CHIP, Sense::click());
             resp.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, trf!("Band {}", b + 1))
@@ -945,7 +945,7 @@ fn toolbar(ui: &mut Ui, view: &mut View, s: &mut Settings) {
                     .interact_pointer_pos()
                     .is_some_and(|p| p.x < rect.left() + 18.0);
                 if on_dot {
-                    s.bands[b].on = !band.on;
+                    slot.on = !band.on;
                 } else {
                     view.picked = Some(b);
                 }

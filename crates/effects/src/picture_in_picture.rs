@@ -1496,8 +1496,8 @@ mod tests {
             scale: [1.0; 2],
             ..start
         };
-        for i in 0..4 {
-            assert!(near(s.corners[i], turned.quad(ASPECT)[i], 1e-9));
+        for (c, q) in s.corners.iter().zip(turned.quad(ASPECT)) {
+            assert!(near(*c, q, 1e-9));
         }
     }
 
